@@ -18,7 +18,7 @@ export type AttendanceStatus =
   | 'leave'
   | 'holiday';
 
-export type LeaveType = 'leave' | 'holiday';
+export type LeaveType = 'casual' | 'sick' | 'earned' | 'holiday' | 'other';
 
 // ---------------------------------------------------------------------------
 // Domain models — mirror DB columns exactly
@@ -150,8 +150,8 @@ export interface LeaveRecord {
   /** NULL means the record applies to all employees (public holiday) */
   employee_id: number | null;
   leave_date: string; // "YYYY-MM-DD"
-  type: LeaveType;
-  description: string | null;
+  leave_type: LeaveType;
+  notes: string | null;
   created_by: number | null;
   created_at: Date;
 }

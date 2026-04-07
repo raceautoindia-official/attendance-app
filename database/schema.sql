@@ -241,15 +241,15 @@ CREATE TABLE leave_records (
   id           INT          NOT NULL AUTO_INCREMENT,
   employee_id  INT          NULL,
   leave_date   DATE         NOT NULL,
-  type         ENUM('leave','holiday') NOT NULL,
-  description  VARCHAR(200) NULL,
+  leave_type   ENUM('casual','sick','earned','holiday','other') NOT NULL,
+  notes        VARCHAR(500) NULL,
   created_by   INT          NULL,
   created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
   PRIMARY KEY (id),
   INDEX idx_leave_records_employee_id (employee_id),
   INDEX idx_leave_records_leave_date  (leave_date),
-  INDEX idx_leave_records_type        (type),
+  INDEX idx_leave_records_type        (leave_type),
 
   CONSTRAINT fk_leave_records_employee
     FOREIGN KEY (employee_id) REFERENCES employees (id)

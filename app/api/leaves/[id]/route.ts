@@ -59,7 +59,7 @@ export async function DELETE(request: NextRequest, context: Params) {
     details: {
       employee_id: existing.employee_id,
       leave_date: existing.leave_date,
-      leave_type: existing.type,
+      leave_type: existing.leave_type,
     },
     ip_address: request.headers.get('x-forwarded-for')?.split(',')[0].trim() ?? null,
   });

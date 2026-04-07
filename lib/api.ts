@@ -47,8 +47,9 @@ export async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
         logout();
         throw new ApiError(401, 'Unauthorized');
       }
-      const retryJson = await retry.json();
-      if (!retry.ok) throw new ApiError(retry.status, retryJson?.error ?? `HTTP ${retry.status}`);
+      let retryJson: Record<string, unknown>;
+      try { retryJson = await retry.json(); } catch { retryJson = {}; }
+      if (!retry.ok) throw new ApiError(retry.status, (retryJson?.error as string) ?? `HTTP ${retry.status}`);
       return retryJson as T;
     }
 

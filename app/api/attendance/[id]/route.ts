@@ -115,13 +115,17 @@ export async function PUT(
     );
   }
 
-  // 5. Recalculate total_minutes when both times are available
+  // 5. Validate clock ordering then recalculate total_minutes
+  if (newClockIn && newClockOut && newClockOut <= newClockIn) {
+    return NextResponse.json<ApiResponse>(
+      { success: false, error: 'clock_out_utc must be after clock_in_utc' },
+      { status: 400 },
+    );
+  }
+
   let totalMinutes: number | null = existing.total_minutes;
   if (newClockIn && newClockOut) {
-    totalMinutes = Math.max(
-      0,
-      Math.round((newClockOut.getTime() - newClockIn.getTime()) / 60_000),
-    );
+    totalMinutes = Math.round((newClockOut.getTime() - newClockIn.getTime()) / 60_000);
   } else if (!newClockOut) {
     totalMinutes = null;
   }

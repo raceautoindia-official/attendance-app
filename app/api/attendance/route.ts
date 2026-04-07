@@ -29,6 +29,7 @@ export async function GET(request: NextRequest) {
   const fromDate = searchParams.get('from_date');
   const toDate = searchParams.get('to_date');
   const employeeId = searchParams.get('employee_id');
+  const employeeSearch = searchParams.get('employee_search');
   const status = searchParams.get('status');
 
   // ---------------------------------------------------------------------------
@@ -64,6 +65,11 @@ export async function GET(request: NextRequest) {
   if (employeeId) {
     conditions.push('a.employee_id = ?');
     params.push(parseInt(employeeId, 10));
+  }
+
+  if (employeeSearch) {
+    conditions.push('(e.name LIKE ? OR e.emp_id LIKE ?)');
+    params.push(`%${employeeSearch}%`, `%${employeeSearch}%`);
   }
 
   // Validate status value against allowed enum before injecting into SQL

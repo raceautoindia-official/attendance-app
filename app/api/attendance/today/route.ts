@@ -67,12 +67,13 @@ export async function GET(request: NextRequest) {
 
   // mysql2 returns JSON columns as strings; parse them before sending
   if (schedule) {
-    if (typeof schedule.shift === 'string') {
-      (schedule as unknown as Record<string, unknown>).shift = JSON.parse(schedule.shift as unknown as string);
-    }
-    if (typeof schedule.location === 'string') {
-      (schedule as unknown as Record<string, unknown>).location = JSON.parse(schedule.location as unknown as string);
-    }
+    const s = schedule as unknown as Record<string, unknown>;
+    try {
+      if (typeof s.shift === 'string') s.shift = JSON.parse(s.shift as string);
+    } catch { s.shift = null; }
+    try {
+      if (typeof s.location === 'string') s.location = JSON.parse(s.location as string);
+    } catch { s.location = null; }
   }
 
   return NextResponse.json<ApiResponse<TodayResponse>>({
