@@ -32,7 +32,7 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [webAuthnPending, setWebAuthnPending] = useState(false);
 
-  const { register, handleSubmit, formState: { errors, isSubmitting }, getValues } = useForm<FormValues>({
+  const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm<FormValues>({
     resolver: zodResolver(schema),
   });
 
@@ -114,8 +114,6 @@ export default function LoginPage() {
       setError('An unexpected error occurred. Please try again.');
     }
   }
-
-  const _ = getValues; // suppress unused warning
 
   return (
     <div className="w-full max-w-sm space-y-6">

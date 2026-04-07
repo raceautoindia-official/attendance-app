@@ -3,9 +3,9 @@ import { requireAuth } from '@/lib/auth';
 import { generateRegistrationOptions } from '@/lib/webauthn';
 import type { ApiResponse, Employee } from '@/lib/types';
 
-// POST /api/auth/webauthn/register
+// GET /api/auth/webauthn/register
 // Requires a valid access token — employee must have completed PIN login first.
-export async function POST(request: NextRequest) {
+export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
   if (auth instanceof NextResponse) return auth;
 
