@@ -42,7 +42,7 @@ const empSchema = z.object({
   phone: z.string().optional(),
   role: z.enum(['employee', 'manager', 'super_admin']),
   department: z.string().optional(),
-  manager_id: z.coerce.number().int().positive().nullable().optional(),
+  manager_id: z.preprocess(v => (v === '' || v === null || v === undefined) ? null : Number(v), z.number().int().positive().nullable().optional()),
   pin: z.string().length(6, 'PIN must be 6 digits').regex(/^\d+$/, 'Numbers only'),
 });
 

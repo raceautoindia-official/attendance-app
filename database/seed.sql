@@ -13,49 +13,49 @@ USE attendance_db;
 -- ---------------------------------------------------------------------------
 -- -- employees
 -- -- ---------------------------------------------------------------------------
--- INSERT INTO employees
---   (emp_id, name, email, phone, pin_hash, role, is_active, manager_id)
--- VALUES
---   (
---     'ADMIN001',
---     'Super Admin',
---     'admin@company.com',
---     NULL,
---     '$2b$12$l3.u0oTGfAVapllBd4U2ZeV.3dr6Ki3IoTynFd/OC/CrpcjTEmIDy',
---     'super_admin',
---     TRUE,
---     NULL
---   ),
---   (
---     'MGR001',
---     'Test Manager',
---     'manager@company.com',
---     NULL,
---     '$2b$12$M60ClJTAZQeu7/kST3A34OnZAkLstf1BX67KVXJEDVc3uhK8ZDRLW',
---     'manager',
---     TRUE,
---     1   -- managed by ADMIN001 (id = 1)
---   ),
---   (
---     'EMP001',
---     'Test Employee One',
---     'emp001@company.com',
---     NULL,
---     '$2b$12$UASDLbDiJDXmYMEbUvATj.LTEsHuXIaudvDl5efwz9myDzvJq6SL2',
---     'employee',
---     TRUE,
---     2   -- managed by MGR001 (id = 2)
---   ),
---   (
---     'EMP002',
---     'Test Employee Two',
---     'emp002@company.com',
---     NULL,
---     '$2b$12$UASDLbDiJDXmYMEbUvATj.LTEsHuXIaudvDl5efwz9myDzvJq6SL2',
---     'employee',
---     TRUE,
---     2   -- managed by MGR001 (id = 2)
---   );
+INSERT INTO employees
+  (emp_id, name, email, phone, pin_hash, role, is_active, manager_id)
+VALUES
+  (
+    'ADMIN001',
+    'Super Admin',
+    'admin@company.com',
+    NULL,
+    '$2b$12$l3.u0oTGfAVapllBd4U2ZeV.3dr6Ki3IoTynFd/OC/CrpcjTEmIDy',
+    'super_admin',
+    TRUE,
+    NULL
+  ),
+  (
+    'MGR001',
+    'Test Manager',
+    'manager@company.com',
+    NULL,
+    '$2b$12$M60ClJTAZQeu7/kST3A34OnZAkLstf1BX67KVXJEDVc3uhK8ZDRLW',
+    'manager',
+    TRUE,
+    1   -- managed by ADMIN001 (id = 1)
+  ),
+  (
+    'EMP001',
+    'Test Employee One',
+    'emp001@company.com',
+    NULL,
+    '$2b$12$UASDLbDiJDXmYMEbUvATj.LTEsHuXIaudvDl5efwz9myDzvJq6SL2',
+    'employee',
+    TRUE,
+    2   -- managed by MGR001 (id = 2)
+  ),
+  (
+    'EMP002',
+    'Test Employee Two',
+    'emp002@company.com',
+    NULL,
+    '$2b$12$UASDLbDiJDXmYMEbUvATj.LTEsHuXIaudvDl5efwz9myDzvJq6SL2',
+    'employee',
+    TRUE,
+    2   -- managed by MGR001 (id = 2)
+  );
 
 -- ---------------------------------------------------------------------------
 -- locations
