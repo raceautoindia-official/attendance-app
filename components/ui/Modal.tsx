@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { cn } from '@/lib/cn';
 
 interface ModalProps {
@@ -20,28 +20,15 @@ const SIZE: Record<NonNullable<ModalProps['size']>, string> = {
 };
 
 export default function Modal({ open, onClose, title, children, className, size = 'md' }: ModalProps) {
-  const backdropRef = useRef<HTMLDivElement>(null);
-
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    if (open) {
-      document.addEventListener('keydown', onKey);
-      document.body.style.overflow = 'hidden';
-    }
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      document.body.style.overflow = '';
-    };
-  }, [open, onClose]);
+    if (open) document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = ''; };
+  }, [open]);
 
   if (!open) return null;
 
   return (
-    <div
-      ref={backdropRef}
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
-      onClick={e => { if (e.target === backdropRef.current) onClose(); }}
-    >
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
       <div
         className={cn(
           'w-full bg-white dark:bg-slate-800 rounded-xl shadow-xl',
