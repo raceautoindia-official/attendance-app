@@ -139,6 +139,29 @@ export default function EmployeesPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['employees'] }),
   });
 
+  // Grant / revoke exemption
+  const grantExemptionMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`/api/employees/${id}/exemption`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'Initial access — pending passkey enrolment' }),
+      });
+      const json = await res.json() as ApiResponse;
+      if (!json.success) throw new Error(json.error ?? 'Failed');
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['employees'] }),
+  });
+
+  const revokeExemptionMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`/api/employees/${id}/exemption`, { method: 'DELETE' });
+      const json = await res.json() as ApiResponse;
+      if (!json.success) throw new Error(json.error ?? 'Failed');
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['employees'] }),
+  });
+
   function openEdit(emp: EmpRow) {
     setEditTarget(emp);
     editForm.reset({
@@ -267,7 +290,25 @@ export default function EmployeesPage() {
                       <div><p className="text-xs text-slate-500 uppercase tracking-wide">Phone</p><p className="mt-0.5 font-medium text-slate-800 dark:text-slate-200">{emp.phone ?? '—'}</p></div>
                       <div><p className="text-xs text-slate-500 uppercase tracking-wide">Manager</p><p className="mt-0.5 font-medium text-slate-800 dark:text-slate-200">{emp.manager_name ?? '—'}</p></div>
                       <div><p className="text-xs text-slate-500 uppercase tracking-wide">Passkeys</p><p className="mt-0.5 font-medium text-slate-800 dark:text-slate-200">{Number(emp.passkey_count ?? 0)}</p></div>
-                      <div><p className="text-xs text-slate-500 uppercase tracking-wide">PIN Exemption</p><p className="mt-0.5"><Badge variant={emp.has_exemption ? 'success' : 'neutral'}>{emp.has_exemption ? 'Granted' : 'None'}</Badge></p></div>
+                      <div>
+                        <p className="text-xs text-slate-500 uppercase tracking-wide">PIN Exemption</p>
+                        <div className="mt-0.5 flex items-center gap-2">
+                          <Badge variant={emp.has_exemption ? 'success' : 'neutral'}>{emp.has_exemption ? 'Granted' : 'None'}</Badge>
+                          {emp.has_exemption ? (
+                            <Button size="sm" variant="danger"
+                              loading={revokeExemptionMutation.isPending}
+                              onClick={() => { if (confirm('Revoke PIN exemption? Employee will need a passkey to log in.')) revokeExemptionMutation.mutate(emp.id); }}>
+                              Revoke
+                            </Button>
+                          ) : (
+                            <Button size="sm" variant="secondary"
+                              loading={grantExemptionMutation.isPending}
+                              onClick={() => grantExemptionMutation.mutate(emp.id)}>
+                              Grant Access
+                            </Button>
+                          )}
+                        </div>
+                      </div>
                     </div>
                     {/* Current schedule */}
                     <div className="border-t border-slate-200 dark:border-slate-700 pt-3">
