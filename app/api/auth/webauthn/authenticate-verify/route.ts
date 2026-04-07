@@ -14,23 +14,20 @@ import type { ApiResponse, Employee } from '@/lib/types';
 import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 
 // ---------------------------------------------------------------------------
-// Validation
+// Validation — credential sent directly from startAuthentication()
 // ---------------------------------------------------------------------------
 
 const VerifySchema = z.object({
-  emp_id: z.string().min(1, 'emp_id is required'),
-  assertionResponse: z.object({
-    id: z.string().min(1),
-    rawId: z.string().min(1),
-    response: z.object({
-      clientDataJSON: z.string(),
-      authenticatorData: z.string(),
-      signature: z.string(),
-      userHandle: z.string().optional(),
-    }),
-    type: z.literal('public-key'),
-    clientExtensionResults: z.record(z.string(), z.unknown()).optional(),
+  id: z.string().min(1),
+  rawId: z.string().min(1),
+  response: z.object({
+    clientDataJSON: z.string(),
+    authenticatorData: z.string(),
+    signature: z.string(),
+    userHandle: z.string().optional(),
   }),
+  type: z.literal('public-key'),
+  clientExtensionResults: z.record(z.string(), z.unknown()).optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -51,6 +48,15 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // 1. Verify the pending-auth cookie — confirms PIN was checked in this session
+  const emp_id = getPendingAuthFromRequest(request);
+  if (!emp_id) {
+    return NextResponse.json<ApiResponse>(
+      { success: false, error: 'PIN verification required before WebAuthn' },
+      { status: 401 },
+    );
+  }
+
   const parsed = VerifySchema.safeParse(body);
   if (!parsed.success) {
     return NextResponse.json<ApiResponse>(
@@ -59,16 +65,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const { emp_id, assertionResponse } = parsed.data;
-
-  // 1. Verify the pending-auth cookie — confirms PIN was checked in this session
-  const pendingEmpId = getPendingAuthFromRequest(request);
-  if (!pendingEmpId || pendingEmpId !== emp_id) {
-    return NextResponse.json<ApiResponse>(
-      { success: false, error: 'PIN verification required before WebAuthn' },
-      { status: 401 },
-    );
-  }
+  const assertionResponse = parsed.data;
 
   // 2. Load employee
   const employee = await queryOne<Employee>(
