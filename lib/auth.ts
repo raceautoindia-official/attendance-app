@@ -91,9 +91,22 @@ export function generateRefreshTokenHash(token: string): string {
 
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
-/** Access token: 15 min; refresh token: 7 days (in seconds). */
-const ACCESS_MAX_AGE = 15 * 60;
-const REFRESH_MAX_AGE = 7 * 24 * 60 * 60;
+/** Cookie lifetimes driven by env vars — same source of truth as the JWT expiry. */
+const ACCESS_MAX_AGE = parseExpiryToSeconds(process.env.JWT_ACCESS_EXPIRY ?? '8h');
+const REFRESH_MAX_AGE = parseExpiryToSeconds(process.env.JWT_REFRESH_EXPIRY ?? '7d');
+
+function parseExpiryToSeconds(expiry: string): number {
+  const match = expiry.match(/^(\d+)([smhd])$/);
+  if (!match) return 15 * 60;
+  const n = parseInt(match[1], 10);
+  switch (match[2]) {
+    case 's': return n;
+    case 'm': return n * 60;
+    case 'h': return n * 60 * 60;
+    case 'd': return n * 24 * 60 * 60;
+    default:  return 15 * 60;
+  }
+}
 
 export function setAuthCookies(
   response: NextResponse,
