@@ -5,11 +5,14 @@ import { useRouter } from 'next/navigation';
 import { startRegistration } from '@simplewebauthn/browser';
 import Button from '@/components/ui/Button';
 import Card from '@/components/ui/Card';
+import { getStoredUser } from '@/lib/user';
 import type { ApiResponse } from '@/lib/types';
 
 export default function RegisterPasskeyPage() {
   const router = useRouter();
   const [state, setState] = useState<'idle' | 'registering' | 'success' | 'error'>('idle');
+  const storedUser = typeof window !== 'undefined' ? getStoredUser() : null;
+  const skipDest = storedUser?.role === 'employee' ? '/dashboard' : '/overview';
   const [message, setMessage] = useState<string | null>(null);
 
   const notSupported =
@@ -43,7 +46,7 @@ export default function RegisterPasskeyPage() {
 
       setState('success');
       setMessage('Passkey registered successfully! You can now sign in with your passkey.');
-      setTimeout(() => router.push('/dashboard'), 2000);
+      setTimeout(() => router.push(skipDest), 2000);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Registration failed';
       if (msg.includes('cancelled') || msg.includes('NotAllowed')) {
@@ -119,7 +122,7 @@ export default function RegisterPasskeyPage() {
               )}
 
               <button
-                onClick={() => router.push('/dashboard')}
+                onClick={() => router.push(skipDest)}
                 className="w-full text-sm text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 transition-colors py-1"
               >
                 Skip for now

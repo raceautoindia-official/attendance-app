@@ -99,11 +99,16 @@ export default function LoginPage() {
         return;
       }
 
-      // Direct success (PIN exemption path) — send to passkey setup first
+      // Direct success (PIN exemption path)
+      // Employees are sent to passkey setup; admins/managers go straight to their dashboard.
       const emp = data?.employee;
       if (emp) {
         storeUser({ id: emp.id, emp_id: emp.emp_id, name: emp.name, role: emp.role });
-        router.push('/register-passkey');
+        if (emp.role === 'employee') {
+          router.push('/register-passkey');
+        } else {
+          router.push('/overview');
+        }
       }
     } catch {
       setError('An unexpected error occurred. Please try again.');
