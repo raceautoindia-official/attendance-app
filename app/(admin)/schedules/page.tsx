@@ -49,6 +49,7 @@ export default function SchedulesPage() {
   const isSuperAdmin = currentUser?.role === 'super_admin';
   const [addOpen, setAddOpen] = useState(false);
   const [assignOpen, setAssignOpen] = useState(false);
+  const [editTarget, setEditTarget] = useState<Shift | null>(null);
 
   const { data: shiftsData, isLoading: shiftsLoading } = useQuery({
     queryKey: ['shifts'],
@@ -106,6 +107,46 @@ export default function SchedulesPage() {
       if (!json.success) throw new Error(json.error ?? 'Failed');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['shifts'] }),
+  });
+
+  // Edit shift
+  const editShiftForm = useForm<ShiftForm>({
+    resolver: zodResolver(shiftSchema) as unknown as Resolver<ShiftForm>,
+    defaultValues: { type: 'fixed', grace_minutes: 10, working_days: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'] },
+  });
+  const editShiftType = useWatch({ control: editShiftForm.control, name: 'type' });
+  const editWorkingDays = useWatch({ control: editShiftForm.control, name: 'working_days' }) ?? [];
+
+  function openEditShift(shift: Shift) {
+    setEditTarget(shift);
+    editShiftForm.reset({
+      name: shift.name,
+      type: shift.type as ShiftForm['type'],
+      start_time: shift.start_time ?? undefined,
+      end_time: shift.end_time ?? undefined,
+      required_hours: shift.required_hours ?? undefined,
+      grace_minutes: shift.grace_minutes,
+      working_days: shift.working_days ?? [],
+    });
+  }
+
+  function toggleEditDay(day: string) {
+    const current = editWorkingDays;
+    const next = current.includes(day) ? current.filter(d => d !== day) : [...current, day];
+    editShiftForm.setValue('working_days', next);
+  }
+
+  const editShiftMutation = useMutation({
+    mutationFn: async ({ id, values }: { id: number; values: ShiftForm }) => {
+      const res = await fetch(`/api/schedules/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(values),
+      });
+      const json = await res.json() as ApiResponse;
+      if (!json.success) throw new Error(json.error ?? 'Failed');
+    },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['shifts'] }); setEditTarget(null); },
   });
 
   // Assign schedule
@@ -178,14 +219,18 @@ export default function SchedulesPage() {
               key: 'actions',
               header: '',
               render: r => isSuperAdmin ? (
-                <Button
-                  size="sm"
-                  variant="danger"
-                  onClick={() => { if (confirm('Delete this shift?')) deleteShiftMutation.mutate((r as Shift).id); }}
-                >
-                  Delete
-                </Button>
+                <div className="flex gap-1 justify-end">
+                  <Button size="sm" variant="ghost" onClick={() => openEditShift(r as Shift)}>Edit</Button>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    onClick={() => { if (confirm('Delete this shift?')) deleteShiftMutation.mutate((r as Shift).id); }}
+                  >
+                    Delete
+                  </Button>
+                </div>
               ) : null,
+              headerClassName: 'text-right',
             },
           ]}
           data={shifts as object[]}
@@ -254,6 +299,68 @@ export default function SchedulesPage() {
             <Button type="submit" loading={createShiftMutation.isPending}>Create Shift</Button>
           </div>
         </form>
+      </Modal>
+
+      {/* Edit shift modal */}
+      <Modal open={!!editTarget} onClose={() => setEditTarget(null)} title="Edit Shift" size="lg">
+        {editTarget && (
+          <form onSubmit={editShiftForm.handleSubmit((v: ShiftForm) => editShiftMutation.mutate({ id: editTarget.id, values: v }))} className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <Input label="Shift Name" {...editShiftForm.register('name')} error={editShiftForm.formState.errors.name?.message} />
+              <div className="flex flex-col gap-1">
+                <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Type</label>
+                <select {...editShiftForm.register('type')} className={selectClass}>
+                  <option value="fixed">Fixed</option>
+                  <option value="flexible">Flexible</option>
+                  <option value="rotating">Rotating</option>
+                </select>
+              </div>
+            </div>
+
+            {editShiftType === 'fixed' && (
+              <div className="grid grid-cols-2 gap-4">
+                <Input label="Start Time" type="time" {...editShiftForm.register('start_time')} />
+                <Input label="End Time" type="time" {...editShiftForm.register('end_time')} />
+              </div>
+            )}
+
+            {editShiftType === 'flexible' && (
+              <Input label="Required Hours Per Day" type="number" min={1} max={24}
+                {...editShiftForm.register('required_hours')} error={editShiftForm.formState.errors.required_hours?.message} />
+            )}
+
+            <Input label="Grace Period (minutes)" type="number" min={0} max={120}
+              {...editShiftForm.register('grace_minutes')} />
+
+            <div>
+              <label className="text-sm font-medium text-slate-700 dark:text-slate-300 block mb-2">Working Days</label>
+              <div className="flex flex-wrap gap-2">
+                {DAYS.map(day => (
+                  <button
+                    key={day}
+                    type="button"
+                    onClick={() => toggleEditDay(day)}
+                    className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
+                      editWorkingDays.includes(day)
+                        ? 'bg-blue-600 text-white border-blue-600 dark:bg-blue-500 dark:border-blue-500'
+                        : 'border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    {day}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {editShiftMutation.isError && (
+              <p className="text-sm text-red-500">{(editShiftMutation.error as Error).message}</p>
+            )}
+            <div className="flex justify-end gap-3 pt-2">
+              <Button type="button" variant="secondary" onClick={() => setEditTarget(null)}>Cancel</Button>
+              <Button type="submit" loading={editShiftMutation.isPending}>Save Changes</Button>
+            </div>
+          </form>
+        )}
       </Modal>
 
       {/* Assign schedule modal */}
