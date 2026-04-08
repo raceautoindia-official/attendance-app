@@ -1,12 +1,15 @@
 'use client';
 
-import { useQuery } from '@tanstack/react-query';
+import { useEffect, useState, useCallback } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import StatCard from '@/components/ui/StatCard';
 import Badge from '@/components/ui/Badge';
 import Table from '@/components/ui/Table';
 import Card from '@/components/ui/Card';
+import Button from '@/components/ui/Button';
 import Spinner from '@/components/ui/Spinner';
+import { useCurrentUser } from '@/lib/useCurrentUser';
 import type { AttendanceRecord, AttendanceStatus, ApiResponse, Employee } from '@/lib/types';
 
 type AttRow = AttendanceRecord & { employee_name?: string; emp_id?: string };
@@ -22,9 +25,83 @@ function toIST(d: Date | string | null) {
   if (!d) return '—';
   return new Date(d).toLocaleTimeString(IST_LOCALE, { timeZone: IST, hour: '2-digit', minute: '2-digit', hour12: true });
 }
+function minutesToHours(m: number | null | undefined) {
+  if (m == null) return '—';
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
 
 export default function OverviewPage() {
   const today = format(new Date(), 'yyyy-MM-dd');
+  const qc = useQueryClient();
+  const currentUser = useCurrentUser();
+  const isManager = currentUser?.role === 'manager';
+
+  // Manager self-attendance
+  const [now, setNow] = useState(new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const [gpsError, setGpsError] = useState<string | null>(null);
+
+  const getCoords = useCallback(
+    () => new Promise<GeolocationCoordinates>((resolve, reject) => {
+      if (!navigator.geolocation) { reject(new Error('Geolocation not supported')); return; }
+      navigator.geolocation.getCurrentPosition(
+        pos => resolve(pos.coords),
+        err => {
+          switch (err.code) {
+            case err.PERMISSION_DENIED: reject(new Error('Location permission denied. Please allow location access.')); break;
+            case err.POSITION_UNAVAILABLE: reject(new Error('Location unavailable. Check your GPS settings.')); break;
+            default: reject(new Error('Failed to get location. Please try again.'));
+          }
+        },
+        { enableHighAccuracy: true, timeout: 15_000 },
+      );
+    }),
+    [],
+  );
+
+  const { data: selfAttData, isLoading: selfAttLoading } = useQuery({
+    queryKey: ['attendance', 'today-self'],
+    queryFn: async () => {
+      const res = await fetch('/api/attendance/today');
+      return res.json() as Promise<ApiResponse<{ attendance: AttendanceRecord | null }>>;
+    },
+    enabled: isManager,
+    refetchInterval: 60_000,
+  });
+
+  const clockMutation = useMutation({
+    mutationFn: async (action: 'clock-in' | 'clock-out') => {
+      setGpsError(null);
+      const coords = await getCoords();
+      const res = await fetch(`/api/attendance/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ latitude: coords.latitude, longitude: coords.longitude }),
+      });
+      const json = await res.json() as ApiResponse;
+      if (!json.success) throw new Error(json.error ?? `${action} failed`);
+      return json;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['attendance', 'today-self'] });
+      qc.invalidateQueries({ queryKey: ['attendance', 'today-list'] });
+    },
+    onError: (err: Error) => {
+      if (err.message.toLowerCase().includes('location') || err.message.includes('permission')) {
+        setGpsError(err.message);
+      }
+    },
+  });
+
+  const selfAtt = selfAttData?.data?.attendance;
+  const clockedIn = !!selfAtt?.clock_in_utc;
+  const clockedOut = !!selfAtt?.clock_out_utc;
+  const canClockIn = !clockedIn;
+  const canClockOut = clockedIn && !clockedOut;
 
   const { data: empData, isLoading: empLoading } = useQuery({
     queryKey: ['employees', 'count'],
@@ -53,8 +130,73 @@ export default function OverviewPage() {
 
   const isLoading = empLoading || attLoading;
 
+  const displayTime = now.toLocaleTimeString(IST_LOCALE, { timeZone: IST, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
+
   return (
     <div className="space-y-6">
+      {/* Manager self-attendance widget */}
+      {isManager && (
+        <Card>
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-200">My Attendance</h2>
+              <p className="text-xs text-slate-400 tabular-nums mt-0.5">{displayTime}</p>
+            </div>
+            {selfAtt && (
+              <Badge variant={
+                selfAtt.status === 'present' ? 'success' :
+                selfAtt.status === 'late' ? 'warning' :
+                selfAtt.status === 'absent' ? 'danger' : 'neutral'
+              }>
+                {selfAtt.status.replace('_', ' ')}
+              </Badge>
+            )}
+          </div>
+
+          {selfAttLoading ? (
+            <div className="flex justify-center py-3"><Spinner /></div>
+          ) : (
+            <>
+              <div className="grid grid-cols-3 gap-4 mb-4">
+                {[
+                  { label: 'Clock In',  value: toIST(selfAtt?.clock_in_utc  ?? null) },
+                  { label: 'Clock Out', value: toIST(selfAtt?.clock_out_utc ?? null) },
+                  { label: 'Hours',     value: minutesToHours(selfAtt?.total_minutes) },
+                ].map(item => (
+                  <div key={item.label}>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">{item.label}</p>
+                    <p className="text-sm font-semibold text-slate-800 dark:text-slate-200 mt-0.5">{item.value}</p>
+                  </div>
+                ))}
+              </div>
+
+              {canClockIn || canClockOut ? (
+                <Button
+                  className="w-full"
+                  variant={canClockIn ? 'primary' : 'secondary'}
+                  loading={clockMutation.isPending}
+                  onClick={() => clockMutation.mutate(canClockIn ? 'clock-in' : 'clock-out')}
+                >
+                  {clockMutation.isPending ? 'Getting location…' : canClockIn ? 'Clock In' : 'Clock Out'}
+                </Button>
+              ) : clockedOut ? (
+                <div className="w-full text-center py-2 text-sm text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-700/50 rounded-lg">
+                  Done for today ✓
+                </div>
+              ) : null}
+
+              {(gpsError || clockMutation.isError) && (
+                <div className="mt-3 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-4 py-3">
+                  <p className="text-sm text-red-700 dark:text-red-300">
+                    {gpsError ?? (clockMutation.error as Error)?.message}
+                  </p>
+                </div>
+              )}
+            </>
+          )}
+        </Card>
+      )}
+
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
