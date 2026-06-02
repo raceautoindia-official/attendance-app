@@ -1,0 +1,2 @@
+ALTER TABLE employees
+ADD COLUMN department VARCHAR(100) NULL AFTER phone;
