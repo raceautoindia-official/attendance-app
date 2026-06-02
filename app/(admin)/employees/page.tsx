@@ -193,6 +193,22 @@ export default function EmployeesPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['employees'] }),
   });
 
+  // Reset login access — clears passkeys AND grants a fresh PIN exemption so a
+  // locked-out employee ("Passkey setup required") can sign in with their PIN
+  // and re-enrol a passkey. Super admin only.
+  const resetAccessMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`/api/employees/${id}/reset-access`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'Login reset by super admin' }),
+      });
+      const json = await res.json() as ApiResponse;
+      if (!json.success) throw new Error(json.error ?? 'Failed');
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['employees'] }),
+  });
+
   function openEdit(emp: EmpRow) {
     setEditTarget(emp);
     editForm.reset({
@@ -285,6 +301,24 @@ export default function EmployeesPage() {
                     >
                       Reset Keys
                     </Button>
+                    {/* Only show for employees locked out of login: no passkey AND no active exemption */}
+                    {isSuperAdmin && (r as EmpRow).is_active
+                      && Number((r as EmpRow).passkey_count ?? 0) === 0
+                      && !(r as EmpRow).has_exemption && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        loading={resetAccessMutation.isPending}
+                        onClick={e => {
+                          e.stopPropagation();
+                          if (confirm('This employee cannot sign in (no passkey and no PIN exemption).\n\nGrant a temporary PIN-only login so they can sign in and enrol a passkey?')) {
+                            resetAccessMutation.mutate((r as EmpRow).id);
+                          }
+                        }}
+                      >
+                        Fix Login
+                      </Button>
+                    )}
                     {isSuperAdmin && (r as EmpRow).is_active && (
                       <Button
                         size="sm"
