@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryOne } from '@/lib/db';
 import { getPendingAuthFromRequest } from '@/lib/auth';
-import { generateAuthenticationOptions } from '@/lib/webauthn';
+import { generateAuthenticationOptions, getWebAuthnConfigFromRequest } from '@/lib/webauthn';
 import type { ApiResponse, Employee } from '@/lib/types';
 
 // ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const options = await generateAuthenticationOptions(employee);
+  const options = await generateAuthenticationOptions(employee, getWebAuthnConfigFromRequest(request));
 
   return NextResponse.json<ApiResponse<typeof options>>(
     { success: true, data: options },

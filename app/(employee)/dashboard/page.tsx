@@ -31,7 +31,7 @@ function statusBadge(status: AttendanceStatus) {
 }
 
 function minutesToHours(m: number | null | undefined) {
-  if (m == null) return 'â€”';
+  if (m == null) return '-';
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
@@ -294,7 +294,7 @@ export default function DashboardPage() {
 
   const displayDate = mounted
     ? now.toLocaleDateString(IST_LOCALE, { timeZone: TZ, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
-    : 'â€”';
+    : '-';
   const displayTime = mounted
     ? now.toLocaleTimeString(IST_LOCALE, { timeZone: TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
     : '--:--:--';
@@ -373,7 +373,7 @@ export default function DashboardPage() {
       {/* Greeting + live clock */}
       <div>
         <h1 className="text-xl font-bold text-slate-900 dark:text-slate-100">
-          Hello, {user?.name?.split(' ')[0] ?? 'there'} ðŸ‘‹
+          {user?.name ? `Hello, ${user.name.split(' ')[0]}` : 'Hello'}
         </h1>
         <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">{displayDate}</p>
         <p className="text-3xl font-bold text-blue-600 dark:text-blue-400 mt-1 tabular-nums">{displayTime}</p>
@@ -388,8 +388,8 @@ export default function DashboardPage() {
           <>
             <div className="grid grid-cols-3 gap-4 mb-5">
               {[
-                { label: 'Clock In', value: toIST(attendance?.clock_in_utc) ?? 'â€”' },
-                { label: 'Clock Out', value: toIST(attendance?.clock_out_utc) ?? 'â€”' },
+                { label: 'Clock In', value: toIST(attendance?.clock_in_utc) ?? '-' },
+                { label: 'Clock Out', value: toIST(attendance?.clock_out_utc) ?? '-' },
                 { label: 'Hours', value: minutesToHours(liveWorkedMinutes) },
               ].map(item => (
                 <div key={item.label}>
@@ -421,7 +421,7 @@ export default function DashboardPage() {
                 loading={clockMutation.isPending}
                 onClick={() => clockMutation.mutate(canClockIn ? 'clock-in' : 'clock-out')}
               >
-                {clockMutation.isPending ? 'Getting locationâ€¦' : canClockIn ? (
+                {clockMutation.isPending ? 'Getting location...' : canClockIn ? (
                   <><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
                   </svg>Clock In</>
@@ -433,7 +433,7 @@ export default function DashboardPage() {
               </Button>
             ) : clockedOut ? (
               <div className="w-full text-center py-3 text-sm text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-700/50 rounded-lg">
-                Done for today âœ“
+                Done for today
               </div>
             ) : null}
 
@@ -478,7 +478,7 @@ export default function DashboardPage() {
             <div>
               <p className="text-xs text-slate-500 dark:text-slate-400">Last Login</p>
               <p className="text-sm font-semibold text-slate-800 dark:text-slate-200 mt-0.5">
-                {loginSummary?.last_login_at ? toIST(loginSummary.last_login_at) : 'â€”'}
+                {loginSummary?.last_login_at ? toIST(loginSummary.last_login_at) : '-'}
               </p>
             </div>
           </div>
@@ -522,7 +522,7 @@ export default function DashboardPage() {
       </Card>
 
       <Card>
-        <div className="flex items-start justify-between gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0">
             <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300">Live Tracking</h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
@@ -534,7 +534,7 @@ export default function DashboardPage() {
               </p>
             )}
           </div>
-          <span className={`shrink-0 whitespace-nowrap text-xs font-medium px-3 py-1.5 rounded-full ${
+          <span className={`w-fit shrink-0 whitespace-nowrap text-xs font-medium px-3 py-1.5 rounded-full ${
             trackingActive
               ? 'text-green-700 bg-green-100 dark:text-green-300 dark:bg-green-900/30'
               : shouldTrackLive
@@ -608,13 +608,13 @@ export default function DashboardPage() {
                         <div>
                           <p className="text-xs text-slate-500 dark:text-slate-400">In</p>
                           <p className="text-sm font-medium text-slate-800 dark:text-slate-200">
-                            {toIST(record.clock_in_utc) ?? '—'}
+                            {toIST(record.clock_in_utc) ?? '-'}
                           </p>
                         </div>
                         <div>
                           <p className="text-xs text-slate-500 dark:text-slate-400">Out</p>
                           <p className="text-sm font-medium text-slate-800 dark:text-slate-200">
-                            {toIST(record.clock_out_utc) ?? '—'}
+                            {toIST(record.clock_out_utc) ?? '-'}
                           </p>
                         </div>
                       </div>
@@ -627,8 +627,8 @@ export default function DashboardPage() {
               <Table
                 columns={[
                   { key: 'work_date', header: 'Date', render: r => formatDateOnly((r as AttendanceRecord).work_date) },
-                  { key: 'clock_in_utc', header: 'In', render: r => toIST((r as AttendanceRecord).clock_in_utc) ?? '—' },
-                  { key: 'clock_out_utc', header: 'Out', render: r => toIST((r as AttendanceRecord).clock_out_utc) ?? '—' },
+                  { key: 'clock_in_utc', header: 'In', render: r => toIST((r as AttendanceRecord).clock_in_utc) ?? '-' },
+                  { key: 'clock_out_utc', header: 'Out', render: r => toIST((r as AttendanceRecord).clock_out_utc) ?? '-' },
                   { key: 'total_minutes', header: 'Hours', render: r => minutesToHours((r as AttendanceRecord).total_minutes) },
                   { key: 'status', header: 'Status', render: r => statusBadge((r as AttendanceRecord).status) },
                 ]}

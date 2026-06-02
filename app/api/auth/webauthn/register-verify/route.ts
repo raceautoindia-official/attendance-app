@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { queryOne, query, insertAuditLog } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
-import { verifyRegistrationResponse } from '@/lib/webauthn';
+import { verifyRegistrationResponse, getWebAuthnConfigFromRequest } from '@/lib/webauthn';
 import { MAX_DEVICES_PER_EMPLOYEE } from '@/lib/constants';
 import type { ApiResponse, Employee } from '@/lib/types';
 import type { RegistrationResponseJSON } from '@simplewebauthn/server';
@@ -72,6 +72,7 @@ export async function POST(request: NextRequest) {
   const result = await verifyRegistrationResponse(
     employee,
     registrationResponse as RegistrationResponseJSON,
+    getWebAuthnConfigFromRequest(request),
   );
 
   if (!result.verified || !result.credentialId || result.publicKey === undefined) {

@@ -1,10 +1,8 @@
-/**
+﻿/**
  * WebAuthn helpers using @simplewebauthn/server v13.
  *
- * Challenge storage: challenges are kept in a server-side Map keyed by emp_id.
- * This is fine for development and single-instance deployments. For production
- * with multiple Node processes (PM2 cluster, Kubernetes), replace the Map with
- * a shared store such as Redis with a short TTL (e.g. 5 minutes).
+ * Challenge storage is DB-backed for live deployments, with an in-memory
+ * fallback for local databases that have not run the challenge migration yet.
  */
 
 import {
@@ -19,137 +17,164 @@ import type {
   PublicKeyCredentialCreationOptionsJSON,
   PublicKeyCredentialRequestOptionsJSON,
 } from '@simplewebauthn/server';
-import { query } from './db';
+import type { NextRequest } from 'next/server';
+import { query, queryOne } from './db';
 import type { Employee, Passkey } from './types';
 
-// ---------------------------------------------------------------------------
-// Environment — read once per module load
-// ---------------------------------------------------------------------------
+export type WebAuthnRuntimeConfig = {
+  rpID?: string;
+  origin?: string;
+  rpName?: string;
+};
 
-const rpID = process.env.WEBAUTHN_RP_ID ?? 'localhost';
-const rpName = process.env.WEBAUTHN_RP_NAME ?? 'Attendance App';
-const origin = process.env.WEBAUTHN_ORIGIN ?? 'http://localhost:3000';
+const defaultRpName = process.env.WEBAUTHN_RP_NAME ?? 'Attendance App';
 
-// ---------------------------------------------------------------------------
-// In-memory challenge store
-// TODO: Replace with Redis (e.g. ioredis) for production multi-instance use.
-// ---------------------------------------------------------------------------
+function resolveConfig(config?: WebAuthnRuntimeConfig) {
+  return {
+    rpID: config?.rpID ?? process.env.WEBAUTHN_RP_ID ?? 'localhost',
+    rpName: config?.rpName ?? defaultRpName,
+    origin: config?.origin ?? process.env.WEBAUTHN_ORIGIN ?? 'http://localhost:3000',
+  };
+}
+
+export function getWebAuthnConfigFromRequest(request: NextRequest): WebAuthnRuntimeConfig {
+  const forwardedHost = request.headers.get('x-forwarded-host');
+  const host = forwardedHost ?? request.headers.get('host') ?? request.nextUrl.host;
+  const forwardedProto = request.headers.get('x-forwarded-proto');
+  const proto = forwardedProto ?? request.nextUrl.protocol.replace(':', '') ?? 'http';
+  const hostname = host.split(':')[0];
+
+  return {
+    rpID: process.env.WEBAUTHN_RP_ID ?? hostname,
+    origin: process.env.WEBAUTHN_ORIGIN ?? `${proto}://${host}`,
+    rpName: process.env.WEBAUTHN_RP_NAME ?? defaultRpName,
+  };
+}
 
 const challengeStore = new Map<string, string>();
 
-// ---------------------------------------------------------------------------
-// Registration
-// ---------------------------------------------------------------------------
+async function storeChallenge(empId: string, challenge: string): Promise<void> {
+  try {
+    await query(
+      `INSERT INTO webauthn_challenges (emp_id, challenge, created_at)
+       VALUES (?, ?, UTC_TIMESTAMP())
+       ON DUPLICATE KEY UPDATE challenge = VALUES(challenge), created_at = UTC_TIMESTAMP()`,
+      [empId, challenge],
+    );
+  } catch {
+    challengeStore.set(empId, challenge);
+  }
+}
 
-/**
- * Build the options object that the browser passes to
- * `navigator.credentials.create()`. Excludes any passkeys the employee has
- * already registered so the same device cannot be registered twice.
- */
+async function getChallenge(empId: string): Promise<string | null> {
+  try {
+    const row = await queryOne<{ challenge: string }>(
+      'SELECT challenge FROM webauthn_challenges WHERE emp_id = ?',
+      [empId],
+    );
+    if (row?.challenge) return row.challenge;
+  } catch {
+    // Fall back to the in-memory store below.
+  }
+  return challengeStore.get(empId) ?? null;
+}
+
+async function deleteChallenge(empId: string): Promise<void> {
+  try {
+    await query('DELETE FROM webauthn_challenges WHERE emp_id = ?', [empId]);
+  } catch {
+    // Fall back to the in-memory store below.
+  }
+  challengeStore.delete(empId);
+}
+
 export async function generateRegistrationOptions(
   employee: Pick<Employee, 'id' | 'emp_id' | 'name'>,
+  config?: WebAuthnRuntimeConfig,
 ): Promise<PublicKeyCredentialCreationOptionsJSON> {
+  const resolved = resolveConfig(config);
   const existingPasskeys = await query<Pick<Passkey, 'credential_id'>>(
     'SELECT credential_id FROM passkeys WHERE employee_id = ?',
     [employee.id],
   );
 
   const options = await swGenerateRegistrationOptions({
-    rpName,
-    rpID,
-    // Use the numeric DB id (as bytes) as the stable user handle.
+    rpName: resolved.rpName,
+    rpID: resolved.rpID,
     userID: Buffer.from(String(employee.id)),
     userName: employee.emp_id,
     userDisplayName: employee.name,
     attestationType: 'none',
-    excludeCredentials: existingPasskeys.map(pk => ({
-      id: pk.credential_id,
-    })),
+    excludeCredentials: existingPasskeys.map(pk => ({ id: pk.credential_id })),
     authenticatorSelection: {
       residentKey: 'preferred',
       userVerification: 'required',
     },
   });
 
-  challengeStore.set(employee.emp_id, options.challenge);
+  await storeChallenge(employee.emp_id, options.challenge);
   return options;
 }
 
 export interface VerifyRegistrationResult {
   verified: boolean;
   credentialId?: string;
-  publicKey?: string;   // base64url-encoded COSE key — store in DB as-is
+  publicKey?: string;
   counter?: number;
 }
 
-/**
- * Verify the browser's response to `navigator.credentials.create()`.
- * On success, returns the fields that should be persisted to the passkeys table.
- */
 export async function verifyRegistrationResponse(
   employee: Pick<Employee, 'emp_id'>,
   response: RegistrationResponseJSON,
+  config?: WebAuthnRuntimeConfig,
 ): Promise<VerifyRegistrationResult> {
-  const expectedChallenge = challengeStore.get(employee.emp_id);
-  if (!expectedChallenge) {
-    return { verified: false };
-  }
+  const resolved = resolveConfig(config);
+  const expectedChallenge = await getChallenge(employee.emp_id);
+  if (!expectedChallenge) return { verified: false };
 
   try {
     const { verified, registrationInfo } = await swVerifyRegistrationResponse({
       response,
       expectedChallenge,
-      expectedOrigin: origin,
-      expectedRPID: rpID,
+      expectedOrigin: resolved.origin,
+      expectedRPID: resolved.rpID,
     });
 
-    // Consume the challenge regardless of outcome to prevent replay attacks.
-    challengeStore.delete(employee.emp_id);
+    await deleteChallenge(employee.emp_id);
 
-    if (!verified || !registrationInfo) {
-      return { verified: false };
-    }
+    if (!verified || !registrationInfo) return { verified: false };
 
     const { credential } = registrationInfo;
-
     return {
       verified: true,
       credentialId: credential.id,
-      // credential.publicKey is Uint8Array; store as base64url string
       publicKey: Buffer.from(credential.publicKey).toString('base64url'),
       counter: credential.counter,
     };
   } catch (err) {
-    challengeStore.delete(employee.emp_id);
+    await deleteChallenge(employee.emp_id);
     console.error('[webauthn] Registration verification error:', err);
     return { verified: false };
   }
 }
 
-// ---------------------------------------------------------------------------
-// Authentication
-// ---------------------------------------------------------------------------
-
-/**
- * Build the options object that the browser passes to
- * `navigator.credentials.get()`. Populates `allowCredentials` from the
- * employee's registered passkeys.
- */
 export async function generateAuthenticationOptions(
   employee: Pick<Employee, 'id' | 'emp_id'>,
+  config?: WebAuthnRuntimeConfig,
 ): Promise<PublicKeyCredentialRequestOptionsJSON> {
+  const resolved = resolveConfig(config);
   const passkeys = await query<Pick<Passkey, 'credential_id'>>(
     'SELECT credential_id FROM passkeys WHERE employee_id = ?',
     [employee.id],
   );
 
   const options = await swGenerateAuthenticationOptions({
-    rpID,
+    rpID: resolved.rpID,
     allowCredentials: passkeys.map(pk => ({ id: pk.credential_id })),
     userVerification: 'required',
   });
 
-  challengeStore.set(employee.emp_id, options.challenge);
+  await storeChallenge(employee.emp_id, options.challenge);
   return options;
 }
 
@@ -159,50 +184,39 @@ export interface VerifyAuthenticationResult {
   credentialId?: string;
 }
 
-/**
- * Verify the browser's response to `navigator.credentials.get()`.
- * Looks up the matching passkey from the DB, runs the cryptographic check,
- * and returns the new counter value that must be persisted.
- */
 export async function verifyAuthenticationResponse(
   employee: Pick<Employee, 'id' | 'emp_id'>,
   response: AuthenticationResponseJSON,
+  config?: WebAuthnRuntimeConfig,
 ): Promise<VerifyAuthenticationResult> {
-  const expectedChallenge = challengeStore.get(employee.emp_id);
-  if (!expectedChallenge) {
-    return { verified: false };
-  }
+  const resolved = resolveConfig(config);
+  const expectedChallenge = await getChallenge(employee.emp_id);
+  if (!expectedChallenge) return { verified: false };
 
-  // Look up the passkey that the authenticator claims to be using.
   const passkey = await query<Passkey>(
     'SELECT * FROM passkeys WHERE employee_id = ? AND credential_id = ?',
     [employee.id, response.id],
   ).then(rows => rows[0] ?? null);
 
   if (!passkey) {
-    challengeStore.delete(employee.emp_id);
+    await deleteChallenge(employee.emp_id);
     return { verified: false };
   }
 
   try {
-    const { verified, authenticationInfo } = await swVerifyAuthenticationResponse(
-      {
-        response,
-        expectedChallenge,
-        expectedOrigin: origin,
-        expectedRPID: rpID,
-        credential: {
-          id: passkey.credential_id,
-          // Decode base64url string back to Uint8Array for the crypto check.
-          publicKey: new Uint8Array(
-            Buffer.from(passkey.public_key, 'base64url'),
-          ),
-          counter: Number(passkey.counter),
-        },
+    const { verified, authenticationInfo } = await swVerifyAuthenticationResponse({
+      response,
+      expectedChallenge,
+      expectedOrigin: resolved.origin,
+      expectedRPID: resolved.rpID,
+      credential: {
+        id: passkey.credential_id,
+        publicKey: new Uint8Array(Buffer.from(passkey.public_key, 'base64url')),
+        counter: Number(passkey.counter),
       },
-    );
+    });
 
-    challengeStore.delete(employee.emp_id);
+    await deleteChallenge(employee.emp_id);
 
     if (!verified) return { verified: false };
 
@@ -212,7 +226,7 @@ export async function verifyAuthenticationResponse(
       credentialId: passkey.credential_id,
     };
   } catch (err) {
-    challengeStore.delete(employee.emp_id);
+    await deleteChallenge(employee.emp_id);
     console.error('[webauthn] Authentication verification error:', err);
     return { verified: false };
   }

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
-import { generateRegistrationOptions } from '@/lib/webauthn';
+import { generateRegistrationOptions, getWebAuthnConfigFromRequest } from '@/lib/webauthn';
 import type { ApiResponse, Employee } from '@/lib/types';
 
 // GET /api/auth/webauthn/register
@@ -16,7 +16,7 @@ export async function GET(request: NextRequest) {
     name: auth.emp_id, // name not in JWT; use emp_id as fallback display name
   };
 
-  const options = await generateRegistrationOptions(employee);
+  const options = await generateRegistrationOptions(employee, getWebAuthnConfigFromRequest(request));
 
   return NextResponse.json<ApiResponse<typeof options>>(
     { success: true, data: options },

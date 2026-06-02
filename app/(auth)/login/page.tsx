@@ -56,18 +56,22 @@ export default function LoginPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(credential),
       });
-      const verJson = await verRes.json() as ApiResponse<{ employee: Employee & { name: string } }>;
-      if (!verJson.success || !verJson.data?.employee) {
-        throw new Error(verJson.error ?? 'WebAuthn verification failed');
+      const verJson = await verRes.json() as ApiResponse<
+        (Employee & { name: string }) | { employee: Employee & { name: string } }
+      >;
+      const emp = verJson.data && 'employee' in verJson.data ? verJson.data.employee : verJson.data;
+      if (!verJson.success || !emp) {
+        throw new Error(verJson.error ?? 'Passkey could not be verified. Please try again.');
       }
 
-      const emp = verJson.data.employee;
       storeUser({ id: emp.id, emp_id: emp.emp_id, name: emp.name, role: emp.role });
       router.push(emp.role === 'employee' ? '/dashboard' : '/overview');
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'WebAuthn authentication failed';
+      const msg = err instanceof Error ? err.message : 'Passkey authentication failed';
       if (msg.includes('cancelled') || msg.includes('NotAllowed')) {
         setError('Authentication was cancelled. Please try again.');
+      } else if (msg.toLowerCase().includes('webauthn') && msg.toLowerCase().includes('verification')) {
+        setError('Passkey could not be verified. Please try again or register your passkey again on this device.');
       } else {
         setError(msg);
       }

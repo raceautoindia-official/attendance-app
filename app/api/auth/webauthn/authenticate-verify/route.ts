@@ -9,7 +9,7 @@ import {
   getPendingAuthFromRequest,
   clearPendingAuthCookie,
 } from '@/lib/auth';
-import { verifyAuthenticationResponse } from '@/lib/webauthn';
+import { verifyAuthenticationResponse, getWebAuthnConfigFromRequest } from '@/lib/webauthn';
 import type { ApiResponse, Employee } from '@/lib/types';
 import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 
@@ -87,6 +87,7 @@ export async function POST(request: NextRequest) {
   const result = await verifyAuthenticationResponse(
     { id: employee.id, emp_id: employee.emp_id },
     assertionResponse as AuthenticationResponseJSON,
+    getWebAuthnConfigFromRequest(request),
   );
 
   if (!result.verified || !result.credentialId) {
@@ -99,7 +100,7 @@ export async function POST(request: NextRequest) {
       ip_address: ip,
     });
     return NextResponse.json<ApiResponse>(
-      { success: false, error: 'WebAuthn verification failed' },
+      { success: false, error: 'Passkey could not be verified. Please try again or register your passkey again on this device.' },
       { status: 401 },
     );
   }
