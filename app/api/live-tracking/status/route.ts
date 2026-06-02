@@ -29,6 +29,6 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json<ApiResponse<{ enabled: boolean; session: LiveTrackingSession | null }>>({
     success: true,
-    data: { enabled: isEnabledForEmployee && !!activeSession, session: activeSession ?? null },
+    data: { enabled: isEnabledForEmployee, session: activeSession ?? null },
   });
 }

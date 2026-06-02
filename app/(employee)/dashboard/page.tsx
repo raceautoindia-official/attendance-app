@@ -198,6 +198,7 @@ export default function DashboardPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['attendance'] });
       qc.invalidateQueries({ queryKey: ['live-tracking', 'status'] });
+      qc.invalidateQueries({ queryKey: ['live-tracking', 'live-self'] });
       refetchLiveTrackingStatus();
     },
     onError: (err: Error) => {
@@ -230,6 +231,7 @@ export default function DashboardPage() {
       return json;
     },
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['live-tracking', 'live-self'] });
       refetchLiveTrackingStatus();
     },
     onError: (err: Error) => {
@@ -272,13 +274,23 @@ export default function DashboardPage() {
   });
 
   const attendance = todayData?.data?.attendance;
-  const trackingEnabled = !!liveTrackingStatus?.data?.enabled;
   const liveSelf = liveTrackingLiveData?.data?.sessions?.[0] ?? null;
   const schedule = todayData?.data?.schedule;
   const clockedIn = !!attendance?.clock_in_utc;
   const clockedOut = !!attendance?.clock_out_utc;
   const canClockIn = !clockedIn;
   const canClockOut = clockedIn && !clockedOut;
+  const liveTrackingAllowed = liveTrackingStatus?.data?.enabled !== false;
+  const activeLiveSession = liveTrackingStatus?.data?.session ?? liveSelf;
+  const shouldTrackLive = liveTrackingAllowed && clockedIn && !clockedOut;
+  const trackingActive = shouldTrackLive && !!activeLiveSession;
+  const trackingStatusLabel = trackingActive
+    ? 'Tracking On'
+    : shouldTrackLive
+      ? 'Starting Tracking'
+      : liveTrackingAllowed
+        ? 'Waiting for Clock-In'
+        : 'Tracking Off';
 
   const displayDate = mounted
     ? now.toLocaleDateString(IST_LOCALE, { timeZone: TZ, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
@@ -302,7 +314,7 @@ export default function DashboardPage() {
   }, [attendance?.clock_in_utc, attendance?.clock_out_utc, attendance?.total_minutes, now]);
 
   useEffect(() => {
-    if (!trackingEnabled) return;
+    if (!shouldTrackLive) return;
     if (!navigator.geolocation) {
       setGpsError('Location/GPS is not supported on this device.');
       return;
@@ -354,7 +366,7 @@ export default function DashboardPage() {
         trackingWatchIdRef.current = null;
       }
     };
-  }, [trackingEnabled, liveTrackingMutation, haltTrackingMutation]);
+  }, [shouldTrackLive, liveTrackingMutation, haltTrackingMutation]);
 
   return (
     <div className="space-y-6">
@@ -510,27 +522,29 @@ export default function DashboardPage() {
       </Card>
 
       <Card>
-        <div className="flex items-center justify-between gap-3">
-          <div>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
             <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300">Live Tracking</h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
               Auto-enabled after clock-in. Location updates continuously while tracking is on.
             </p>
-            {trackingEnabled && liveSelf?.last_ping_utc && (
+            {trackingActive && liveSelf?.last_ping_utc && (
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
                 Last update: {toIST(liveSelf.last_ping_utc)}
               </p>
             )}
           </div>
-          <span className={`text-xs font-medium px-2 py-1 rounded-full ${
-            trackingEnabled
+          <span className={`shrink-0 whitespace-nowrap text-xs font-medium px-3 py-1.5 rounded-full ${
+            trackingActive
               ? 'text-green-700 bg-green-100 dark:text-green-300 dark:bg-green-900/30'
-              : 'text-slate-600 bg-slate-100 dark:text-slate-300 dark:bg-slate-700/50'
+              : shouldTrackLive
+                ? 'text-blue-700 bg-blue-100 dark:text-blue-300 dark:bg-blue-900/30'
+                : 'text-slate-600 bg-slate-100 dark:text-slate-300 dark:bg-slate-700/50'
           }`}>
-            {trackingEnabled ? 'Tracking On' : 'Waiting for Clock-In'}
+            {trackingStatusLabel}
           </span>
         </div>
-        {trackingEnabled && liveSelf?.latitude != null && liveSelf?.longitude != null && (
+        {trackingActive && liveSelf?.latitude != null && liveSelf?.longitude != null && (
           <div className="mt-3 space-y-2">
             <div className="flex items-center justify-between">
               <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -566,17 +580,63 @@ export default function DashboardPage() {
         {historyLoading ? (
           <div className="flex justify-center py-8"><Spinner /></div>
         ) : (
-          <Table
-            columns={[
-              { key: 'work_date', header: 'Date', render: r => formatDateOnly((r as AttendanceRecord).work_date) },
-              { key: 'clock_in_utc', header: 'In', render: r => toIST((r as AttendanceRecord).clock_in_utc) ?? '—' },
-              { key: 'clock_out_utc', header: 'Out', render: r => toIST((r as AttendanceRecord).clock_out_utc) ?? '—' },
-              { key: 'total_minutes', header: 'Hours', render: r => minutesToHours((r as AttendanceRecord).total_minutes) },
-              { key: 'status', header: 'Status', render: r => statusBadge((r as AttendanceRecord).status) },
-            ]}
-            data={history as object[]}
-            emptyMessage="No attendance records yet."
-          />
+          <>
+            <div className="md:hidden">
+              {history.length === 0 ? (
+                <div className="px-4 py-8 text-center text-sm text-slate-500 dark:text-slate-400">
+                  No attendance records yet.
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-200 dark:divide-slate-700">
+                  {history.map(record => (
+                    <div key={record.id} className="px-4 py-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">
+                            {formatDateOnly(record.work_date)}
+                          </p>
+                          <div className="mt-2">{statusBadge(record.status)}</div>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-xs text-slate-500 dark:text-slate-400">Hours</p>
+                          <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">
+                            {minutesToHours(record.total_minutes)}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="mt-4 grid grid-cols-2 gap-3 rounded-lg bg-slate-50 dark:bg-slate-800/60 px-3 py-3">
+                        <div>
+                          <p className="text-xs text-slate-500 dark:text-slate-400">In</p>
+                          <p className="text-sm font-medium text-slate-800 dark:text-slate-200">
+                            {toIST(record.clock_in_utc) ?? '—'}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-slate-500 dark:text-slate-400">Out</p>
+                          <p className="text-sm font-medium text-slate-800 dark:text-slate-200">
+                            {toIST(record.clock_out_utc) ?? '—'}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="hidden md:block">
+              <Table
+                columns={[
+                  { key: 'work_date', header: 'Date', render: r => formatDateOnly((r as AttendanceRecord).work_date) },
+                  { key: 'clock_in_utc', header: 'In', render: r => toIST((r as AttendanceRecord).clock_in_utc) ?? '—' },
+                  { key: 'clock_out_utc', header: 'Out', render: r => toIST((r as AttendanceRecord).clock_out_utc) ?? '—' },
+                  { key: 'total_minutes', header: 'Hours', render: r => minutesToHours((r as AttendanceRecord).total_minutes) },
+                  { key: 'status', header: 'Status', render: r => statusBadge((r as AttendanceRecord).status) },
+                ]}
+                data={history as object[]}
+                emptyMessage="No attendance records yet."
+              />
+            </div>
+          </>
         )}
         {!historyLoading && historyPagination && historyPagination.totalPages > 1 && (
           <div className="px-4 py-4 border-t border-slate-200 dark:border-slate-700">
