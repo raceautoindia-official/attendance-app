@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -31,7 +31,7 @@ function statusBadge(status: AttendanceStatus) {
 }
 
 function minutesToHours(m: number | null | undefined) {
-  if (m == null) return '—';
+  if (m == null) return 'â€”';
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
@@ -294,7 +294,7 @@ export default function DashboardPage() {
 
   const displayDate = mounted
     ? now.toLocaleDateString(IST_LOCALE, { timeZone: TZ, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
-    : '—';
+    : 'â€”';
   const displayTime = mounted
     ? now.toLocaleTimeString(IST_LOCALE, { timeZone: TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
     : '--:--:--';
@@ -373,7 +373,7 @@ export default function DashboardPage() {
       {/* Greeting + live clock */}
       <div>
         <h1 className="text-xl font-bold text-slate-900 dark:text-slate-100">
-          Hello, {user?.name?.split(' ')[0] ?? 'there'} 👋
+          Hello, {user?.name?.split(' ')[0] ?? 'there'} ðŸ‘‹
         </h1>
         <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">{displayDate}</p>
         <p className="text-3xl font-bold text-blue-600 dark:text-blue-400 mt-1 tabular-nums">{displayTime}</p>
@@ -388,8 +388,8 @@ export default function DashboardPage() {
           <>
             <div className="grid grid-cols-3 gap-4 mb-5">
               {[
-                { label: 'Clock In', value: toIST(attendance?.clock_in_utc) ?? '—' },
-                { label: 'Clock Out', value: toIST(attendance?.clock_out_utc) ?? '—' },
+                { label: 'Clock In', value: toIST(attendance?.clock_in_utc) ?? 'â€”' },
+                { label: 'Clock Out', value: toIST(attendance?.clock_out_utc) ?? 'â€”' },
                 { label: 'Hours', value: minutesToHours(liveWorkedMinutes) },
               ].map(item => (
                 <div key={item.label}>
@@ -421,7 +421,7 @@ export default function DashboardPage() {
                 loading={clockMutation.isPending}
                 onClick={() => clockMutation.mutate(canClockIn ? 'clock-in' : 'clock-out')}
               >
-                {clockMutation.isPending ? 'Getting location…' : canClockIn ? (
+                {clockMutation.isPending ? 'Getting locationâ€¦' : canClockIn ? (
                   <><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
                   </svg>Clock In</>
@@ -433,7 +433,7 @@ export default function DashboardPage() {
               </Button>
             ) : clockedOut ? (
               <div className="w-full text-center py-3 text-sm text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-700/50 rounded-lg">
-                Done for today ✓
+                Done for today âœ“
               </div>
             ) : null}
 
@@ -478,7 +478,7 @@ export default function DashboardPage() {
             <div>
               <p className="text-xs text-slate-500 dark:text-slate-400">Last Login</p>
               <p className="text-sm font-semibold text-slate-800 dark:text-slate-200 mt-0.5">
-                {loginSummary?.last_login_at ? toIST(loginSummary.last_login_at) : '—'}
+                {loginSummary?.last_login_at ? toIST(loginSummary.last_login_at) : 'â€”'}
               </p>
             </div>
           </div>

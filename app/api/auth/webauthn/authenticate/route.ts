@@ -12,9 +12,7 @@ import type { ApiResponse, Employee } from '@/lib/types';
 // ---------------------------------------------------------------------------
 
 export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-  const empIdFromQuery = searchParams.get('emp_id')?.trim();
-  const emp_id = getPendingAuthFromRequest(request) ?? empIdFromQuery ?? null;
+  const emp_id = getPendingAuthFromRequest(request);
   if (!emp_id) {
     return NextResponse.json<ApiResponse>(
       { success: false, error: 'No pending authentication session. Please sign in with your PIN first.' },

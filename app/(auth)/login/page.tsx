@@ -56,12 +56,12 @@ export default function LoginPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(credential),
       });
-      const verJson = await verRes.json() as ApiResponse<Employee & { name: string }>;
-      if (!verJson.success || !verJson.data) {
+      const verJson = await verRes.json() as ApiResponse<{ employee: Employee & { name: string } }>;
+      if (!verJson.success || !verJson.data?.employee) {
         throw new Error(verJson.error ?? 'WebAuthn verification failed');
       }
 
-      const emp = verJson.data;
+      const emp = verJson.data.employee;
       storeUser({ id: emp.id, emp_id: emp.emp_id, name: emp.name, role: emp.role });
       router.push(emp.role === 'employee' ? '/dashboard' : '/overview');
     } catch (err) {

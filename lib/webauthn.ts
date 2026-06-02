@@ -19,7 +19,7 @@ import type {
   PublicKeyCredentialCreationOptionsJSON,
   PublicKeyCredentialRequestOptionsJSON,
 } from '@simplewebauthn/server';
-import { query, queryOne } from './db';
+import { query } from './db';
 import type { Employee, Passkey } from './types';
 
 // ---------------------------------------------------------------------------
@@ -31,46 +31,11 @@ const rpName = process.env.WEBAUTHN_RP_NAME ?? 'Attendance App';
 const origin = process.env.WEBAUTHN_ORIGIN ?? 'http://localhost:3000';
 
 // ---------------------------------------------------------------------------
-// Challenge store
-// DB-backed for multi-instance safety with in-memory fallback for resilience.
+// In-memory challenge store
+// TODO: Replace with Redis (e.g. ioredis) for production multi-instance use.
 // ---------------------------------------------------------------------------
 
 const challengeStore = new Map<string, string>();
-
-async function storeChallenge(empId: string, challenge: string): Promise<void> {
-  try {
-    await query(
-      `INSERT INTO webauthn_challenges (emp_id, challenge, created_at)
-       VALUES (?, ?, UTC_TIMESTAMP())
-       ON DUPLICATE KEY UPDATE challenge = VALUES(challenge), created_at = UTC_TIMESTAMP()`,
-      [empId, challenge],
-    );
-  } catch {
-    challengeStore.set(empId, challenge);
-  }
-}
-
-async function getChallenge(empId: string): Promise<string | null> {
-  try {
-    const row = await queryOne<{ challenge: string }>(
-      'SELECT challenge FROM webauthn_challenges WHERE emp_id = ?',
-      [empId],
-    );
-    if (row?.challenge) return row.challenge;
-  } catch {
-    // fallback handled below
-  }
-  return challengeStore.get(empId) ?? null;
-}
-
-async function deleteChallenge(empId: string): Promise<void> {
-  try {
-    await query('DELETE FROM webauthn_challenges WHERE emp_id = ?', [empId]);
-  } catch {
-    // fallback handled below
-  }
-  challengeStore.delete(empId);
-}
 
 // ---------------------------------------------------------------------------
 // Registration
@@ -83,14 +48,13 @@ async function deleteChallenge(empId: string): Promise<void> {
  */
 export async function generateRegistrationOptions(
   employee: Pick<Employee, 'id' | 'emp_id' | 'name'>,
-  preferences?: { authenticatorAttachment?: 'platform' | 'cross-platform' },
 ): Promise<PublicKeyCredentialCreationOptionsJSON> {
   const existingPasskeys = await query<Pick<Passkey, 'credential_id'>>(
     'SELECT credential_id FROM passkeys WHERE employee_id = ?',
     [employee.id],
   );
 
-  const registrationOptions = await swGenerateRegistrationOptions({
+  const options = await swGenerateRegistrationOptions({
     rpName,
     rpID,
     // Use the numeric DB id (as bytes) as the stable user handle.
@@ -102,14 +66,13 @@ export async function generateRegistrationOptions(
       id: pk.credential_id,
     })),
     authenticatorSelection: {
-      authenticatorAttachment: preferences?.authenticatorAttachment,
       residentKey: 'preferred',
       userVerification: 'required',
     },
   });
 
-  await storeChallenge(employee.emp_id, registrationOptions.challenge);
-  return registrationOptions;
+  challengeStore.set(employee.emp_id, options.challenge);
+  return options;
 }
 
 export interface VerifyRegistrationResult {
@@ -127,7 +90,7 @@ export async function verifyRegistrationResponse(
   employee: Pick<Employee, 'emp_id'>,
   response: RegistrationResponseJSON,
 ): Promise<VerifyRegistrationResult> {
-  const expectedChallenge = await getChallenge(employee.emp_id);
+  const expectedChallenge = challengeStore.get(employee.emp_id);
   if (!expectedChallenge) {
     return { verified: false };
   }
@@ -141,7 +104,7 @@ export async function verifyRegistrationResponse(
     });
 
     // Consume the challenge regardless of outcome to prevent replay attacks.
-    await deleteChallenge(employee.emp_id);
+    challengeStore.delete(employee.emp_id);
 
     if (!verified || !registrationInfo) {
       return { verified: false };
@@ -157,7 +120,7 @@ export async function verifyRegistrationResponse(
       counter: credential.counter,
     };
   } catch (err) {
-    await deleteChallenge(employee.emp_id);
+    challengeStore.delete(employee.emp_id);
     console.error('[webauthn] Registration verification error:', err);
     return { verified: false };
   }
@@ -180,14 +143,14 @@ export async function generateAuthenticationOptions(
     [employee.id],
   );
 
-  const authenticationOptions = await swGenerateAuthenticationOptions({
+  const options = await swGenerateAuthenticationOptions({
     rpID,
     allowCredentials: passkeys.map(pk => ({ id: pk.credential_id })),
     userVerification: 'required',
   });
 
-  await storeChallenge(employee.emp_id, authenticationOptions.challenge);
-  return authenticationOptions;
+  challengeStore.set(employee.emp_id, options.challenge);
+  return options;
 }
 
 export interface VerifyAuthenticationResult {
@@ -205,7 +168,7 @@ export async function verifyAuthenticationResponse(
   employee: Pick<Employee, 'id' | 'emp_id'>,
   response: AuthenticationResponseJSON,
 ): Promise<VerifyAuthenticationResult> {
-  const expectedChallenge = await getChallenge(employee.emp_id);
+  const expectedChallenge = challengeStore.get(employee.emp_id);
   if (!expectedChallenge) {
     return { verified: false };
   }
@@ -217,7 +180,7 @@ export async function verifyAuthenticationResponse(
   ).then(rows => rows[0] ?? null);
 
   if (!passkey) {
-    await deleteChallenge(employee.emp_id);
+    challengeStore.delete(employee.emp_id);
     return { verified: false };
   }
 
@@ -239,7 +202,7 @@ export async function verifyAuthenticationResponse(
       },
     );
 
-    await deleteChallenge(employee.emp_id);
+    challengeStore.delete(employee.emp_id);
 
     if (!verified) return { verified: false };
 
@@ -249,7 +212,7 @@ export async function verifyAuthenticationResponse(
       credentialId: passkey.credential_id,
     };
   } catch (err) {
-    await deleteChallenge(employee.emp_id);
+    challengeStore.delete(employee.emp_id);
     console.error('[webauthn] Authentication verification error:', err);
     return { verified: false };
   }

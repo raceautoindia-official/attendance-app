@@ -8,7 +8,6 @@ import {
   setAuthCookies,
   getPendingAuthFromRequest,
   clearPendingAuthCookie,
-  getExpirySecondsFromEnv,
 } from '@/lib/auth';
 import { verifyAuthenticationResponse } from '@/lib/webauthn';
 import type { ApiResponse, Employee } from '@/lib/types';
@@ -19,7 +18,6 @@ import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 // ---------------------------------------------------------------------------
 
 const VerifySchema = z.object({
-  emp_id: z.string().min(1).optional(),
   id: z.string().min(1),
   rawId: z.string().min(1),
   response: z.object({
@@ -51,15 +49,10 @@ export async function POST(request: NextRequest) {
   }
 
   // 1. Verify the pending-auth cookie — confirms PIN was checked in this session
-  const pendingEmpId = getPendingAuthFromRequest(request);
-  const requestedEmpId =
-    typeof (body as { emp_id?: unknown })?.emp_id === 'string'
-      ? ((body as { emp_id?: string }).emp_id ?? '').trim()
-      : '';
-  const emp_id = pendingEmpId ?? (requestedEmpId || null);
+  const emp_id = getPendingAuthFromRequest(request);
   if (!emp_id) {
     return NextResponse.json<ApiResponse>(
-      { success: false, error: 'Authentication context missing for WebAuthn' },
+      { success: false, error: 'PIN verification required before WebAuthn' },
       { status: 401 },
     );
   }
@@ -127,8 +120,7 @@ export async function POST(request: NextRequest) {
   });
   const refreshToken = signRefreshToken({ id: employee.id });
   const tokenHash = generateRefreshTokenHash(refreshToken);
-  const refreshTtlSeconds = getExpirySecondsFromEnv(process.env.JWT_REFRESH_EXPIRY ?? '7d', 7 * 24 * 60 * 60);
-  const expiresAt = new Date(Date.now() + refreshTtlSeconds * 1000)
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
     .toISOString()
     .slice(0, 19)
     .replace('T', ' ');
