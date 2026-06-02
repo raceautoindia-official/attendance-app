@@ -41,29 +41,6 @@ export async function POST(
     return NextResponse.json<ApiResponse>({ success: false, error: 'Employee not found' }, { status: 404 });
   }
 
-  // Only act on employees who are genuinely locked out of login — i.e. the
-  // "Passkey setup required" state: NO passkeys AND NO active PIN exemption.
-  // This prevents the action from wiping a working employee's credentials.
-  const [passkeyRow, exemptionRow] = await Promise.all([
-    queryOne<{ count: number }>('SELECT COUNT(*) AS count FROM passkeys WHERE employee_id = ?', [employeeId]),
-    queryOne<{ id: number }>(
-      'SELECT id FROM passkey_exemptions WHERE employee_id = ? AND is_active = TRUE LIMIT 1',
-      [employeeId],
-    ),
-  ]);
-  const hasPasskeys = Number(passkeyRow?.count ?? 0) > 0;
-  const hasExemption = exemptionRow !== null;
-
-  if (hasPasskeys || hasExemption) {
-    return NextResponse.json<ApiResponse>(
-      {
-        success: false,
-        error: 'This employee can already sign in (has a passkey or an active PIN exemption). Login reset is only for locked-out employees.',
-      },
-      { status: 409 },
-    );
-  }
-
   // Optional reason from body (non-fatal if body is absent)
   let reason: string | undefined;
   try {

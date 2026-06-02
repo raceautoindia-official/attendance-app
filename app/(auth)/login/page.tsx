@@ -68,9 +68,12 @@ export default function LoginPage() {
       router.push(emp.role === 'employee' ? '/dashboard' : '/overview');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Passkey authentication failed';
-      if (msg.includes('cancelled') || msg.includes('NotAllowed')) {
-        setError('Authentication was cancelled. Please try again.');
-      } else if (msg.toLowerCase().includes('webauthn') && msg.toLowerCase().includes('verification')) {
+      const lower = msg.toLowerCase();
+      if (lower.includes('no passkey') || lower.includes('no credentials') || lower.includes('not found')) {
+        setError('This device doesn’t have your passkey. Register a passkey on this device, or ask your administrator to reset your login.');
+      } else if (msg.includes('cancelled') || msg.includes('NotAllowed') || lower.includes('not allowed') || lower.includes('timed out')) {
+        setError('Couldn’t use a passkey on this device. If you cancelled, try again. If this device has no passkey for your account, register one here or ask your administrator to reset your login.');
+      } else if (lower.includes('webauthn') && lower.includes('verification')) {
         setError('Passkey could not be verified. Please try again or register your passkey again on this device.');
       } else {
         setError(msg);

@@ -160,16 +160,6 @@ export default function EmployeesPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['employees'] }),
   });
 
-  // Passkey reset
-  const resetPasskeysMutation = useMutation({
-    mutationFn: async (id: number) => {
-      const res = await fetch(`/api/employees/${id}/passkeys`, { method: 'DELETE' });
-      const json = await res.json() as ApiResponse;
-      if (!json.success) throw new Error(json.error ?? 'Failed');
-    },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['employees'] }),
-  });
-
   // Grant / revoke exemption
   const grantExemptionMutation = useMutation({
     mutationFn: async (id: number) => {
@@ -294,29 +284,22 @@ export default function EmployeesPage() {
                     {isSuperAdmin && (
                       <Button size="sm" variant="ghost" onClick={e => { e.stopPropagation(); openEdit(r as EmpRow); }}>Edit</Button>
                     )}
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={e => { e.stopPropagation(); if (confirm('Reset all passkeys?')) resetPasskeysMutation.mutate((r as EmpRow).id); }}
-                    >
-                      Reset Keys
-                    </Button>
-                    {/* Only show for employees locked out of login: no passkey AND no active exemption */}
-                    {isSuperAdmin && (r as EmpRow).is_active
-                      && Number((r as EmpRow).passkey_count ?? 0) === 0
-                      && !(r as EmpRow).has_exemption && (
+                    {/* Recovery for employees locked out of login (e.g. "No passkeys available"
+                        on their device, or no passkey/exemption at all). Removes any passkeys
+                        and grants a temporary PIN-only login so they can sign in and re-enrol. */}
+                    {isSuperAdmin && (r as EmpRow).is_active && (
                       <Button
                         size="sm"
                         variant="ghost"
                         loading={resetAccessMutation.isPending}
                         onClick={e => {
                           e.stopPropagation();
-                          if (confirm('This employee cannot sign in (no passkey and no PIN exemption).\n\nGrant a temporary PIN-only login so they can sign in and enrol a passkey?')) {
+                          if (confirm(`Reset login for ${(r as EmpRow).name}?\n\nThis removes all their passkeys and grants a temporary PIN-only login, so they can sign in with their PIN and enrol a new passkey on their device.\n\nUse this when an employee is locked out (e.g. "No passkeys available").`)) {
                             resetAccessMutation.mutate((r as EmpRow).id);
                           }
                         }}
                       >
-                        Fix Login
+                        Reset Login
                       </Button>
                     )}
                     {isSuperAdmin && (r as EmpRow).is_active && (
