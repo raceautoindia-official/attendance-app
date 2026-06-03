@@ -154,6 +154,7 @@ export default function DashboardPage() {
   const [dailyUpdateText, setDailyUpdateText] = useState('');
   const trackingWatchIdRef = useRef<number | null>(null);
   const lastTrackingPushMsRef = useRef<number>(0);
+  const clockOutReminderNotifiedRef = useRef(false);
 
   const getCoords = useCallback(
     () =>
@@ -299,6 +300,13 @@ export default function DashboardPage() {
     ? now.toLocaleTimeString(IST_LOCALE, { timeZone: TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
     : '--:--:--';
 
+  // Current hour in IST (0–23). Used for the post-7pm clock-out reminder.
+  const istHour = mounted
+    ? Number(new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: '2-digit', hourCycle: 'h23' }).format(now))
+    : 0;
+  // Grace window: shift has ended, reminder runs from 19:00 until midnight.
+  const showClockOutReminder = mounted && clockedIn && !clockedOut && istHour >= 19;
+
   const history = historyData?.data?.records ?? [];
   const loginSummary = loginActivityData?.data;
   useEffect(() => {
@@ -368,6 +376,36 @@ export default function DashboardPage() {
     };
   }, [shouldTrackLive, liveTrackingMutation, haltTrackingMutation]);
 
+  // Post-7pm clock-out reminder: fire a one-time local browser notification
+  // (in addition to the in-app banner) while the dashboard is open.
+  useEffect(() => {
+    if (!showClockOutReminder) {
+      clockOutReminderNotifiedRef.current = false; // reset for the next day
+      return;
+    }
+    if (clockOutReminderNotifiedRef.current) return;
+    if (typeof window === 'undefined' || !('Notification' in window)) return;
+
+    const fire = () => {
+      try {
+        new Notification('Clock-out reminder', {
+          body: 'Your shift has ended. Please clock out before midnight.',
+        });
+        clockOutReminderNotifiedRef.current = true;
+      } catch {
+        // Notification construction can throw on some browsers; ignore.
+      }
+    };
+
+    if (Notification.permission === 'granted') {
+      fire();
+    } else if (Notification.permission !== 'denied') {
+      void Notification.requestPermission().then(p => {
+        if (p === 'granted') fire();
+      });
+    }
+  }, [showClockOutReminder]);
+
   return (
     <div className="space-y-6">
       {/* Greeting + live clock */}
@@ -407,6 +445,21 @@ export default function DashboardPage() {
             )}
 
             {attendance && <div className="mb-5">{statusBadge(attendance.status)}</div>}
+
+            {/* Post-7pm clock-out reminder (grace window until midnight) */}
+            {showClockOutReminder && (
+              <div className="mb-5 flex items-start gap-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-4 py-3">
+                <svg className="w-5 h-5 flex-shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <div>
+                  <p className="text-sm font-medium text-amber-800 dark:text-amber-300">Please clock out</p>
+                  <p className="text-xs text-amber-700 dark:text-amber-400 mt-0.5">
+                    Your shift has ended. Clock out before midnight — otherwise it will be auto-closed with your standard shift hours.
+                  </p>
+                </div>
+              </div>
+            )}
 
             {/* Clock button */}
             {isDesktopClient ? (

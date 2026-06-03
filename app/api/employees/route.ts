@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth, hashPin } from '@/lib/auth';
+import { getWorkDateIST } from '@/lib/attendance';
 import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from '@/lib/constants';
 import type { ApiResponse, Employee } from '@/lib/types';
 
@@ -113,8 +114,8 @@ export async function GET(request: NextRequest) {
          ON es.id = (
            SELECT id FROM employee_schedules
            WHERE employee_id = e.id
-             AND effective_from <= CURDATE()
-             AND (effective_to IS NULL OR effective_to >= CURDATE())
+             AND effective_from <= ?
+             AND (effective_to IS NULL OR effective_to >= ?)
            ORDER BY effective_from DESC
            LIMIT 1
          )
@@ -123,7 +124,7 @@ export async function GET(request: NextRequest) {
        ${where}
        ORDER BY e.emp_id ASC
        LIMIT ? OFFSET ?`,
-      [...params, limit, offset],
+      [getWorkDateIST(), getWorkDateIST(), ...params, limit, offset],
     ),
   ]);
 

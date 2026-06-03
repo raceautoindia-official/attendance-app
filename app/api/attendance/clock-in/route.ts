@@ -87,12 +87,16 @@ export async function POST(request: NextRequest) {
   const workDate = getWorkDateIST();
   const ip = getClientIp(request);
 
-  // 2. Prevent duplicate clock-in
-  const existing = await queryOne<{ id: number }>(
-    `SELECT id FROM attendance WHERE employee_id = ? AND work_date = ?`,
+  // 2. Prevent duplicate clock-in.
+  //    A row may already exist for today WITHOUT a clock-in (e.g. an 'absent'
+  //    row from the mark-absent cron, or a leave/holiday entry). Only block if
+  //    there is a real clock-in; otherwise we convert that row into a clock-in
+  //    below (rather than inserting a duplicate, which would hit the unique key).
+  const existing = await queryOne<{ id: number; clock_in_utc: Date | null }>(
+    `SELECT id, clock_in_utc FROM attendance WHERE employee_id = ? AND work_date = ?`,
     [auth.id, workDate],
   );
-  if (existing) {
+  if (existing?.clock_in_utc) {
     return NextResponse.json<ApiResponse>(
       { success: false, error: 'Already clocked in today' },
       { status: 409 },
@@ -119,11 +123,11 @@ export async function POST(request: NextRequest) {
      JOIN shifts s ON es.shift_id = s.id
      LEFT JOIN locations l ON es.location_id = l.id
      WHERE es.employee_id = ?
-       AND es.effective_from <= CURDATE()
-       AND (es.effective_to IS NULL OR es.effective_to >= CURDATE())
+       AND es.effective_from <= ?
+       AND (es.effective_to IS NULL OR es.effective_to >= ?)
      ORDER BY es.effective_from DESC
      LIMIT 1`,
-    [auth.id],
+    [auth.id, workDate, workDate],
   );
 
   // 4. Geofence check
@@ -162,26 +166,56 @@ export async function POST(request: NextRequest) {
       : 'present';
   }
 
-  // 6. Insert attendance record
-  const result = await query<{ insertId: number }>(
-    `INSERT INTO attendance
-       (employee_id, work_date, clock_in_utc, clock_in_lat, clock_in_lng,
-        ip_address, geofence_status, auth_method, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'webauthn', ?)`,
-    [
-      auth.id,
-      workDate,
-      toMySQLDatetime(nowUtc),
-      lat,
-      lng,
-      ip,
-      geofenceStatus,
-      status,
-    ],
+  // Record how this employee authenticates: if they have a passkey they logged
+  // in with WebAuthn; otherwise they used a PIN exemption.
+  const passkeyCount = await queryOne<{ c: number }>(
+    'SELECT COUNT(*) AS c FROM passkeys WHERE employee_id = ?',
+    [auth.id],
   );
+  const authMethod: 'webauthn' | 'pin_exemption' =
+    Number(passkeyCount?.c ?? 0) > 0 ? 'webauthn' : 'pin_exemption';
 
-  // mysql2 returns OkPacket-shaped result with insertId
-  const insertId = (result as unknown as { insertId: number }).insertId ?? 0;
+  // 6. Persist the clock-in.
+  //    If a no-clock-in row already exists for today (absent/leave/holiday),
+  //    convert it in place; otherwise insert a new record.
+  let insertId: number;
+  if (existing) {
+    await query(
+      `UPDATE attendance
+       SET clock_in_utc    = ?,
+           clock_in_lat    = ?,
+           clock_in_lng    = ?,
+           ip_address      = ?,
+           geofence_status = ?,
+           auth_method     = ?,
+           status          = ?,
+           clock_out_utc   = NULL,
+           total_minutes   = NULL
+       WHERE id = ?`,
+      [toMySQLDatetime(nowUtc), lat, lng, ip, geofenceStatus, authMethod, status, existing.id],
+    );
+    insertId = existing.id;
+  } else {
+    const result = await query<{ insertId: number }>(
+      `INSERT INTO attendance
+         (employee_id, work_date, clock_in_utc, clock_in_lat, clock_in_lng,
+          ip_address, geofence_status, auth_method, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        auth.id,
+        workDate,
+        toMySQLDatetime(nowUtc),
+        lat,
+        lng,
+        ip,
+        geofenceStatus,
+        authMethod,
+        status,
+      ],
+    );
+    // mysql2 returns OkPacket-shaped result with insertId
+    insertId = (result as unknown as { insertId: number }).insertId ?? 0;
+  }
 
   // 7. Audit log
   await insertAuditLog({

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth, hashPin } from '@/lib/auth';
+import { getWorkDateIST } from '@/lib/attendance';
 import type { ApiResponse, Employee, EmployeeSchedule } from '@/lib/types';
 
 // ---------------------------------------------------------------------------
@@ -95,11 +96,11 @@ export async function GET(request: NextRequest, context: Params) {
      JOIN  shifts s    ON es.shift_id    = s.id
      LEFT JOIN locations l ON es.location_id = l.id
      WHERE es.employee_id = ?
-       AND es.effective_from <= CURDATE()
-       AND (es.effective_to IS NULL OR es.effective_to >= CURDATE())
+       AND es.effective_from <= ?
+       AND (es.effective_to IS NULL OR es.effective_to >= ?)
      ORDER BY es.effective_from DESC
      LIMIT 1`,
-    [employeeId],
+    [employeeId, getWorkDateIST(), getWorkDateIST()],
   );
 
   if (schedule) {

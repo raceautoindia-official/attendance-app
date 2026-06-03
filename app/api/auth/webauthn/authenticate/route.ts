@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryOne } from '@/lib/db';
-import { getPendingAuthFromRequest } from '@/lib/auth';
+import { getPendingAuthFromRequest, setWebAuthnChallengeCookie } from '@/lib/auth';
 import { generateAuthenticationOptions, getWebAuthnConfigFromRequest } from '@/lib/webauthn';
 import type { ApiResponse, Employee } from '@/lib/types';
 
@@ -34,7 +34,9 @@ export async function GET(request: NextRequest) {
 
   const options = await generateAuthenticationOptions(employee, getWebAuthnConfigFromRequest(request));
 
-  return NextResponse.json<ApiResponse<typeof options>>(
+  const res = NextResponse.json<ApiResponse<typeof options>>(
     { success: true, data: options },
   );
+  setWebAuthnChallengeCookie(res, options.challenge, 'authenticate');
+  return res;
 }

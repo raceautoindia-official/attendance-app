@@ -4,7 +4,6 @@ import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import {
   getWorkDateIST,
-  isEarlyDeparture,
   getClientIp,
   toMySQLDatetime,
 } from '@/lib/attendance';
@@ -78,8 +77,13 @@ export async function POST(request: NextRequest) {
   const workDate = getWorkDateIST();
   const ip = getClientIp(request);
 
-  // 2. Find today's open (not yet clocked-out) record, joining the active schedule
-  //    for shift end_time to detect early departure.
+  // 2. Find the employee's open (clocked-in but not yet clocked-out) session.
+  //    We deliberately do NOT filter by a.work_date = today: if the server's
+  //    clock/timezone drifts, or an employee forgot to clock out on a previous
+  //    day, the open session may carry a different work_date. Matching on the
+  //    open session itself (clock_in present, clock_out NULL) makes clock-out
+  //    robust to those date mismatches. The schedule join keys off the record's
+  //    own work_date so the right shift end_time is used for early-departure.
   const record = await queryOne<AttendanceWithShift>(
     `SELECT
        a.id, a.employee_id, a.work_date, a.clock_in_utc,
@@ -88,20 +92,20 @@ export async function POST(request: NextRequest) {
      FROM attendance a
      LEFT JOIN employee_schedules es
        ON es.employee_id = a.employee_id
-       AND es.effective_from <= CURDATE()
-       AND (es.effective_to IS NULL OR es.effective_to >= CURDATE())
+       AND es.effective_from <= a.work_date
+       AND (es.effective_to IS NULL OR es.effective_to >= a.work_date)
      LEFT JOIN shifts s ON es.shift_id = s.id
      WHERE a.employee_id = ?
-       AND a.work_date = ?
+       AND a.clock_in_utc IS NOT NULL
        AND a.clock_out_utc IS NULL
-     ORDER BY es.effective_from DESC
+     ORDER BY a.clock_in_utc DESC, es.effective_from DESC
      LIMIT 1`,
-    [auth.id, workDate],
+    [auth.id],
   );
 
   if (!record) {
     return NextResponse.json<ApiResponse>(
-      { success: false, error: 'No open clock-in found for today' },
+      { success: false, error: 'No open clock-in found' },
       { status: 404 },
     );
   }
@@ -113,18 +117,11 @@ export async function POST(request: NextRequest) {
     (nowUtc.getTime() - clockInUtc.getTime()) / 60_000,
   );
 
-  // 4. Determine if early departure
-  let newStatus = record.status;
-  if (
-    record.end_time &&
-    record.shift_type !== 'flexible' &&
-    isEarlyDeparture(nowUtc, record.end_time, record.work_date)
-  ) {
-    // Only downgrade to early_departure if currently 'present' or 'late'
-    if (newStatus === 'present' || newStatus === 'late') {
-      newStatus = 'early_departure';
-    }
-  }
+  // 4. Status is left unchanged on clock-out — we do not evaluate the clock-out
+  //    time against the shift end (no early-departure check). Each day stands on
+  //    its own; sessions left open are auto-closed at midnight by the
+  //    /api/cron/close-sessions job.
+  const newStatus = record.status;
 
   // 5. Update the record
   await query(

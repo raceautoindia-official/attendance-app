@@ -58,11 +58,11 @@ export async function GET(request: NextRequest) {
      JOIN shifts s ON es.shift_id = s.id
      LEFT JOIN locations l ON es.location_id = l.id
      WHERE es.employee_id = ?
-       AND es.effective_from <= CURDATE()
-       AND (es.effective_to IS NULL OR es.effective_to >= CURDATE())
+       AND es.effective_from <= ?
+       AND (es.effective_to IS NULL OR es.effective_to >= ?)
      ORDER BY es.effective_from DESC
      LIMIT 1`,
-    [auth.id],
+    [auth.id, workDate, workDate],
   );
 
   // mysql2 returns JSON columns as strings; parse them before sending

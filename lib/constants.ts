@@ -23,6 +23,11 @@ export const REFRESH_TOKEN_COOKIE = 'refresh_token';
 export const MINUTES_IN_DAY = 1440;
 export const LATE_THRESHOLD_MINUTES = 10; // matches default grace_minutes
 
+// Standard required working hours per shift. Used as the credited duration
+// when a session is auto-closed because the employee forgot to clock out.
+export const REQUIRED_SHIFT_HOURS = 9;
+export const REQUIRED_SHIFT_MINUTES = REQUIRED_SHIFT_HOURS * 60;
+
 // Pagination
 export const DEFAULT_PAGE_SIZE = 25;
 export const MAX_PAGE_SIZE = 100;

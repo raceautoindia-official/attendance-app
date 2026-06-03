@@ -211,7 +211,7 @@ CREATE TABLE attendance (
   clock_out_lng    DECIMAL(10,7)  NULL,
   ip_address       VARCHAR(45)    NULL,
   geofence_status  ENUM('inside','outside','not_required') NOT NULL DEFAULT 'not_required',
-  auth_method      ENUM('webauthn','pin_exemption')        NOT NULL,
+  auth_method      ENUM('webauthn','pin_exemption')        NULL,
   total_minutes    INT            NULL,
   status           ENUM('present','late','early_departure','absent','leave','holiday') NOT NULL DEFAULT 'present',
   notes            TEXT           NULL,

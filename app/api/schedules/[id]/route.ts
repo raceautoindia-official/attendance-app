@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { query, queryOne } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
+import { getWorkDateIST } from '@/lib/attendance';
 import type { ApiResponse, Shift } from '@/lib/types';
 
 type Params = { params: Promise<{ id: string }> };
@@ -112,8 +113,8 @@ export async function DELETE(request: NextRequest, context: Params) {
   // Block deletion if the shift is referenced by any active schedule
   const inUse = await queryOne<{ count: number }>(
     `SELECT COUNT(*) AS count FROM employee_schedules
-     WHERE shift_id = ? AND (effective_to IS NULL OR effective_to >= CURDATE())`,
-    [shiftId],
+     WHERE shift_id = ? AND (effective_to IS NULL OR effective_to >= ?)`,
+    [shiftId, getWorkDateIST()],
   );
   if (Number(inUse?.count ?? 0) > 0) {
     return NextResponse.json<ApiResponse>(

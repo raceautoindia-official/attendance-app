@@ -136,7 +136,7 @@ export interface AttendanceRecord {
   clock_out_lng: number | null;
   ip_address: string | null;
   geofence_status: GeofenceStatus;
-  auth_method: AuthMethod;
+  auth_method: AuthMethod | null;
   total_minutes: number | null;
   status: AttendanceStatus;
   notes: string | null;

@@ -295,3 +295,74 @@ export function getPendingAuthFromRequest(request: NextRequest): string | null {
   if (!cookie) return null;
   return verifyPendingAuthToken(cookie);
 }
+
+// ---------------------------------------------------------------------------
+// WebAuthn challenge cookie (stateless — cluster-safe)
+//
+// The WebAuthn challenge is generated in the "get options" request and verified
+// in a later "verify" request. Storing it server-side (in memory or even DB)
+// is fragile under PM2 cluster mode where the two requests can hit different
+// processes. Instead we round-trip it through a short-lived signed HttpOnly
+// cookie, exactly like the pending-auth cookie above.
+// ---------------------------------------------------------------------------
+
+const WEBAUTHN_CHALLENGE_COOKIE = 'webauthn_challenge';
+const WEBAUTHN_CHALLENGE_MAX_AGE = 5 * 60; // 5 minutes
+
+type WebAuthnChallengePurpose = 'register' | 'authenticate';
+
+/** Persist a WebAuthn challenge in a signed, short-lived HttpOnly cookie. */
+export function setWebAuthnChallengeCookie(
+  response: NextResponse,
+  challenge: string,
+  purpose: WebAuthnChallengePurpose,
+): void {
+  const token = jwt.sign(
+    { challenge, purpose, kind: 'webauthn_challenge' },
+    accessSecret(),
+    { expiresIn: '5m' },
+  );
+  response.cookies.set(WEBAUTHN_CHALLENGE_COOKIE, token, {
+    httpOnly: true,
+    secure: IS_PRODUCTION,
+    sameSite: 'lax',
+    path: '/',
+    maxAge: WEBAUTHN_CHALLENGE_MAX_AGE,
+  });
+}
+
+/**
+ * Read and verify the WebAuthn challenge cookie. Returns the challenge string
+ * if present, unexpired, and matching the expected purpose; otherwise null.
+ */
+export function getWebAuthnChallengeFromRequest(
+  request: NextRequest,
+  purpose: WebAuthnChallengePurpose,
+): string | null {
+  const cookie = request.cookies.get(WEBAUTHN_CHALLENGE_COOKIE)?.value;
+  if (!cookie) return null;
+  try {
+    const payload = jwt.verify(cookie, accessSecret()) as {
+      challenge: string;
+      purpose: string;
+      kind: string;
+    };
+    if (payload.kind !== 'webauthn_challenge' || payload.purpose !== purpose) {
+      return null;
+    }
+    return payload.challenge;
+  } catch {
+    return null;
+  }
+}
+
+/** Clear the WebAuthn challenge cookie (call after a verify attempt). */
+export function clearWebAuthnChallengeCookie(response: NextResponse): void {
+  response.cookies.set(WEBAUTHN_CHALLENGE_COOKIE, '', {
+    httpOnly: true,
+    secure: IS_PRODUCTION,
+    sameSite: 'lax',
+    path: '/',
+    maxAge: 0,
+  });
+}
