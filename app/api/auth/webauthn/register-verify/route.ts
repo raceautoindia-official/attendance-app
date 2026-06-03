@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { queryOne, query, insertAuditLog } from '@/lib/db';
-import { requireAuth, getWebAuthnChallengeFromRequest, clearWebAuthnChallengeCookie } from '@/lib/auth';
+import { requireAuth } from '@/lib/auth';
 import { verifyRegistrationResponse, getWebAuthnConfigFromRequest } from '@/lib/webauthn';
 import { MAX_DEVICES_PER_EMPLOYEE } from '@/lib/constants';
-import type { ApiResponse } from '@/lib/types';
+import type { ApiResponse, Employee } from '@/lib/types';
 import type { RegistrationResponseJSON } from '@simplewebauthn/server';
 
 // ---------------------------------------------------------------------------
@@ -52,14 +52,6 @@ export async function POST(request: NextRequest) {
 
   const { device_name, ...registrationResponse } = parsed.data;
 
-  const expectedChallenge = getWebAuthnChallengeFromRequest(request, 'register');
-  if (!expectedChallenge) {
-    return NextResponse.json<ApiResponse>(
-      { success: false, error: 'Registration session expired. Please start passkey setup again.' },
-      { status: 400 },
-    );
-  }
-
   // Enforce per-employee device cap
   const countRow = await queryOne<{ count: number }>(
     'SELECT COUNT(*) AS count FROM passkeys WHERE employee_id = ?',
@@ -75,19 +67,19 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const employee: Pick<Employee, 'emp_id'> = { emp_id: auth.emp_id };
+
   const result = await verifyRegistrationResponse(
+    employee,
     registrationResponse as RegistrationResponseJSON,
-    expectedChallenge,
     getWebAuthnConfigFromRequest(request),
   );
 
   if (!result.verified || !result.credentialId || result.publicKey === undefined) {
-    const res = NextResponse.json<ApiResponse>(
+    return NextResponse.json<ApiResponse>(
       { success: false, error: 'Passkey registration failed' },
       { status: 400 },
     );
-    clearWebAuthnChallengeCookie(res);
-    return res;
   }
 
   // Derive a human-readable device name from User-Agent if not supplied
@@ -118,9 +110,7 @@ export async function POST(request: NextRequest) {
       request.headers.get('x-forwarded-for')?.split(',')[0].trim() ?? null,
   });
 
-  const res = NextResponse.json<ApiResponse<{ credentialId: string }>>(
+  return NextResponse.json<ApiResponse<{ credentialId: string }>>(
     { success: true, data: { credentialId: result.credentialId } },
   );
-  clearWebAuthnChallengeCookie(res);
-  return res;
 }

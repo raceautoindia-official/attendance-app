@@ -8,8 +8,6 @@ import {
   setAuthCookies,
   getPendingAuthFromRequest,
   clearPendingAuthCookie,
-  getWebAuthnChallengeFromRequest,
-  clearWebAuthnChallengeCookie,
 } from '@/lib/auth';
 import { verifyAuthenticationResponse, getWebAuthnConfigFromRequest } from '@/lib/webauthn';
 import type { ApiResponse, Employee } from '@/lib/types';
@@ -69,15 +67,6 @@ export async function POST(request: NextRequest) {
 
   const assertionResponse = parsed.data;
 
-  // 1b. Read the challenge from the signed cookie set by the authenticate route
-  const expectedChallenge = getWebAuthnChallengeFromRequest(request, 'authenticate');
-  if (!expectedChallenge) {
-    return NextResponse.json<ApiResponse>(
-      { success: false, error: 'Authentication session expired. Please sign in again.' },
-      { status: 401 },
-    );
-  }
-
   // 2. Load employee
   const employee = await queryOne<Employee>(
     `SELECT id, emp_id, name, email, phone, role, is_active, manager_id,
@@ -96,9 +85,8 @@ export async function POST(request: NextRequest) {
 
   // 3. Verify WebAuthn assertion
   const result = await verifyAuthenticationResponse(
-    { id: employee.id },
+    { id: employee.id, emp_id: employee.emp_id },
     assertionResponse as AuthenticationResponseJSON,
-    expectedChallenge,
     getWebAuthnConfigFromRequest(request),
   );
 
@@ -111,12 +99,10 @@ export async function POST(request: NextRequest) {
       details: { method: 'webauthn', emp_id },
       ip_address: ip,
     });
-    const res = NextResponse.json<ApiResponse>(
+    return NextResponse.json<ApiResponse>(
       { success: false, error: 'Passkey could not be verified. Please try again or register your passkey again on this device.' },
       { status: 401 },
     );
-    clearWebAuthnChallengeCookie(res);
-    return res;
   }
 
   // 4. Persist updated counter and last_used_at
@@ -169,6 +155,5 @@ export async function POST(request: NextRequest) {
 
   setAuthCookies(res, accessToken, refreshToken);
   clearPendingAuthCookie(res);
-  clearWebAuthnChallengeCookie(res);
   return res;
 }

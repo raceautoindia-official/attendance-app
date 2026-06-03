@@ -241,10 +241,12 @@ const PENDING_AUTH_PURPOSE = 'webauthn_pending';
 const PENDING_AUTH_MAX_AGE = 5 * 60; // 5 minutes
 
 function signPendingAuthToken(emp_id: string): string {
+  // No JWT `exp` on purpose — lifetime is bounded by the cookie's maxAge
+  // (browser clock). A server-clock-based exp breaks the login ceremony when
+  // the server time is skewed. The signature still prevents tampering.
   return jwt.sign(
     { emp_id, purpose: PENDING_AUTH_PURPOSE },
     accessSecret(),
-    { expiresIn: '5m' },
   );
 }
 
@@ -317,10 +319,13 @@ export function setWebAuthnChallengeCookie(
   challenge: string,
   purpose: WebAuthnChallengePurpose,
 ): void {
+  // No JWT `exp`: validity is bounded by the cookie's maxAge below, which uses
+  // the browser's clock. Tying it to the server clock (via expiresIn) makes the
+  // ceremony fail whenever the server time is skewed. The challenge is random,
+  // single-use and cleared after verify, so a signature (integrity) is enough.
   const token = jwt.sign(
     { challenge, purpose, kind: 'webauthn_challenge' },
     accessSecret(),
-    { expiresIn: '5m' },
   );
   response.cookies.set(WEBAUTHN_CHALLENGE_COOKIE, token, {
     httpOnly: true,

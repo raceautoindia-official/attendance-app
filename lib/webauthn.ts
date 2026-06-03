@@ -1,10 +1,11 @@
-﻿/**
+/**
  * WebAuthn helpers using @simplewebauthn/server v13.
  *
- * Challenges are stateless: each "get options" call returns the challenge to the
- * route handler, which stores it in a short-lived signed HttpOnly cookie (see
- * lib/auth.ts). This is safe across PM2 cluster instances — no shared server
- * store is required.
+ * Challenge storage is DB-backed (the `webauthn_challenges` table, keyed by
+ * emp_id). This is shared across all PM2 cluster processes and does not depend
+ * on cookies surviving the round-trip or on the server clock being correct, so
+ * the register/authenticate ceremonies work reliably. The table is auto-created
+ * on first use if it does not already exist.
  */
 
 import {
@@ -20,7 +21,7 @@ import type {
   PublicKeyCredentialRequestOptionsJSON,
 } from '@simplewebauthn/server';
 import type { NextRequest } from 'next/server';
-import { query } from './db';
+import { query, queryOne } from './db';
 import type { Employee, Passkey } from './types';
 
 export type WebAuthnRuntimeConfig = {
@@ -53,11 +54,51 @@ export function getWebAuthnConfigFromRequest(request: NextRequest): WebAuthnRunt
   };
 }
 
-// NOTE: WebAuthn challenges are no longer stored server-side. They are returned
-// to the caller (route handler), which persists them in a short-lived signed
-// HttpOnly cookie via lib/auth.ts. This is stateless and therefore safe across
-// PM2 cluster instances, where a per-process in-memory store would break (the
-// GET-options and POST-verify requests can land on different processes).
+// ---------------------------------------------------------------------------
+// Challenge store — DB-backed, cluster-safe, clock-independent.
+// ---------------------------------------------------------------------------
+
+let challengeTableReady = false;
+
+async function ensureChallengeTable(): Promise<void> {
+  if (challengeTableReady) return;
+  await query(
+    `CREATE TABLE IF NOT EXISTS webauthn_challenges (
+       emp_id     VARCHAR(20)  NOT NULL,
+       challenge  VARCHAR(255) NOT NULL,
+       created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       PRIMARY KEY (emp_id)
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  );
+  challengeTableReady = true;
+}
+
+async function storeChallenge(empId: string, challenge: string): Promise<void> {
+  await ensureChallengeTable();
+  await query(
+    `INSERT INTO webauthn_challenges (emp_id, challenge, created_at)
+     VALUES (?, ?, UTC_TIMESTAMP())
+     ON DUPLICATE KEY UPDATE challenge = VALUES(challenge), created_at = UTC_TIMESTAMP()`,
+    [empId, challenge],
+  );
+}
+
+async function getChallenge(empId: string): Promise<string | null> {
+  await ensureChallengeTable();
+  const row = await queryOne<{ challenge: string }>(
+    'SELECT challenge FROM webauthn_challenges WHERE emp_id = ?',
+    [empId],
+  );
+  return row?.challenge ?? null;
+}
+
+async function deleteChallenge(empId: string): Promise<void> {
+  try {
+    await query('DELETE FROM webauthn_challenges WHERE emp_id = ?', [empId]);
+  } catch {
+    // Non-fatal: a stale challenge is overwritten on the next attempt anyway.
+  }
+}
 
 export async function generateRegistrationOptions(
   employee: Pick<Employee, 'id' | 'emp_id' | 'name'>,
@@ -80,15 +121,14 @@ export async function generateRegistrationOptions(
     authenticatorSelection: {
       // 'preferred' creates a discoverable (resident) passkey when the device
       // supports it — on Android/Chrome that means it is saved to Google
-      // Password Manager and synced to the user's account, so once set it
-      // persists permanently and needs no re-registration. Unlike 'required',
-      // it does not hard-fail on authenticators that lack resident-key support.
+      // Password Manager and synced, so once set it persists permanently. It
+      // does not hard-fail on authenticators that lack resident-key support.
       residentKey: 'preferred',
       userVerification: 'required',
     },
   });
 
-  // Challenge is persisted by the route handler in a signed cookie.
+  await storeChallenge(employee.emp_id, options.challenge);
   return options;
 }
 
@@ -100,11 +140,12 @@ export interface VerifyRegistrationResult {
 }
 
 export async function verifyRegistrationResponse(
+  employee: Pick<Employee, 'emp_id'>,
   response: RegistrationResponseJSON,
-  expectedChallenge: string,
   config?: WebAuthnRuntimeConfig,
 ): Promise<VerifyRegistrationResult> {
   const resolved = resolveConfig(config);
+  const expectedChallenge = await getChallenge(employee.emp_id);
   if (!expectedChallenge) return { verified: false };
 
   try {
@@ -114,6 +155,8 @@ export async function verifyRegistrationResponse(
       expectedOrigin: resolved.origin,
       expectedRPID: resolved.rpID,
     });
+
+    await deleteChallenge(employee.emp_id);
 
     if (!verified || !registrationInfo) return { verified: false };
 
@@ -125,13 +168,14 @@ export async function verifyRegistrationResponse(
       counter: credential.counter,
     };
   } catch (err) {
+    await deleteChallenge(employee.emp_id);
     console.error('[webauthn] Registration verification error:', err);
     return { verified: false };
   }
 }
 
 export async function generateAuthenticationOptions(
-  employee: Pick<Employee, 'id'>,
+  employee: Pick<Employee, 'id' | 'emp_id'>,
   config?: WebAuthnRuntimeConfig,
 ): Promise<PublicKeyCredentialRequestOptionsJSON> {
   const resolved = resolveConfig(config);
@@ -146,7 +190,7 @@ export async function generateAuthenticationOptions(
     userVerification: 'required',
   });
 
-  // Challenge is persisted by the route handler in a signed cookie.
+  await storeChallenge(employee.emp_id, options.challenge);
   return options;
 }
 
@@ -157,12 +201,12 @@ export interface VerifyAuthenticationResult {
 }
 
 export async function verifyAuthenticationResponse(
-  employee: Pick<Employee, 'id'>,
+  employee: Pick<Employee, 'id' | 'emp_id'>,
   response: AuthenticationResponseJSON,
-  expectedChallenge: string,
   config?: WebAuthnRuntimeConfig,
 ): Promise<VerifyAuthenticationResult> {
   const resolved = resolveConfig(config);
+  const expectedChallenge = await getChallenge(employee.emp_id);
   if (!expectedChallenge) return { verified: false };
 
   const passkey = await query<Passkey>(
@@ -170,7 +214,10 @@ export async function verifyAuthenticationResponse(
     [employee.id, response.id],
   ).then(rows => rows[0] ?? null);
 
-  if (!passkey) return { verified: false };
+  if (!passkey) {
+    await deleteChallenge(employee.emp_id);
+    return { verified: false };
+  }
 
   try {
     const { verified, authenticationInfo } = await swVerifyAuthenticationResponse({
@@ -185,6 +232,8 @@ export async function verifyAuthenticationResponse(
       },
     });
 
+    await deleteChallenge(employee.emp_id);
+
     if (!verified) return { verified: false };
 
     return {
@@ -193,6 +242,7 @@ export async function verifyAuthenticationResponse(
       credentialId: passkey.credential_id,
     };
   } catch (err) {
+    await deleteChallenge(employee.emp_id);
     console.error('[webauthn] Authentication verification error:', err);
     return { verified: false };
   }
