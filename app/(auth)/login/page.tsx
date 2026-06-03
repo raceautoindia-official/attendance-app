@@ -41,7 +41,7 @@ export default function LoginPage() {
     setWebAuthnPending(true);
     setError(null);
     try {
-      const optRes = await fetch('/api/auth/webauthn/authenticate', { cache: 'no-store' });
+      const optRes = await fetch(`/api/auth/webauthn/authenticate?t=${Date.now()}`, { cache: 'no-store' });
       const optJson = await optRes.json() as ApiResponse<object>;
       if (!optJson.success || !optJson.data) {
         throw new Error(optJson.error ?? 'Failed to get authentication options');

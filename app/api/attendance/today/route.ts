@@ -76,11 +76,14 @@ export async function GET(request: NextRequest) {
     } catch { s.location = null; }
   }
 
-  return NextResponse.json<ApiResponse<TodayResponse>>({
-    success: true,
-    data: {
-      attendance: attendance ?? null,
-      schedule: schedule ?? null,
+  return NextResponse.json<ApiResponse<TodayResponse>>(
+    {
+      success: true,
+      data: {
+        attendance: attendance ?? null,
+        schedule: schedule ?? null,
+      },
     },
-  });
+    { headers: { 'Cache-Control': 'no-store' } },
+  );
 }

@@ -132,11 +132,14 @@ export async function GET(request: NextRequest) {
   return NextResponse.json<ApiResponse<{
     records: AttendanceRecord[];
     pagination: { page: number; limit: number; total: number; totalPages: number };
-  }>>({
-    success: true,
-    data: {
-      records: rows,
-      pagination: { page, limit, total, totalPages },
+  }>>(
+    {
+      success: true,
+      data: {
+        records: rows,
+        pagination: { page, limit, total, totalPages },
+      },
     },
-  });
+    { headers: { 'Cache-Control': 'no-store' } },
+  );
 }

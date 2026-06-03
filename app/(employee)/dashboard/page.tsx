@@ -10,6 +10,7 @@ import Spinner from '@/components/ui/Spinner';
 import Table from '@/components/ui/Table';
 import Pagination from '@/components/ui/Pagination';
 import { useCurrentUser } from '@/lib/useCurrentUser';
+import { REQUIRED_SHIFT_HOURS } from '@/lib/constants';
 import type { AttendanceRecord, AttendanceStatus, ApiResponse } from '@/lib/types';
 import { cn } from '@/lib/cn';
 import { formatDateOnly } from '@/lib/date';
@@ -99,7 +100,7 @@ export default function DashboardPage() {
   const { data: todayData, isLoading: todayLoading } = useQuery({
     queryKey: ['attendance', 'today'],
     queryFn: async () => {
-      const res = await fetch('/api/attendance/today');
+      const res = await fetch('/api/attendance/today', { cache: 'no-store' });
       return res.json() as Promise<ApiResponse<TodayData>>;
     },
     refetchInterval: 60_000,
@@ -111,7 +112,7 @@ export default function DashboardPage() {
   const { data: historyData, isLoading: historyLoading } = useQuery({
     queryKey: ['attendance', 'history', historyPage],
     queryFn: async () => {
-      const res = await fetch(`/api/attendance?from_date=${sevenDaysAgo}&to_date=${today}&limit=7&page=${historyPage}`);
+      const res = await fetch(`/api/attendance?from_date=${sevenDaysAgo}&to_date=${today}&limit=7&page=${historyPage}`, { cache: 'no-store' });
       return res.json() as Promise<ApiResponse<{ records: AttendanceRecord[]; pagination: { total: number; totalPages: number } }>>;
     },
   });
@@ -196,7 +197,16 @@ export default function DashboardPage() {
       if (!json.success) throw new Error(json.error ?? `${action} failed`);
       return json;
     },
-    onSuccess: () => {
+    onSuccess: (json) => {
+      // Reflect the clock-in/out immediately from the server's authoritative
+      // record, so the card updates even if a background refetch is delayed.
+      const rec = (json as unknown as ApiResponse<AttendanceRecord>)?.data;
+      if (rec) {
+        qc.setQueryData<ApiResponse<TodayData>>(['attendance', 'today'], old => ({
+          success: true,
+          data: { attendance: rec, schedule: old?.data?.schedule ?? null },
+        }));
+      }
       qc.invalidateQueries({ queryKey: ['attendance'] });
       qc.invalidateQueries({ queryKey: ['live-tracking', 'status'] });
       qc.invalidateQueries({ queryKey: ['live-tracking', 'live-self'] });
@@ -439,7 +449,7 @@ export default function DashboardPage() {
             {schedule?.shift && (
               <div className="mb-4 text-sm text-slate-600 dark:text-slate-300">
                 {schedule.shift.type === 'flexible'
-                  ? `${schedule.shift.name ?? 'Flexible Shift'} - ${schedule.shift.required_hours ?? 0} hours required`
+                  ? `${schedule.shift.name ?? 'Flexible Shift'} - ${REQUIRED_SHIFT_HOURS} hours required`
                   : `${schedule.shift.name ?? 'Shift'} - ${schedule.shift.start_time?.slice(0, 5) ?? '--:--'} to ${schedule.shift.end_time?.slice(0, 5) ?? '--:--'}`}
               </div>
             )}
