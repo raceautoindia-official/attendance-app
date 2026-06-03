@@ -18,7 +18,9 @@ export async function GET(request: NextRequest) {
 
   const options = await generateRegistrationOptions(employee, getWebAuthnConfigFromRequest(request));
 
+  // Never cache: each call must hit the server to store a fresh challenge.
   return NextResponse.json<ApiResponse<typeof options>>(
     { success: true, data: options },
+    { headers: { 'Cache-Control': 'no-store' } },
   );
 }

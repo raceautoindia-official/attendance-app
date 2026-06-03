@@ -51,7 +51,7 @@ export default function RegisterPasskeyPage() {
           return;
         }
       }
-      const optRes = await fetch(`/api/auth/webauthn/register?attachment=${selectedAttachment}`);
+      const optRes = await fetch(`/api/auth/webauthn/register?attachment=${selectedAttachment}`, { cache: 'no-store' });
       const optJson = await optRes.json() as ApiResponse<object>;
       if (!optJson.success || !optJson.data) {
         if (optRes.status === 401) {
