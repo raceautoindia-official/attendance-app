@@ -100,7 +100,7 @@ export async function POST(request: NextRequest) {
       ip_address: ip,
     });
     return NextResponse.json<ApiResponse>(
-      { success: false, error: 'Passkey could not be verified. Please try again or register your passkey again on this device.' },
+      { success: false, error: result.error ?? 'Passkey could not be verified. Please try again or register your passkey again on this device.' },
       { status: 401 },
     );
   }

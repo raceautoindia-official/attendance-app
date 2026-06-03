@@ -77,7 +77,7 @@ export async function POST(request: NextRequest) {
 
   if (!result.verified || !result.credentialId || result.publicKey === undefined) {
     return NextResponse.json<ApiResponse>(
-      { success: false, error: 'Passkey registration failed' },
+      { success: false, error: result.error ?? 'Passkey registration failed' },
       { status: 400 },
     );
   }

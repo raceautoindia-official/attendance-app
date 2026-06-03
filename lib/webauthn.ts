@@ -137,6 +137,7 @@ export interface VerifyRegistrationResult {
   credentialId?: string;
   publicKey?: string;
   counter?: number;
+  error?: string;
 }
 
 export async function verifyRegistrationResponse(
@@ -146,7 +147,9 @@ export async function verifyRegistrationResponse(
 ): Promise<VerifyRegistrationResult> {
   const resolved = resolveConfig(config);
   const expectedChallenge = await getChallenge(employee.emp_id);
-  if (!expectedChallenge) return { verified: false };
+  if (!expectedChallenge) {
+    return { verified: false, error: 'No registration challenge found. Please tap Register passkey again.' };
+  }
 
   try {
     const { verified, registrationInfo } = await swVerifyRegistrationResponse({
@@ -158,7 +161,9 @@ export async function verifyRegistrationResponse(
 
     await deleteChallenge(employee.emp_id);
 
-    if (!verified || !registrationInfo) return { verified: false };
+    if (!verified || !registrationInfo) {
+      return { verified: false, error: 'Attestation could not be verified.' };
+    }
 
     const { credential } = registrationInfo;
     return {
@@ -169,8 +174,11 @@ export async function verifyRegistrationResponse(
     };
   } catch (err) {
     await deleteChallenge(employee.emp_id);
-    console.error('[webauthn] Registration verification error:', err);
-    return { verified: false };
+    console.error('[webauthn] Registration verification error:', err, {
+      expectedOrigin: resolved.origin,
+      expectedRPID: resolved.rpID,
+    });
+    return { verified: false, error: (err as Error).message };
   }
 }
 
@@ -198,6 +206,7 @@ export interface VerifyAuthenticationResult {
   verified: boolean;
   newCounter?: number;
   credentialId?: string;
+  error?: string;
 }
 
 export async function verifyAuthenticationResponse(
@@ -207,7 +216,9 @@ export async function verifyAuthenticationResponse(
 ): Promise<VerifyAuthenticationResult> {
   const resolved = resolveConfig(config);
   const expectedChallenge = await getChallenge(employee.emp_id);
-  if (!expectedChallenge) return { verified: false };
+  if (!expectedChallenge) {
+    return { verified: false, error: 'No login challenge found. Please try signing in again.' };
+  }
 
   const passkey = await query<Passkey>(
     'SELECT * FROM passkeys WHERE employee_id = ? AND credential_id = ?',
@@ -216,7 +227,7 @@ export async function verifyAuthenticationResponse(
 
   if (!passkey) {
     await deleteChallenge(employee.emp_id);
-    return { verified: false };
+    return { verified: false, error: 'This passkey is not registered for your account.' };
   }
 
   try {
@@ -234,7 +245,7 @@ export async function verifyAuthenticationResponse(
 
     await deleteChallenge(employee.emp_id);
 
-    if (!verified) return { verified: false };
+    if (!verified) return { verified: false, error: 'Assertion could not be verified.' };
 
     return {
       verified: true,
@@ -243,7 +254,10 @@ export async function verifyAuthenticationResponse(
     };
   } catch (err) {
     await deleteChallenge(employee.emp_id);
-    console.error('[webauthn] Authentication verification error:', err);
-    return { verified: false };
+    console.error('[webauthn] Authentication verification error:', err, {
+      expectedOrigin: resolved.origin,
+      expectedRPID: resolved.rpID,
+    });
+    return { verified: false, error: (err as Error).message };
   }
 }
