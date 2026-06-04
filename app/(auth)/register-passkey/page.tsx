@@ -36,6 +36,7 @@ export default function RegisterPasskeyPage() {
   async function handleRegister() {
     setState('registering');
     setMessage(null);
+    let serverRpId: string | undefined;
     try {
       if (insecureContext) {
         setMessage('Passkeys require HTTPS. Open this app on https:// (or localhost) and try again.');
@@ -62,6 +63,10 @@ export default function RegisterPasskeyPage() {
         throw new Error(optJson.error ?? 'Failed to get registration options');
       }
 
+      // The domain (rp.id) the server configured the passkey for. Must match the
+      // page's hostname or the browser silently refuses to create a passkey.
+      serverRpId = (optJson.data as { rp?: { id?: string } })?.rp?.id;
+
       const credential = await startRegistration({ optionsJSON: optJson.data as Parameters<typeof startRegistration>[0]['optionsJSON'] });
 
       const verRes = await fetch('/api/auth/webauthn/register-verify', {
@@ -77,11 +82,22 @@ export default function RegisterPasskeyPage() {
       setTimeout(() => router.push(skipDest), 2000);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Registration failed';
-      if (msg.includes('cancelled') || msg.includes('NotAllowed')) {
-        setMessage('Registration was cancelled. You can try again when ready.');
+      const host = typeof window !== 'undefined' ? window.location.hostname : '';
+      const domainMismatch = !!serverRpId && host !== serverRpId && !host.endsWith(`.${serverRpId}`);
+
+      if (domainMismatch) {
+        // The #1 real cause of "can't set passkey": server's WEBAUTHN_RP_ID does
+        // not match the site domain (e.g. left as 'localhost' in production).
+        setMessage(
+          `Passkey can't be set up: this site is configured for domain "${serverRpId}", but you are on "${host}". ` +
+          `Ask your administrator to set WEBAUTHN_RP_ID="${host}" and WEBAUTHN_ORIGIN="${window.location.origin}" on the server.`,
+        );
+        setState('error');
+      } else if (msg.includes('cancelled') || msg.includes('NotAllowed')) {
+        setMessage('Registration was cancelled or no screen lock/fingerprint is set up on this device. Set a device screen lock, then try again.');
         setState('idle');
       } else if (msg.includes('SecurityError') || msg.includes('insecure')) {
-        setMessage('Face lock registration requires HTTPS (or localhost).');
+        setMessage('Passkeys require HTTPS and a matching domain. Open the app on the real https:// address and try again.');
         setState('error');
       } else {
         setMessage(msg);

@@ -248,6 +248,19 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Auto-grant a PIN exemption so the new employee can sign in with their PIN
+  // and set up their passkey on first login. (Admin only hands out an ID + PIN;
+  // no separate "grant access" step needed.) Non-fatal if it fails.
+  try {
+    await query(
+      `INSERT INTO passkey_exemptions (employee_id, granted_by, reason, is_active)
+       VALUES (?, ?, ?, TRUE)`,
+      [insertId, auth.id, 'Initial setup — pending passkey enrolment'],
+    );
+  } catch (err) {
+    console.error('[employees] Failed to auto-grant initial PIN exemption:', err);
+  }
+
   await insertAuditLog({
     action: 'employee_created',
     entity: 'employee',
