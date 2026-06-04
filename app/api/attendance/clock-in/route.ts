@@ -87,21 +87,31 @@ export async function POST(request: NextRequest) {
   const workDate = getWorkDateIST();
   const ip = getClientIp(request);
 
-  // 2. Prevent duplicate clock-in.
-  //    A row may already exist for today WITHOUT a clock-in (e.g. an 'absent'
-  //    row from the mark-absent cron, or a leave/holiday entry). Only block if
-  //    there is a real clock-in; otherwise we convert that row into a clock-in
-  //    below (rather than inserting a duplicate, which would hit the unique key).
-  const existing = await queryOne<{ id: number; clock_in_utc: Date | null }>(
-    `SELECT id, clock_in_utc FROM attendance WHERE employee_id = ? AND work_date = ?`,
-    [auth.id, workDate],
+  // 2. Prevent duplicate clock-in — based on whether the employee currently has
+  //    an OPEN session (clocked in, not yet clocked out), NOT on today's date.
+  //    This is robust to server clock/timezone skew: if the clock drifts, the
+  //    work_date written earlier may differ from "today", but the open session
+  //    is still detected here and matched by clock-out.
+  const openSession = await queryOne<{ id: number }>(
+    `SELECT id FROM attendance
+     WHERE employee_id = ? AND clock_in_utc IS NOT NULL AND clock_out_utc IS NULL
+     LIMIT 1`,
+    [auth.id],
   );
-  if (existing?.clock_in_utc) {
+  if (openSession) {
     return NextResponse.json<ApiResponse>(
-      { success: false, error: 'Already clocked in today' },
+      { success: false, error: 'Already clocked in' },
       { status: 409 },
     );
   }
+
+  // A row may already exist for today's date (a previously completed session, or
+  // an 'absent'/leave placeholder). We convert it in place rather than inserting
+  // a duplicate, which would violate the unique (employee_id, work_date) key.
+  const existing = await queryOne<{ id: number }>(
+    `SELECT id FROM attendance WHERE employee_id = ? AND work_date = ?`,
+    [auth.id, workDate],
+  );
 
   // 3. Fetch active schedule (shift + location details via JOIN)
   const schedule = await queryOne<ActiveSchedule>(

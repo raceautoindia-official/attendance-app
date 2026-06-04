@@ -21,12 +21,19 @@ export async function GET(request: NextRequest) {
 
   const workDate = getWorkDateIST();
 
-  // Fetch today's attendance record (if any)
+  // Fetch the employee's current attendance: prefer an OPEN session (clocked in,
+  // not clocked out) regardless of its work_date, so the dashboard correctly
+  // shows "clocked in" even if the server clock/timezone has drifted. Fall back
+  // to today's row (e.g. a completed session or an absent placeholder).
   const attendance = await queryOne<AttendanceRecord>(
     `SELECT a.*, e.name AS employee_name, e.emp_id
      FROM attendance a
      JOIN employees e ON a.employee_id = e.id
-     WHERE a.employee_id = ? AND a.work_date = ?`,
+     WHERE a.employee_id = ?
+       AND ((a.clock_in_utc IS NOT NULL AND a.clock_out_utc IS NULL) OR a.work_date = ?)
+     ORDER BY (a.clock_in_utc IS NOT NULL AND a.clock_out_utc IS NULL) DESC,
+              a.work_date DESC, a.clock_in_utc DESC
+     LIMIT 1`,
     [auth.id, workDate],
   );
 

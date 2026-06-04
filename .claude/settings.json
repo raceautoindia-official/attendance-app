@@ -3,7 +3,9 @@
     "allow": [
       "Bash(npx tsc *)",
       "Bash(npx eslint *)",
-      "Bash(SKIP_ENV_VALIDATION=1 npx next build)"
+      "Bash(SKIP_ENV_VALIDATION=1 npx next build)",
+      "Bash(sed -i 's/SELECT id, DATE_FORMAT\\(work_date/SELECT a.id, DATE_FORMAT\\(a.work_date/' sim.cjs)",
+      "Bash(node sim.cjs)"
     ]
   }
 }
