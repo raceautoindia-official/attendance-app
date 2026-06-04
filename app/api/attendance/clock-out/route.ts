@@ -110,37 +110,45 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 3. Calculate totals
+  // 3. Calculate totals (for the audit log / response record)
   const nowUtc = new Date();
+  const nowSql = toMySQLDatetime(nowUtc);
   const clockInUtc = new Date(record.clock_in_utc);
   const totalMinutes = Math.round(
     (nowUtc.getTime() - clockInUtc.getTime()) / 60_000,
   );
 
-  // 4. Status is left unchanged on clock-out — we do not evaluate the clock-out
-  //    time against the shift end (no early-departure check). Each day stands on
-  //    its own; sessions left open are auto-closed at midnight by the
-  //    /api/cron/close-sessions job.
-  const newStatus = record.status;
+  // 4. Status is left unchanged on clock-out — no early-departure time check.
 
-  // 5. Update the record
+  // 5. Close EVERY open session for this employee (normally just one). This also
+  //    cleans up any duplicate open rows left over from earlier clock/timezone
+  //    skew, so the dashboard never gets stuck showing "Clock Out". total_minutes
+  //    is computed per row from its own clock-in.
   await query(
     `UPDATE attendance
      SET clock_out_utc = ?,
          clock_out_lat = ?,
          clock_out_lng = ?,
-         total_minutes = ?,
-         status        = ?
-     WHERE id = ?`,
-    [
-      toMySQLDatetime(nowUtc),
-      lat,
-      lng,
-      totalMinutes,
-      newStatus,
-      record.id,
-    ],
+         total_minutes = GREATEST(0, TIMESTAMPDIFF(MINUTE, clock_in_utc, ?))
+     WHERE employee_id = ?
+       AND clock_in_utc IS NOT NULL
+       AND clock_out_utc IS NULL`,
+    [nowSql, lat, lng, nowSql, auth.id],
   );
+
+  // Also end any active live-tracking session. Non-fatal if the table is absent.
+  try {
+    await query(
+      `UPDATE live_tracking_sessions
+       SET is_active = FALSE, ended_at_utc = ?, last_ping_utc = ?
+       WHERE employee_id = ? AND is_active = TRUE`,
+      [nowSql, nowSql, auth.id],
+    );
+  } catch {
+    // live-tracking tables may not exist in some installs — ignore.
+  }
+
+  const newStatus = record.status;
 
   // 6. Audit log
   await insertAuditLog({

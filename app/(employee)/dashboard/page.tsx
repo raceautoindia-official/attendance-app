@@ -178,7 +178,9 @@ export default function DashboardPage() {
                 reject(new Error('Unable to get location. Please turn on GPS/location and try again.'));
             }
           },
-          { enableHighAccuracy: true, timeout: 15_000 },
+          // maximumAge lets the device return a recent fix instantly instead of
+          // waiting for a fresh GPS lock, so clock-in/out feels immediate.
+          { enableHighAccuracy: true, timeout: 15_000, maximumAge: 30_000 },
         );
       }),
     [],
@@ -197,9 +199,22 @@ export default function DashboardPage() {
       if (!json.success) throw new Error(json.error ?? `${action} failed`);
       return json;
     },
+    // Flip the button instantly on tap; reconcile with the server afterwards.
+    onMutate: async (action: 'clock-in' | 'clock-out') => {
+      await qc.cancelQueries({ queryKey: ['attendance', 'today'] });
+      const prev = qc.getQueryData<ApiResponse<TodayData>>(['attendance', 'today']);
+      const nowIso = new Date().toISOString() as unknown as Date;
+      qc.setQueryData<ApiResponse<TodayData>>(['attendance', 'today'], old => {
+        const cur = (old?.data?.attendance ?? {}) as AttendanceRecord;
+        const att: AttendanceRecord = action === 'clock-in'
+          ? { ...cur, clock_in_utc: nowIso, clock_out_utc: null, status: 'present' }
+          : { ...cur, clock_out_utc: nowIso };
+        return { success: true, data: { attendance: att, schedule: old?.data?.schedule ?? null } };
+      });
+      return { prev };
+    },
     onSuccess: (json) => {
-      // Reflect the clock-in/out immediately from the server's authoritative
-      // record, so the card updates even if a background refetch is delayed.
+      // Replace the optimistic record with the server's authoritative one.
       const rec = (json as unknown as ApiResponse<AttendanceRecord>)?.data;
       if (rec) {
         qc.setQueryData<ApiResponse<TodayData>>(['attendance', 'today'], old => ({
@@ -207,15 +222,20 @@ export default function DashboardPage() {
           data: { attendance: rec, schedule: old?.data?.schedule ?? null },
         }));
       }
+    },
+    onError: (err: Error, _action, context) => {
+      // Roll the button back to its previous state if the request failed.
+      const ctx = context as { prev?: ApiResponse<TodayData> } | undefined;
+      if (ctx?.prev) qc.setQueryData(['attendance', 'today'], ctx.prev);
+      if (err.message.toLowerCase().includes('location') || err.message.includes('permission')) {
+        setGpsError(err.message);
+      }
+    },
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: ['attendance'] });
       qc.invalidateQueries({ queryKey: ['live-tracking', 'status'] });
       qc.invalidateQueries({ queryKey: ['live-tracking', 'live-self'] });
       refetchLiveTrackingStatus();
-    },
-    onError: (err: Error) => {
-      if (err.message.toLowerCase().includes('location') || err.message.includes('permission')) {
-        setGpsError(err.message);
-      }
     },
   });
 
@@ -484,7 +504,10 @@ export default function DashboardPage() {
                 loading={clockMutation.isPending}
                 onClick={() => clockMutation.mutate(canClockIn ? 'clock-in' : 'clock-out')}
               >
-                {clockMutation.isPending ? 'Getting location...' : canClockIn ? (
+                {/* Label is driven by state, which flips optimistically on tap,
+                    so the button changes immediately; the spinner shows the
+                    in-flight request. */}
+                {canClockIn ? (
                   <><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
                   </svg>Clock In</>

@@ -1,44 +1,39 @@
-const CACHE_NAME = 'attendance-app-v1';
-const APP_SHELL = [
-  '/',
-  '/login',
-  '/manifest.webmanifest',
-  '/icons/app-icon.svg',
-  '/favicon.ico',
-];
+// Self-unregistering service worker.
+//
+// Earlier versions cached aggressively (cache-first) and served stale pages and
+// API data, which masked deploys. This version removes the service worker
+// entirely: on activation it deletes ALL caches, unregisters itself, and reloads
+// open tabs so the app always loads fresh from the network. It does not
+// intercept any requests.
 
-self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)),
-  );
+self.addEventListener('install', () => {
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))),
-    ),
-  );
-  self.clients.claim();
-});
-
-self.addEventListener('fetch', (event) => {
-  if (event.request.method !== 'GET') return;
-  const url = new URL(event.request.url);
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
-
-  event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached;
-      return fetch(event.request)
-        .then((response) => {
-          if (!response || response.status !== 200 || response.type !== 'basic') return response;
-          const cloned = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, cloned));
-          return response;
-        })
-        .catch(() => caches.match('/login'));
-    }),
+    (async () => {
+      try {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((key) => caches.delete(key)));
+      } catch {
+        // ignore cache errors
+      }
+      try {
+        await self.registration.unregister();
+      } catch {
+        // ignore
+      }
+      try {
+        const clients = await self.clients.matchAll({ type: 'window' });
+        for (const client of clients) {
+          try { client.navigate(client.url); } catch { /* ignore */ }
+        }
+      } catch {
+        // ignore
+      }
+    })(),
   );
 });
+
+// No fetch handler — every request goes straight to the network.
