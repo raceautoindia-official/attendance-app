@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { platformAuthenticatorIsAvailable, startRegistration } from '@simplewebauthn/browser';
+import { startRegistration } from '@simplewebauthn/browser';
 import Button from '@/components/ui/Button';
 import Card from '@/components/ui/Card';
 import { getStoredUser } from '@/lib/user';
@@ -44,14 +44,11 @@ export default function RegisterPasskeyPage() {
         return;
       }
       const selectedAttachment = biometricMode === 'security_key' ? 'cross-platform' : 'platform';
-      if (selectedAttachment === 'platform') {
-        const available = await platformAuthenticatorIsAvailable();
-        if (!available) {
-          setMessage('Face/Fingerprint is not available on this device. Try Security key option or set up device biometric first.');
-          setState('error');
-          return;
-        }
-      }
+      // We intentionally do NOT hard-block on platformAuthenticatorIsAvailable():
+      // it returns a false negative on some Android/Chrome versions and on
+      // insecure origins. We attempt registration and let the device's own
+      // passkey flow run (it will prompt to set up a screen lock if needed); any
+      // genuine failure is surfaced with a clear message in the catch below.
       const optRes = await fetch(`/api/auth/webauthn/register?attachment=${selectedAttachment}&t=${Date.now()}`, { cache: 'no-store' });
       const optJson = await optRes.json() as ApiResponse<object>;
       if (!optJson.success || !optJson.data) {

@@ -76,6 +76,12 @@ type LoginActivitySummary = {
   last_login_at: string | null;
 };
 
+// Minimal shape of the Screen Wake Lock API (not in all TS lib targets).
+type WakeLockSentinelLike = { release: () => Promise<void> };
+type WakeLockNavigator = Navigator & {
+  wakeLock?: { request: (type: 'screen') => Promise<WakeLockSentinelLike> };
+};
+
 export default function DashboardPage() {
   const qc = useQueryClient();
   const user = useCurrentUser();
@@ -155,6 +161,8 @@ export default function DashboardPage() {
   const [dailyUpdateText, setDailyUpdateText] = useState('');
   const trackingWatchIdRef = useRef<number | null>(null);
   const lastTrackingPushMsRef = useRef<number>(0);
+  const startingTrackingRef = useRef(false);
+  const wakeLockRef = useRef<WakeLockSentinelLike | null>(null);
   const clockOutReminderNotifiedRef = useRef(false);
 
   const getCoords = useCallback(
@@ -351,6 +359,60 @@ export default function DashboardPage() {
     return diff;
   }, [attendance?.clock_in_utc, attendance?.clock_out_utc, attendance?.total_minutes, now]);
 
+  // Open a live-tracking session as soon as tracking should be active. The
+  // ping loop below only records points into an existing session — without
+  // this, the very first ping would 404 ("No active live-tracking session")
+  // and no movement would ever be stored.
+  useEffect(() => {
+    if (!shouldTrackLive) {
+      startingTrackingRef.current = false;
+      return;
+    }
+    if (activeLiveSession) return;        // a session is already open
+    if (startingTrackingRef.current) return; // a start is already in flight
+    if (!navigator.geolocation) return;
+
+    startingTrackingRef.current = true;
+    liveTrackingMutation.mutate(
+      { action: 'start' },
+      {
+        onSettled: () => { startingTrackingRef.current = false; },
+      },
+    );
+  }, [shouldTrackLive, activeLiveSession, liveTrackingMutation]);
+
+  // Hold a screen wake lock while tracking so the device doesn't sleep and
+  // suspend GPS mid-shift. Re-acquire it whenever the tab becomes visible
+  // again (the OS drops the lock when the page is hidden). This is the closest
+  // a PWA can get to continuous "end-to-end" tracking — true background GPS
+  // (app closed / phone locked) is not possible without a native app.
+  useEffect(() => {
+    if (!shouldTrackLive) return;
+    const nav = navigator as WakeLockNavigator;
+    if (!nav.wakeLock) return;
+
+    const request = async () => {
+      if (document.visibilityState !== 'visible' || wakeLockRef.current) return;
+      try {
+        wakeLockRef.current = await nav.wakeLock!.request('screen');
+      } catch {
+        // Denied or unsupported — tracking still works while the screen is on.
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void request();
+    };
+
+    void request();
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      const sentinel = wakeLockRef.current;
+      wakeLockRef.current = null;
+      if (sentinel) sentinel.release().catch(() => {});
+    };
+  }, [shouldTrackLive]);
+
   useEffect(() => {
     if (!shouldTrackLive) return;
     if (!navigator.geolocation) {
@@ -398,7 +460,22 @@ export default function DashboardPage() {
     );
 
     trackingWatchIdRef.current = watchId;
+
+    // Heartbeat: record a point every 2 minutes even when the employee is
+    // standing still. watchPosition only fires on movement, so without this a
+    // stationary employee would leave a gap and the admin couldn't tell
+    // "present but not moving" from "tracking stopped". The 15s throttle in
+    // pushPing keeps this from duplicating a fresh movement point.
+    const heartbeatId = setInterval(() => {
+      navigator.geolocation.getCurrentPosition(
+        pos => { setGpsError(null); pushPing(pos.coords); },
+        () => { /* transient miss — watchPosition handles hard GPS failures */ },
+        { enableHighAccuracy: true, timeout: 15_000, maximumAge: 0 },
+      );
+    }, 120_000);
+
     return () => {
+      clearInterval(heartbeatId);
       if (trackingWatchIdRef.current != null) {
         navigator.geolocation.clearWatch(trackingWatchIdRef.current);
         trackingWatchIdRef.current = null;
@@ -630,6 +707,17 @@ export default function DashboardPage() {
             {trackingStatusLabel}
           </span>
         </div>
+        {shouldTrackLive && (
+          <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 dark:border-amber-900/40 dark:bg-amber-900/20">
+            <svg className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M5.07 19h13.86a2 2 0 001.74-3L13.74 4a2 2 0 00-3.48 0L3.33 16a2 2 0 001.74 3z" />
+            </svg>
+            <p className="text-xs text-amber-800 dark:text-amber-300">
+              Keep this tab open and on screen until you clock out — location tracking pauses if you
+              switch to another app or lock the phone.
+            </p>
+          </div>
+        )}
         {trackingActive && liveSelf?.latitude != null && liveSelf?.longitude != null && (
           <div className="mt-3 space-y-2">
             <div className="flex items-center justify-between">

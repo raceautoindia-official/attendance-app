@@ -297,6 +297,7 @@ All protected routes require a valid JWT. The proxy injects `x-employee-id` and 
 | Method | Path | Access | Description |
 |--------|------|--------|-------------|
 | POST | `/api/cron/mark-absent` | `x-cron-secret` header | Marks employees absent if no attendance/leave for today |
+| POST | `/api/cron/close-sessions` | `x-cron-secret` header | Auto-closes sessions left open from a previous day, crediting the 9-hour shift |
 
 ### Audit Log
 
@@ -507,7 +508,7 @@ Open [http://localhost:3000](http://localhost:3000).
 | `NEXT_PUBLIC_APP_URL` | | `http://localhost:3000` | App URL (CORS header) |
 | `LOGIN_MAX_ATTEMPTS` | | `5` | Failed logins before lockout |
 | `LOGIN_LOCKOUT_MINUTES` | | `15` | Lockout duration |
-| `CRON_SECRET` | | — | Shared secret for mark-absent cron endpoint |
+| `CRON_SECRET` | | — | Shared secret for the cron endpoints (mark-absent, close-sessions) |
 | `SMTP_HOST` | | — | SMTP server for alerts |
 | `SMTP_PORT` | | — | SMTP port |
 | `SMTP_USER` | | — | SMTP username |

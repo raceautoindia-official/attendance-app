@@ -7,6 +7,7 @@ import {
   getClientIp,
   toMySQLDatetime,
 } from '@/lib/attendance';
+import { REQUIRED_SHIFT_MINUTES } from '@/lib/constants';
 import type { ApiResponse, AttendanceRecord } from '@/lib/types';
 
 // ---------------------------------------------------------------------------
@@ -110,34 +111,50 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 3. Calculate totals (for the audit log / response record)
+  // 3. Working time is always credited as the standard shift length
+  //    (REQUIRED_SHIFT_MINUTES = 9 hours), regardless of the real elapsed time
+  //    between clock-in and clock-out. The real clock-out timestamp and
+  //    geolocation are still recorded for the audit trail.
   const nowUtc = new Date();
   const nowSql = toMySQLDatetime(nowUtc);
-  const clockInUtc = new Date(record.clock_in_utc);
-  const totalMinutes = Math.round(
-    (nowUtc.getTime() - clockInUtc.getTime()) / 60_000,
-  );
+  const totalMinutes = REQUIRED_SHIFT_MINUTES;
 
   // 4. Status is left unchanged on clock-out — no early-departure time check.
 
   // 5. Close EVERY open session for this employee (normally just one). This also
   //    cleans up any duplicate open rows left over from earlier clock/timezone
-  //    skew, so the dashboard never gets stuck showing "Clock Out". total_minutes
-  //    is computed per row from its own clock-in.
+  //    skew, so the dashboard never gets stuck showing "Clock Out". Every closed
+  //    row is credited the standard 9-hour shift.
   await query(
     `UPDATE attendance
      SET clock_out_utc = ?,
          clock_out_lat = ?,
          clock_out_lng = ?,
-         total_minutes = GREATEST(0, TIMESTAMPDIFF(MINUTE, clock_in_utc, ?))
+         total_minutes = ?
      WHERE employee_id = ?
        AND clock_in_utc IS NOT NULL
        AND clock_out_utc IS NULL`,
-    [nowSql, lat, lng, nowSql, auth.id],
+    [nowSql, lat, lng, totalMinutes, auth.id],
   );
 
-  // Also end any active live-tracking session. Non-fatal if the table is absent.
+  // Anchor the movement path at the clock-out location, then end any active
+  // live-tracking session. Storing a final point first guarantees the path
+  // runs end-to-end (clock-in → … → clock-out) instead of stopping at the last
+  // ping up to ~15s earlier. Non-fatal if the tables are absent.
   try {
+    const liveSessions = await query<{ id: number }>(
+      `SELECT id FROM live_tracking_sessions
+       WHERE employee_id = ? AND is_active = TRUE`,
+      [auth.id],
+    );
+    for (const s of liveSessions) {
+      await query(
+        `INSERT INTO live_tracking_points
+           (session_id, employee_id, tracked_at_utc, latitude, longitude, accuracy_meters)
+         VALUES (?, ?, ?, ?, ?, NULL)`,
+        [s.id, auth.id, nowSql, lat, lng],
+      );
+    }
     await query(
       `UPDATE live_tracking_sessions
        SET is_active = FALSE, ended_at_utc = ?, last_ping_utc = ?

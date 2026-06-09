@@ -15,7 +15,7 @@ A production-ready attendance management system built with **Next.js 15**, **MyS
 7. [Nginx Setup](#nginx-setup)
 8. [PM2 Commands](#pm2-commands)
 9. [Updating Production](#updating-production)
-10. [Cron Job — Mark Absent](#cron-job--mark-absent)
+10. [Cron Jobs](#cron-jobs)
 
 ---
 
@@ -314,41 +314,85 @@ pm2 logs attendance --lines 50
 
 ---
 
-## Cron Job — Mark Absent
+## Cron Jobs
 
-The `/api/cron/mark-absent` endpoint marks employees as absent if they:
+The app relies on **two** nightly cron jobs. Both authenticate with the
+`x-cron-secret` header (value = `CRON_SECRET` in your `.env.local`). **Both must
+be installed** — if you only add one, the other feature silently stops working.
+
+| Time (IST) | Endpoint | Purpose |
+|------------|----------|---------|
+| `23:59` | `/api/cron/mark-absent` | Marks employees absent if they have no attendance/leave on a scheduled working day |
+| `00:05` (after midnight) | `/api/cron/close-sessions` | Auto-closes (clocks out) any session left open from a **previous** day, crediting the standard 9-hour shift |
+
+> The `close-sessions` job **must run after midnight IST** so that yesterday's
+> open sessions satisfy `work_date < today`. If your server clock is UTC, note
+> that `5 0 * * *` (00:05 UTC) is already past midnight IST, so it is safe.
+
+### Mark Absent
+
+Marks employees as absent if they:
 - Have an active schedule on the current day
 - Today is one of their working days
 - Have no attendance or leave record for today
 
-### Set up the cron job (server)
+### Close Sessions (9-hour auto clock-out)
+
+Closes any session that was clocked in but never clocked out on a **previous**
+day, so each day starts fresh. A forgotten session is credited the standard
+required shift length (`REQUIRED_SHIFT_MINUTES` = 9 hours). A real clock-out
+always wins a race (the update guards on `clock_out_utc IS NULL`).
+
+This is the feature behind "automated 9-hour logout." If it appears not to
+work, the usual cause is that **this crontab line was never added** — only the
+`mark-absent` job was.
+
+### Set up the cron jobs (server)
 
 ```bash
 # Edit crontab
 crontab -e
 
-# Add this line — runs at 23:59 every day
+# Mark absent — runs at 23:59 every day
 59 23 * * * curl -s -X POST https://yourdomain.com/api/cron/mark-absent \
+  -H "x-cron-secret: YOUR_CRON_SECRET" \
+  >> /var/log/attendance-cron.log 2>&1
+
+# Close open sessions (9h auto-logout) — runs at 00:05 every day
+5 0 * * * curl -s -X POST https://yourdomain.com/api/cron/close-sessions \
   -H "x-cron-secret: YOUR_CRON_SECRET" \
   >> /var/log/attendance-cron.log 2>&1
 ```
 
-Replace `YOUR_CRON_SECRET` with the value of `CRON_SECRET` in your `.env.local`.
+Replace `YOUR_CRON_SECRET` with the value of `CRON_SECRET` in your `.env.local`,
+and `https://yourdomain.com` with your deployed URL.
 
 ### Test manually
 
 ```bash
+# Mark absent
 curl -X POST https://yourdomain.com/api/cron/mark-absent \
+  -H "x-cron-secret: YOUR_CRON_SECRET"
+
+# Close sessions (9h auto-logout)
+curl -X POST https://yourdomain.com/api/cron/close-sessions \
   -H "x-cron-secret: YOUR_CRON_SECRET"
 ```
 
-Expected response:
+Expected responses:
 ```json
 {
   "success": true,
   "message": "Marked 3 employee(s) as absent",
   "count": 3,
   "employees": ["Alice Smith", "Bob Jones", "Carol Lee"]
+}
+```
+```json
+{
+  "success": true,
+  "message": "Auto-closed 2 open session(s) from previous day(s)",
+  "count": 2
 }
 ```
 
