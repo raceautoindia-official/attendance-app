@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
+import { toMySQLDatetime } from '@/lib/attendance';
 import type { ApiResponse } from '@/lib/types';
 
 interface LiveRow {
@@ -36,8 +37,18 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuth(request, ['employee', 'manager', 'super_admin']);
   if (auth instanceof NextResponse) return auth;
   const searchParams = request.nextUrl.searchParams;
-  const fromUtc = searchParams.get('from_utc');
-  const toUtc = searchParams.get('to_utc');
+  // The client sends ISO 8601 (e.g. 2026-06-09T04:28:00.000Z), but the points
+  // are stored in a MySQL DATETIME column as 'YYYY-MM-DD HH:MM:SS' (UTC). MySQL
+  // cannot reliably compare a DATETIME against the 'T...Z' form, so normalize
+  // both bounds to the stored format — otherwise the path query matches zero
+  // rows and Path Points shows 0 even when points exist.
+  const toMySQLBound = (raw: string | null): string | null => {
+    if (!raw) return null;
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? null : toMySQLDatetime(d);
+  };
+  const fromUtc = toMySQLBound(searchParams.get('from_utc'));
+  const toUtc = toMySQLBound(searchParams.get('to_utc'));
   const includePathParam = searchParams.get('include_path');
   const includePath =
     includePathParam == null
