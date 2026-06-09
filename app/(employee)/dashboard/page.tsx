@@ -296,6 +296,20 @@ export default function DashboardPage() {
       refetchLiveTrackingStatus();
     },
   });
+
+  // Stable refs to the tracking mutations. The dashboard re-renders every
+  // second (the live clock), and react-query mutation objects change identity
+  // each render — so depending on them in the GPS effects below tore the
+  // watchPosition watcher down and rebuilt it every second, never letting GPS
+  // deliver a fix. The effects depend only on shouldTrackLive and call through
+  // these refs instead.
+  const pingRef = useRef(liveTrackingMutation.mutate);
+  pingRef.current = liveTrackingMutation.mutate;
+  const haltRef = useRef(haltTrackingMutation.mutate);
+  haltRef.current = haltTrackingMutation.mutate;
+  const haltPendingRef = useRef(haltTrackingMutation.isPending);
+  haltPendingRef.current = haltTrackingMutation.isPending;
+
   const saveDailyUpdateMutation = useMutation({
     mutationFn: async () => {
       const res = await fetch('/api/daily-updates', {
@@ -373,13 +387,13 @@ export default function DashboardPage() {
     if (!navigator.geolocation) return;
 
     startingTrackingRef.current = true;
-    liveTrackingMutation.mutate(
+    pingRef.current(
       { action: 'start' },
       {
         onSettled: () => { startingTrackingRef.current = false; },
       },
     );
-  }, [shouldTrackLive, activeLiveSession, liveTrackingMutation]);
+  }, [shouldTrackLive, activeLiveSession]);
 
   // Hold a screen wake lock while tracking so the device doesn't sleep and
   // suspend GPS mid-shift. Re-acquire it whenever the tab becomes visible
@@ -426,7 +440,7 @@ export default function DashboardPage() {
       if (nowMs - lastTrackingPushMsRef.current < 15_000) return;
       lastTrackingPushMsRef.current = nowMs;
 
-      liveTrackingMutation.mutate(
+      pingRef.current(
         {
           action: 'ping',
           coords: {
@@ -439,8 +453,8 @@ export default function DashboardPage() {
           onError: (err: Error) => {
             const m = err.message.toLowerCase();
             const isGpsDisconnect = m.includes('location') || m.includes('permission') || m.includes('gps');
-            if (isGpsDisconnect && !haltTrackingMutation.isPending) {
-              haltTrackingMutation.mutate();
+            if (isGpsDisconnect && !haltPendingRef.current) {
+              haltRef.current();
             }
           },
         },
@@ -454,7 +468,7 @@ export default function DashboardPage() {
       },
       () => {
         setGpsError('Location is turned off or unavailable. Please turn on GPS/location and try again.');
-        if (!haltTrackingMutation.isPending) haltTrackingMutation.mutate();
+        if (!haltPendingRef.current) haltRef.current();
       },
       { enableHighAccuracy: true, timeout: 15_000, maximumAge: 10_000 },
     );
@@ -481,7 +495,7 @@ export default function DashboardPage() {
         trackingWatchIdRef.current = null;
       }
     };
-  }, [shouldTrackLive, liveTrackingMutation, haltTrackingMutation]);
+  }, [shouldTrackLive]);
 
   // Post-7pm clock-out reminder: fire a one-time local browser notification
   // (in addition to the in-app banner) while the dashboard is open.
