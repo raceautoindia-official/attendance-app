@@ -7,7 +7,6 @@ import {
   getClientIp,
   toMySQLDatetime,
 } from '@/lib/attendance';
-import { REQUIRED_SHIFT_MINUTES } from '@/lib/constants';
 import type { ApiResponse, AttendanceRecord } from '@/lib/types';
 
 // ---------------------------------------------------------------------------
@@ -111,30 +110,34 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 3. Working time is always credited as the standard shift length
-  //    (REQUIRED_SHIFT_MINUTES = 9 hours), regardless of the real elapsed time
-  //    between clock-in and clock-out. The real clock-out timestamp and
-  //    geolocation are still recorded for the audit trail.
+  // 3. A manual clock-out records the REAL time worked (clock-in → now). Only
+  //    the automatic close-sessions cron credits a flat 9 hours when an
+  //    employee forgets to clock out. So an early checkout shows the real,
+  //    shorter duration — not 9 hours.
   const nowUtc = new Date();
   const nowSql = toMySQLDatetime(nowUtc);
-  const totalMinutes = REQUIRED_SHIFT_MINUTES;
+  const clockInUtc = new Date(record.clock_in_utc);
+  const totalMinutes = Math.max(
+    0,
+    Math.round((nowUtc.getTime() - clockInUtc.getTime()) / 60_000),
+  );
 
   // 4. Status is left unchanged on clock-out — no early-departure time check.
 
   // 5. Close EVERY open session for this employee (normally just one). This also
   //    cleans up any duplicate open rows left over from earlier clock/timezone
-  //    skew, so the dashboard never gets stuck showing "Clock Out". Every closed
-  //    row is credited the standard 9-hour shift.
+  //    skew, so the dashboard never gets stuck showing "Clock Out". total_minutes
+  //    is computed per row from its own clock-in.
   await query(
     `UPDATE attendance
      SET clock_out_utc = ?,
          clock_out_lat = ?,
          clock_out_lng = ?,
-         total_minutes = ?
+         total_minutes = GREATEST(0, TIMESTAMPDIFF(MINUTE, clock_in_utc, ?))
      WHERE employee_id = ?
        AND clock_in_utc IS NOT NULL
        AND clock_out_utc IS NULL`,
-    [nowSql, lat, lng, totalMinutes, auth.id],
+    [nowSql, lat, lng, nowSql, auth.id],
   );
 
   // Anchor the movement path at the clock-out location, then end any active
