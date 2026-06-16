@@ -1,0 +1,86 @@
+import * as Location from 'expo-location';
+import * as TaskManager from 'expo-task-manager';
+import { apiFetch, ApiError } from '../api/client';
+import { LOCATION_INTERVAL_MS, LOCATION_DISTANCE_M } from '../config';
+
+export const LOCATION_TASK = 'attendance-background-location';
+
+interface PingBody {
+  latitude: number;
+  longitude: number;
+  accuracy_meters: number | null;
+}
+
+async function sendPoint(body: PingBody): Promise<void> {
+  try {
+    await apiFetch('/api/live-tracking/ping', { method: 'POST', body });
+  } catch (err) {
+    // No active session yet (e.g. app relaunched into the background) → open one.
+    if (err instanceof ApiError && err.status === 404) {
+      try {
+        await apiFetch('/api/live-tracking/start', { method: 'POST', body });
+      } catch {
+        // give up this round; the next fix retries
+      }
+    }
+    // Other errors (offline, 401-after-failed-refresh) are swallowed; the next
+    // location update retries.
+  }
+}
+
+// Defined at module load so the OS can invoke it even after the app is killed
+// and relaunched in the background. Import this file once from App.tsx.
+TaskManager.defineTask(LOCATION_TASK, async ({ data, error }) => {
+  if (error) return;
+  const { locations } = (data ?? {}) as { locations?: Location.LocationObject[] };
+  const loc = locations?.[locations.length - 1];
+  if (!loc) return;
+  await sendPoint({
+    latitude: loc.coords.latitude,
+    longitude: loc.coords.longitude,
+    accuracy_meters: loc.coords.accuracy ?? null,
+  });
+});
+
+// Request permissions and start the foreground-service location updates that
+// continue with the screen off / app backgrounded.
+export async function startBackgroundTracking(): Promise<void> {
+  const fg = await Location.requestForegroundPermissionsAsync();
+  if (fg.status !== 'granted') {
+    throw new Error('Location permission is required to track attendance.');
+  }
+  const bg = await Location.requestBackgroundPermissionsAsync();
+  if (bg.status !== 'granted') {
+    throw new Error('Please allow location "All the time" so tracking works with the app closed.');
+  }
+
+  const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK).catch(
+    () => false,
+  );
+  if (alreadyRunning) return;
+
+  await Location.startLocationUpdatesAsync(LOCATION_TASK, {
+    accuracy: Location.Accuracy.High,
+    timeInterval: LOCATION_INTERVAL_MS,
+    distanceInterval: LOCATION_DISTANCE_M,
+    pausesUpdatesAutomatically: false,
+    showsBackgroundLocationIndicator: true,
+    foregroundService: {
+      notificationTitle: 'Attendance tracking active',
+      notificationBody: 'Your location is recorded while you are clocked in.',
+    },
+  });
+}
+
+export async function stopBackgroundTracking(): Promise<void> {
+  const running = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK).catch(
+    () => false,
+  );
+  if (running) {
+    await Location.stopLocationUpdatesAsync(LOCATION_TASK);
+  }
+}
+
+export async function isTrackingRunning(): Promise<boolean> {
+  return Location.hasStartedLocationUpdatesAsync(LOCATION_TASK).catch(() => false);
+}
