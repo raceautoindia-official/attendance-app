@@ -1,13 +1,13 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
+  TextInput,
   TouchableOpacity,
   ActivityIndicator,
   StyleSheet,
   ScrollView,
   RefreshControl,
-  SafeAreaView,
   StatusBar,
   Platform,
   Linking,
@@ -17,17 +17,19 @@ import { WebView } from 'react-native-webview';
 import * as Location from 'expo-location';
 import { apiFetch, logout } from '../api/client';
 import { getStoredEmployee, StoredEmployee } from '../storage/tokens';
-import { saveTodayCache, getTodayCache } from '../storage/cache';
+import { saveTodayCache, getTodayCache, clearTodayCache } from '../storage/cache';
 import { startBackgroundTracking, stopBackgroundTracking, isTrackingRunning } from '../location/tracking';
 import { colors } from '../theme';
 
 const STATUS_BAR_PAD = Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 : 0;
+const TZ = 'Asia/Kolkata'; // all dates/times shown in IST, matching the web app
 
 interface TodayAttendance {
   clock_in_utc: string | null;
   clock_out_utc: string | null;
   total_minutes: number | null;
   status: string | null;
+  geofence_status?: string | null;
 }
 
 interface HistoryRow {
@@ -41,6 +43,8 @@ interface HistoryRow {
 interface Shift {
   name?: string;
   type?: string;
+  start_time?: string;
+  end_time?: string;
   required_hours?: number;
 }
 
@@ -56,16 +60,24 @@ function timeOnly(iso: string | null): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime())
     ? '-'
-    : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true }).toLowerCase();
+    : d.toLocaleTimeString('en-IN', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: true }).toLowerCase();
 }
 
-function dateDMY(ymd: string): string {
-  const [y, m, d] = ymd.split('-');
-  return d && m && y ? `${d}-${m}-${y}` : ymd;
+// IST calendar date (YYYY-MM-DD) — matches the server's getWorkDateIST().
+function istYmd(date: Date): string {
+  return date.toLocaleDateString('en-CA', { timeZone: TZ });
 }
 
-function ymd(date: Date): string {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+// Current hour 0–23 in IST (for the post-7pm clock-out reminder).
+function istHour(date: Date): number {
+  return Number(
+    new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: '2-digit', hourCycle: 'h23' }).format(date),
+  );
+}
+
+function dateDMY(ymdStr: string): string {
+  const [y, m, d] = ymdStr.split('-');
+  return d && m && y ? `${d}-${m}-${y}` : ymdStr;
 }
 
 function initials(name?: string | null): string {
@@ -74,11 +86,16 @@ function initials(name?: string | null): string {
   return ((parts[0]?.[0] ?? '') + (parts[1]?.[0] ?? '')).toUpperCase() || '--';
 }
 
+// Matches the web: flexible shifts show "<name> - N hours required",
+// fixed shifts show "<name> - HH:MM to HH:MM".
 function scheduleLine(shift: Shift | null): string | null {
   if (!shift) return null;
-  const label = shift.type === 'flexible' ? 'Flexible Time' : shift.name ?? 'Shift';
-  const hrs = shift.required_hours ?? 9;
-  return `${label} - ${hrs} hours required`;
+  if (shift.type === 'flexible') {
+    return `${shift.name ?? 'Flexible Shift'} - ${shift.required_hours ?? 9} hours required`;
+  }
+  const start = shift.start_time?.slice(0, 5) ?? '--:--';
+  const end = shift.end_time?.slice(0, 5) ?? '--:--';
+  return `${shift.name ?? 'Shift'} - ${start} to ${end}`;
 }
 
 function toast(msg: string): void {
@@ -88,7 +105,11 @@ function toast(msg: string): void {
 async function getCoords(): Promise<{ latitude: number; longitude: number }> {
   const perm = await Location.requestForegroundPermissionsAsync();
   if (perm.status !== 'granted') throw new Error('Location permission is required.');
-  const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+  // Use a recent cached fix first — instant, so clock-in doesn't hang on a
+  // fresh GPS lock (during which the connection could drop).
+  const last = await Location.getLastKnownPositionAsync({ maxAge: 60_000, requiredAccuracy: 200 });
+  if (last) return { latitude: last.coords.latitude, longitude: last.coords.longitude };
+  const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
   return { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
 }
 
@@ -103,16 +124,89 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(new Date());
   const [liveCoords, setLiveCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [dailyUpdate, setDailyUpdate] = useState('');
+  const [savingUpdate, setSavingUpdate] = useState(false);
 
   const clockedIn = !!attendance?.clock_in_utc;
   const clockedOut = !!attendance?.clock_out_utc;
+  const today = istYmd(now);
+  const showClockOutReminder = clockedIn && !clockedOut && istHour(now) >= 19;
+
+  // Hours ticks live while clocked in (matches the web).
+  const liveWorkedMinutes = useMemo(() => {
+    if (!attendance?.clock_in_utc || attendance?.clock_out_utc) return attendance?.total_minutes ?? null;
+    const ms = new Date(attendance.clock_in_utc).getTime();
+    if (Number.isNaN(ms)) return attendance?.total_minutes ?? null;
+    return Math.max(0, Math.floor((now.getTime() - ms) / 60_000));
+  }, [attendance, now]);
 
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
 
-  // While clocked in, keep the live map updated with the device's location.
+  const loadToday = useCallback(async () => {
+    try {
+      const data = await apiFetch<{ attendance: TodayAttendance | null; schedule: { shift?: Shift } | null }>(
+        '/api/attendance/today',
+      );
+      setAttendance(data.attendance);
+      setShift(data.schedule?.shift ?? null);
+      saveTodayCache(istYmd(new Date()), data.attendance);
+    } catch (e) {
+      if (e instanceof Error && e.message.includes('log in again')) onLogout();
+    }
+  }, [onLogout]);
+
+  const loadHistory = useCallback(async () => {
+    const to = new Date();
+    const from = new Date();
+    from.setDate(from.getDate() - 6);
+    try {
+      const data = await apiFetch<{ records: HistoryRow[] }>(
+        `/api/attendance?from_date=${istYmd(from)}&to_date=${istYmd(to)}&limit=7&page=1`,
+      );
+      setHistory(data.records ?? []);
+    } catch {
+      /* non-fatal */
+    }
+  }, []);
+
+  const loadDailyUpdate = useCallback(async () => {
+    const d = istYmd(new Date());
+    try {
+      const data = await apiFetch<{ updates: Array<{ update_text: string }> }>(
+        `/api/daily-updates?from_date=${d}&to_date=${d}&limit=1&page=1`,
+      );
+      setDailyUpdate(data.updates?.[0]?.update_text ?? '');
+    } catch {
+      /* non-fatal */
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      const [emp, cached, running] = await Promise.all([
+        getStoredEmployee(),
+        getTodayCache<TodayAttendance | null>(istYmd(new Date())),
+        isTrackingRunning(),
+      ]);
+      if (!active) return;
+      setEmployee(emp);
+      if (cached !== null) setAttendance(cached);
+      setTracking(running);
+      setLoading(false);
+      loadToday();
+      loadHistory();
+      loadDailyUpdate();
+    })();
+    return () => {
+      active = false;
+    };
+  }, [loadToday, loadHistory, loadDailyUpdate]);
+
+  // Keep the live map updated while clocked in.
   useEffect(() => {
     if (!clockedIn || clockedOut) {
       setLiveCoords(null);
@@ -126,7 +220,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
         if (active) setLiveCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
       } catch {
-        // ignore transient GPS misses
+        /* ignore */
       }
     };
     fetchPos();
@@ -137,58 +231,11 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     };
   }, [clockedIn, clockedOut]);
 
-  const loadToday = useCallback(async () => {
-    try {
-      const data = await apiFetch<{ attendance: TodayAttendance | null; schedule: { shift?: Shift } | null }>(
-        '/api/attendance/today',
-      );
-      setAttendance(data.attendance);
-      setShift(data.schedule?.shift ?? null);
-      saveTodayCache(data.attendance);
-    } catch (e) {
-      if (e instanceof Error && e.message.includes('log in again')) onLogout();
-    }
-  }, [onLogout]);
-
-  const loadHistory = useCallback(async () => {
-    const to = new Date();
-    const from = new Date();
-    from.setDate(from.getDate() - 6);
-    try {
-      const data = await apiFetch<{ records: HistoryRow[] }>(
-        `/api/attendance?from_date=${ymd(from)}&to_date=${ymd(to)}&limit=7&page=1`,
-      );
-      setHistory(data.records ?? []);
-    } catch {
-      // non-fatal
-    }
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-    (async () => {
-      const [emp, cached, running] = await Promise.all([
-        getStoredEmployee(),
-        getTodayCache<TodayAttendance | null>(),
-        isTrackingRunning(),
-      ]);
-      if (!active) return;
-      setEmployee(emp);
-      if (cached !== null) setAttendance(cached);
-      setTracking(running);
-      setLoading(false);
-      loadToday();
-      loadHistory();
-    })();
-    return () => {
-      active = false;
-    };
-  }, [loadToday, loadHistory]);
-
   const refresh = useCallback(() => {
     loadToday();
     loadHistory();
-  }, [loadToday, loadHistory]);
+    loadDailyUpdate();
+  }, [loadToday, loadHistory, loadDailyUpdate]);
 
   const handleClockIn = async () => {
     setBusy(true);
@@ -228,8 +275,28 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     }
   };
 
+  const handleSaveUpdate = async () => {
+    if (!dailyUpdate.trim()) {
+      toast('Write something first');
+      return;
+    }
+    setSavingUpdate(true);
+    try {
+      await apiFetch('/api/daily-updates', {
+        method: 'POST',
+        body: { work_date: today, update_text: dailyUpdate.trim() },
+      });
+      toast('Daily update saved ✓');
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Failed to save update');
+    } finally {
+      setSavingUpdate(false);
+    }
+  };
+
   const handleLogout = async () => {
     await stopBackgroundTracking().catch(() => {});
+    await clearTodayCache();
     await logout();
     onLogout();
   };
@@ -242,19 +309,19 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     );
   }
 
-  const dateStr = now.toLocaleDateString([], {
+  const dateStr = now.toLocaleDateString('en-IN', {
+    timeZone: TZ,
     weekday: 'long',
     year: 'numeric',
     month: 'long',
     day: 'numeric',
   });
   const timeStr = now
-    .toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
+    .toLocaleTimeString('en-IN', { timeZone: TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
     .toLowerCase();
 
   return (
-    <SafeAreaView style={styles.container}>
-      {/* Header bar — padded below the status bar so nothing collides with it */}
+    <View style={styles.container}>
       <View style={styles.header}>
         <View style={styles.brandRow}>
           <View style={styles.logo}>
@@ -274,12 +341,14 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
 
       <ScrollView
         contentContainerStyle={styles.content}
+        keyboardShouldPersistTaps="handled"
         refreshControl={<RefreshControl refreshing={false} onRefresh={refresh} tintColor={colors.textMuted} />}
       >
         <Text style={styles.hello}>Hello, {employee?.name?.split(' ')[0] ?? 'there'}</Text>
         <Text style={styles.date}>{dateStr}</Text>
         <Text style={styles.clock}>{timeStr}</Text>
 
+        {/* TODAY */}
         <View style={styles.card}>
           <Text style={styles.cardLabel}>TODAY</Text>
           <View style={styles.statsRow}>
@@ -293,7 +362,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
             </View>
             <View style={styles.statCol}>
               <Text style={styles.statLabel}>Hours</Text>
-              <Text style={styles.statValue}>{minutesToHours(attendance?.total_minutes ?? null)}</Text>
+              <Text style={styles.statValue}>{minutesToHours(liveWorkedMinutes)}</Text>
             </View>
           </View>
 
@@ -302,6 +371,16 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
           {attendance?.status && (
             <View style={styles.badge}>
               <Text style={styles.badgeText}>{attendance.status}</Text>
+            </View>
+          )}
+
+          {showClockOutReminder && (
+            <View style={styles.warnBox}>
+              <Text style={styles.warnTitle}>⏰ Please clock out</Text>
+              <Text style={styles.warnText}>
+                Your shift has ended. Clock out before midnight — otherwise it will be auto-closed with your
+                standard 9-hour shift.
+              </Text>
             </View>
           )}
 
@@ -316,18 +395,46 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
               {busy ? <ActivityIndicator color={colors.text} /> : <Text style={styles.actionText}>⏻  Clock In</Text>}
             </TouchableOpacity>
           )}
-
           {clockedIn && !clockedOut && (
             <TouchableOpacity style={styles.action} onPress={handleClockOut} disabled={busy} activeOpacity={0.8}>
               {busy ? <ActivityIndicator color={colors.text} /> : <Text style={styles.actionText}>⏻  Clock Out</Text>}
             </TouchableOpacity>
           )}
-
-          {clockedIn && clockedOut && (
-            <Text style={styles.done}>Attendance completed for today ✓</Text>
-          )}
+          {clockedIn && clockedOut && <Text style={styles.done}>Attendance completed for today ✓</Text>}
         </View>
 
+        {/* Geofence warning */}
+        {attendance?.geofence_status === 'outside' && (
+          <View style={[styles.warnBox, { marginTop: 16 }]}>
+            <Text style={styles.warnText}>⚠️ You clocked in outside the designated work location.</Text>
+          </View>
+        )}
+
+        {/* Daily Work Update */}
+        <View style={[styles.card, { marginTop: 20 }]}>
+          <Text style={styles.cardTitle}>Daily Work Update</Text>
+          <TextInput
+            style={styles.textarea}
+            value={dailyUpdate}
+            onChangeText={setDailyUpdate}
+            multiline
+            numberOfLines={3}
+            maxLength={1000}
+            placeholder="What did you work on today?"
+            placeholderTextColor={colors.textFaint}
+            textAlignVertical="top"
+          />
+          <TouchableOpacity
+            style={[styles.saveBtn, savingUpdate && { opacity: 0.6 }]}
+            onPress={handleSaveUpdate}
+            disabled={savingUpdate}
+            activeOpacity={0.85}
+          >
+            {savingUpdate ? <ActivityIndicator color="#fff" /> : <Text style={styles.saveBtnText}>Save Update</Text>}
+          </TouchableOpacity>
+        </View>
+
+        {/* Live tracking status + map */}
         <View style={styles.trackPill}>
           <View style={[styles.dot, { backgroundColor: tracking ? colors.greenText : colors.textFaint }]} />
           <Text style={[styles.trackText, { color: tracking ? colors.greenText : colors.textMuted }]}>
@@ -335,7 +442,6 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
           </Text>
         </View>
 
-        {/* Live map — shown while clocked in */}
         {clockedIn && !clockedOut && liveCoords && (
           <View style={[styles.card, styles.mapCard]}>
             <View style={styles.mapHeader}>
@@ -343,9 +449,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
                 Live: {liveCoords.lat.toFixed(6)}, {liveCoords.lng.toFixed(6)}
               </Text>
               <TouchableOpacity
-                onPress={() =>
-                  Linking.openURL(`https://www.google.com/maps?q=${liveCoords.lat},${liveCoords.lng}`)
-                }
+                onPress={() => Linking.openURL(`https://www.google.com/maps?q=${liveCoords.lat},${liveCoords.lng}`)}
               >
                 <Text style={styles.openMaps}>Open in Maps</Text>
               </TouchableOpacity>
@@ -380,27 +484,20 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
                 <View style={styles.colDate}>
                   <Text style={styles.histDate}>{dateDMY(r.work_date)}</Text>
                   {r.status && (
-                    <Text
-                      style={[
-                        styles.histStatus,
-                        { color: r.status === 'present' ? colors.greenText : colors.textMuted },
-                      ]}
-                    >
+                    <Text style={[styles.histStatus, { color: r.status === 'present' ? colors.greenText : colors.textMuted }]}>
                       {r.status}
                     </Text>
                   )}
                 </View>
                 <Text style={[styles.histCell, styles.colTime]}>{timeOnly(r.clock_in_utc)}</Text>
                 <Text style={[styles.histCell, styles.colTime]}>{timeOnly(r.clock_out_utc)}</Text>
-                <Text style={[styles.histCell, styles.colHrs, styles.histHrs]}>
-                  {minutesToHours(r.total_minutes)}
-                </Text>
+                <Text style={[styles.histCell, styles.colHrs, styles.histHrs]}>{minutesToHours(r.total_minutes)}</Text>
               </View>
             ))
           )}
         </View>
       </ScrollView>
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -418,39 +515,18 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.border,
   },
   brandRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  logo: {
-    width: 32,
-    height: 32,
-    borderRadius: 10,
-    backgroundColor: colors.brand,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+  logo: { width: 32, height: 32, borderRadius: 10, backgroundColor: colors.brand, alignItems: 'center', justifyContent: 'center' },
   logoCheck: { color: '#fff', fontSize: 18, fontWeight: '900', lineHeight: 20 },
   brandName: { fontSize: 18, fontWeight: '700', color: colors.text },
   headerRight: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  avatar: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: colors.avatar,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+  avatar: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.avatar, alignItems: 'center', justifyContent: 'center' },
   avatarText: { color: '#fff', fontSize: 13, fontWeight: '700' },
   signOut: { color: colors.textMuted, fontSize: 14 },
-  content: { padding: 20, paddingBottom: 40 },
+  content: { padding: 20, paddingBottom: 50 },
   hello: { color: colors.text, fontSize: 28, fontWeight: '700' },
   date: { color: colors.textMuted, fontSize: 15, marginTop: 6 },
   clock: { color: colors.accent, fontSize: 38, fontWeight: '800', marginTop: 4, letterSpacing: 1 },
-  card: {
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 16,
-    padding: 20,
-    marginTop: 24,
-  },
+  card: { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: 16, padding: 20, marginTop: 24 },
   cardLabel: { color: colors.textMuted, fontSize: 12, fontWeight: '600', letterSpacing: 0.5, marginBottom: 14 },
   cardTitle: { color: colors.text, fontSize: 17, fontWeight: '700', marginBottom: 14 },
   statsRow: { flexDirection: 'row', justifyContent: 'space-between' },
@@ -458,65 +534,40 @@ const styles = StyleSheet.create({
   statLabel: { color: colors.textMuted, fontSize: 13, marginBottom: 4 },
   statValue: { color: colors.text, fontSize: 18, fontWeight: '700' },
   schedule: { color: colors.textMuted, fontSize: 14, marginTop: 18 },
-  badge: {
-    alignSelf: 'flex-start',
-    backgroundColor: colors.greenBg,
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-    marginTop: 14,
-  },
+  badge: { alignSelf: 'flex-start', backgroundColor: colors.greenBg, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 5, marginTop: 14 },
   badgeText: { color: colors.greenText, fontSize: 13, fontWeight: '600', textTransform: 'lowercase' },
-  errorBox: {
-    backgroundColor: colors.redBg,
-    borderWidth: 1,
-    borderColor: colors.redBorder,
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    marginTop: 16,
-  },
+  warnBox: { backgroundColor: 'rgba(245,158,11,0.12)', borderWidth: 1, borderColor: 'rgba(245,158,11,0.35)', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 12, marginTop: 16 },
+  warnTitle: { color: '#fbbf24', fontSize: 14, fontWeight: '700', marginBottom: 4 },
+  warnText: { color: '#fcd34d', fontSize: 13, lineHeight: 18 },
+  errorBox: { backgroundColor: colors.redBg, borderWidth: 1, borderColor: colors.redBorder, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10, marginTop: 16 },
   errorText: { color: colors.redText, fontSize: 13 },
-  action: {
-    borderWidth: 1,
-    borderColor: colors.borderInput,
-    borderRadius: 12,
-    paddingVertical: 16,
-    alignItems: 'center',
-    marginTop: 20,
-  },
+  action: { borderWidth: 1, borderColor: colors.borderInput, borderRadius: 12, paddingVertical: 16, alignItems: 'center', marginTop: 20 },
   actionText: { color: colors.text, fontSize: 16, fontWeight: '600' },
   done: { color: colors.greenText, textAlign: 'center', marginTop: 20, fontSize: 15, fontWeight: '600' },
+  textarea: {
+    borderWidth: 1,
+    borderColor: colors.borderInput,
+    backgroundColor: colors.bg,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    color: colors.text,
+    fontSize: 15,
+    minHeight: 84,
+  },
+  saveBtn: { backgroundColor: colors.brand, borderRadius: 10, paddingVertical: 12, alignItems: 'center', marginTop: 12, alignSelf: 'flex-end', paddingHorizontal: 24 },
+  saveBtnText: { color: '#fff', fontSize: 15, fontWeight: '600' },
   trackPill: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 20, paddingHorizontal: 4 },
   dot: { width: 8, height: 8, borderRadius: 4 },
   trackText: { fontSize: 13, fontWeight: '600' },
   mapCard: { marginTop: 20, padding: 0, overflow: 'hidden' },
-  mapHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-  },
+  mapHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 14 },
   liveCoordsText: { color: colors.textMuted, fontSize: 13, flex: 1 },
   openMaps: { color: colors.accent, fontSize: 14, fontWeight: '600' },
   map: { height: 220, width: '100%', backgroundColor: colors.card },
-  // history table
-  histHead: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingBottom: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-  },
+  histHead: { flexDirection: 'row', alignItems: 'center', paddingBottom: 8, borderBottomWidth: 1, borderBottomColor: colors.border },
   histHeadText: { color: colors.textMuted, fontSize: 11, fontWeight: '700', letterSpacing: 0.5 },
-  histRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-  },
+  histRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.border },
   colDate: { flex: 1.4 },
   colTime: { flex: 1, textAlign: 'left' },
   colHrs: { flex: 1, textAlign: 'right' },

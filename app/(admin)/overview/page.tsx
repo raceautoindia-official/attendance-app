@@ -245,29 +245,33 @@ export default function OverviewPage() {
     () => selectedLiveSession?.path ?? [],
     [selectedLiveSession?.path],
   );
-  const routePreview = useMemo(() => {
-    if (selectedPath.length < 2) return null;
-    const width = 720;
-    const height = 260;
-    const pad = 20;
-    const points = selectedPath
-      .map(p => ({ lat: Number(p.latitude), lng: Number(p.longitude) }))
-      .filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lng));
-    if (points.length < 2) return null;
-    const minLat = Math.min(...points.map(p => p.lat));
-    const maxLat = Math.max(...points.map(p => p.lat));
-    const minLng = Math.min(...points.map(p => p.lng));
-    const maxLng = Math.max(...points.map(p => p.lng));
-    const latSpan = Math.max(maxLat - minLat, 0.0001);
-    const lngSpan = Math.max(maxLng - minLng, 0.0001);
-    const toXY = (lat: number, lng: number) => ({
-      x: pad + ((lng - minLng) / lngSpan) * (width - pad * 2),
-      y: pad + (1 - (lat - minLat) / latSpan) * (height - pad * 2),
-    });
-    const svgPoints = points.map(p => toXY(p.lat, p.lng));
-    const polyline = svgPoints.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
-    return { width, height, svgPoints, polyline };
-  }, [selectedPath]);
+  // Builds a self-contained Leaflet + OpenStreetMap page that draws the EXACT
+  // route the employee walked (blue polyline), with a green start marker and a
+  // red latest marker, on a real street map. Keyless — no Google Cloud needed.
+  const routeMapSrc = useMemo(() => {
+    let pts = selectedPath
+      .map(p => [Number(p.latitude), Number(p.longitude)] as [number, number])
+      .filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b));
+    if (pts.length < 1 && selectedHasCoords) {
+      pts = [[Number(selectedLat), Number(selectedLng)]];
+    }
+    if (pts.length < 1) return null;
+    const data = JSON.stringify(pts);
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>html,body,#map{margin:0;height:100%;width:100%}</style></head>
+<body><div id="map"></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+var pts=${data};
+var map=L.map('map');
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(map);
+if(pts.length>1){var line=L.polyline(pts,{color:'#2563eb',weight:4,opacity:0.9}).addTo(map);map.fitBounds(line.getBounds(),{padding:[25,25]});}else{map.setView(pts[0],17);}
+L.circleMarker(pts[0],{color:'#16a34a',fillColor:'#16a34a',fillOpacity:1,radius:6}).addTo(map).bindPopup('Start');
+L.circleMarker(pts[pts.length-1],{color:'#dc2626',fillColor:'#dc2626',fillOpacity:1,radius:6}).addTo(map).bindPopup('Latest');
+</script></body></html>`;
+  }, [selectedPath, selectedHasCoords, selectedLat, selectedLng]);
   const present = records.filter(r => r.status === 'present' || r.status === 'late').length;
   const absent = records.filter(r => r.status === 'absent').length;
   const totalMinutes = records.reduce((s, r) => s + (r.total_minutes ?? 0), 0);
@@ -618,52 +622,27 @@ export default function OverviewPage() {
                 </a>
               )}
             </div>
-            {selectedHasCoords ? (
-              <div className="space-y-3">
+            {routeMapSrc ? (
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-slate-600 dark:text-slate-300">
+                  Movement route ({selectedPath.length} point{selectedPath.length === 1 ? '' : 's'})
+                </p>
                 <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700">
                   <iframe
-                    title="Live employee location map"
-                    src={`https://www.google.com/maps?q=${selectedLat},${selectedLng}&z=17&output=embed`}
-                    className="w-full h-72"
+                    title="Movement route map"
+                    srcDoc={routeMapSrc}
+                    className="w-full h-80"
                     loading="lazy"
-                    referrerPolicy="no-referrer-when-downgrade"
                   />
                 </div>
-                {routePreview ? (
-                  <div className="rounded-lg border border-slate-200 dark:border-slate-700 p-3 bg-white dark:bg-slate-900/30">
-                    <p className="text-xs font-medium text-slate-600 dark:text-slate-300 mb-2">
-                      Movement Path Preview ({selectedPath.length} points)
-                    </p>
-                    <svg
-                      viewBox={`0 0 ${routePreview.width} ${routePreview.height}`}
-                      className="w-full h-52 rounded border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900"
-                      role="img"
-                      aria-label="Movement path preview"
-                    >
-                      <polyline
-                        points={routePreview.polyline}
-                        fill="none"
-                        stroke="rgb(37 99 235)"
-                        strokeWidth="3"
-                        strokeLinejoin="round"
-                        strokeLinecap="round"
-                      />
-                      <circle cx={routePreview.svgPoints[0].x} cy={routePreview.svgPoints[0].y} r="5" fill="rgb(22 163 74)" />
-                      <circle
-                        cx={routePreview.svgPoints[routePreview.svgPoints.length - 1].x}
-                        cy={routePreview.svgPoints[routePreview.svgPoints.length - 1].y}
-                        r="5"
-                        fill="rgb(220 38 38)"
-                      />
-                    </svg>
-                    <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">Green is start, red is latest location.</p>
-                  </div>
-                ) : (
-                  <p className="text-xs text-slate-500 dark:text-slate-400">Path preview needs at least 2 tracking points.</p>
-                )}
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Blue line is the exact path taken · green is start · red is latest location.
+                </p>
               </div>
             ) : (
-              <p className="text-sm text-slate-500 dark:text-slate-400">No coordinates available for map preview.</p>
+              <p className="text-sm text-slate-500 dark:text-slate-400">
+                Waiting for tracking points — they appear here as the employee moves.
+              </p>
             )}
           </div>
         )}
