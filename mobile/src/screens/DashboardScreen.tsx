@@ -206,23 +206,43 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     };
   }, [loadToday, loadHistory, loadDailyUpdate]);
 
-  // Keep the live map updated while clocked in.
+  // Keep the live map updated while clocked in. Also auto-resume background
+  // tracking — when the app is reopened mid-shift, the OS may have stopped the
+  // service, so we restart it here so "tracking is on" and points keep flowing.
   useEffect(() => {
     if (!clockedIn || clockedOut) {
       setLiveCoords(null);
       return;
     }
     let active = true;
+
+    const ensureTracking = async () => {
+      try {
+        const running = await isTrackingRunning();
+        if (!running) {
+          await startBackgroundTracking();
+        }
+        if (active) setTracking(true);
+      } catch {
+        if (active) setTracking(false);
+      }
+    };
+
     const fetchPos = async () => {
       try {
         const perm = await Location.getForegroundPermissionsAsync();
         if (perm.status !== 'granted') return;
+        // Last-known fix is instant → the map shows immediately.
+        const last = await Location.getLastKnownPositionAsync({ maxAge: 120_000 });
+        if (last && active) setLiveCoords({ lat: last.coords.latitude, lng: last.coords.longitude });
         const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
         if (active) setLiveCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
       } catch {
-        /* ignore */
+        /* ignore transient GPS misses */
       }
     };
+
+    ensureTracking();
     fetchPos();
     const id = setInterval(fetchPos, 20_000);
     return () => {
