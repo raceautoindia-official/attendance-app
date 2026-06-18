@@ -1,5 +1,6 @@
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
+import { PermissionsAndroid, Platform } from 'react-native';
 import { apiFetch, ApiError } from '../api/client';
 import { LOCATION_INTERVAL_MS, LOCATION_DISTANCE_M } from '../config';
 
@@ -44,6 +45,19 @@ TaskManager.defineTask(LOCATION_TASK, async ({ data, error }) => {
 
 // Request permissions and start the foreground-service location updates that
 // continue with the screen off / app backgrounded.
+// Android 13+ needs POST_NOTIFICATIONS for the foreground-service notification
+// to display. Without a visible notification the OS doesn't keep the service
+// alive in the background — so this is required for background tracking to work.
+async function ensureNotificationPermission(): Promise<void> {
+  if (Platform.OS === 'android' && typeof Platform.Version === 'number' && Platform.Version >= 33) {
+    try {
+      await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
+    } catch {
+      // best effort
+    }
+  }
+}
+
 export async function startBackgroundTracking(): Promise<void> {
   const fg = await Location.requestForegroundPermissionsAsync();
   if (fg.status !== 'granted') {
@@ -53,6 +67,8 @@ export async function startBackgroundTracking(): Promise<void> {
   if (bg.status !== 'granted') {
     throw new Error('Please allow location "All the time" so tracking works with the app closed.');
   }
+  // Must come before starting the service so its notification can show.
+  await ensureNotificationPermission();
 
   const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK).catch(
     () => false,

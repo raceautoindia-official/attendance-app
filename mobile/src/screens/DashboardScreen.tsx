@@ -12,13 +12,16 @@ import {
   Platform,
   Linking,
   ToastAndroid,
+  Alert,
 } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
 import { WebView } from 'react-native-webview';
 import * as Location from 'expo-location';
 import { apiFetch, logout } from '../api/client';
 import { getStoredEmployee, StoredEmployee } from '../storage/tokens';
 import { saveTodayCache, getTodayCache, clearTodayCache } from '../storage/cache';
 import { startBackgroundTracking, stopBackgroundTracking, isTrackingRunning } from '../location/tracking';
+import { requestIgnoreBatteryOptimization, openAppSettings } from '../location/batteryOptimization';
 import { colors } from '../theme';
 
 const STATUS_BAR_PAD = Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 : 0;
@@ -267,6 +270,16 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       setTracking(true);
       refresh();
       toast('Clocked in successfully ✓');
+      // One-time: ask the OS to keep tracking alive in the background.
+      const prompted = await SecureStore.getItemAsync('battery_prompted');
+      if (!prompted) {
+        await SecureStore.setItemAsync('battery_prompted', '1');
+        Alert.alert(
+          'Keep tracking running',
+          'So your location keeps recording while the screen is off, tap "Allow" on the next screen.',
+          [{ text: 'OK', onPress: () => { void requestIgnoreBatteryOptimization(); } }],
+        );
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Clock-in failed.';
       setError(msg);
@@ -319,6 +332,19 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     await clearTodayCache();
     await logout();
     onLogout();
+  };
+
+  // Shown when tracking is off — helps the employee re-enable background tracking.
+  const fixTracking = () => {
+    Alert.alert(
+      'Turn on background tracking',
+      'Your phone is stopping the app from tracking in the background. Allow it to run in the background, then it will keep recording your location.',
+      [
+        { text: 'Allow background', onPress: () => { void requestIgnoreBatteryOptimization(); } },
+        { text: 'Open app settings', onPress: () => { void openAppSettings(); } },
+        { text: 'Cancel', style: 'cancel' },
+      ],
+    );
   };
 
   if (loading) {
@@ -455,12 +481,17 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         </View>
 
         {/* Live tracking status + map */}
-        <View style={styles.trackPill}>
+        <TouchableOpacity
+          style={styles.trackPill}
+          activeOpacity={tracking ? 1 : 0.7}
+          onPress={tracking ? undefined : fixTracking}
+          disabled={tracking}
+        >
           <View style={[styles.dot, { backgroundColor: tracking ? colors.greenText : colors.textFaint }]} />
-          <Text style={[styles.trackText, { color: tracking ? colors.greenText : colors.textMuted }]}>
-            {tracking ? 'Location tracking is on' : 'Location tracking is off'}
+          <Text style={[styles.trackText, { color: tracking ? colors.greenText : '#fbbf24' }]}>
+            {tracking ? 'Location tracking is on' : 'Location tracking is off — tap to fix'}
           </Text>
-        </View>
+        </TouchableOpacity>
 
         {clockedIn && !clockedOut && liveCoords && (
           <View style={[styles.card, styles.mapCard]}>

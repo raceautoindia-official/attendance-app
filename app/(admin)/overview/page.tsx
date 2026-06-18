@@ -245,18 +245,25 @@ export default function OverviewPage() {
     () => selectedLiveSession?.path ?? [],
     [selectedLiveSession?.path],
   );
-  // Builds a self-contained Leaflet + OpenStreetMap page that draws the EXACT
-  // route the employee walked (blue polyline), with a green start marker and a
-  // red latest marker, on a real street map. Keyless — no Google Cloud needed.
-  const routeMapSrc = useMemo(() => {
+  // Stable JSON signature of the route points. Because it's a string compared
+  // by value, the map iframe below only re-renders when the path actually
+  // changes — not on every 5s poll — so live updates are smooth (no reload
+  // flicker) and feel real-time.
+  const routePointsJson = useMemo(() => {
     let pts = selectedPath
       .map(p => [Number(p.latitude), Number(p.longitude)] as [number, number])
       .filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b));
     if (pts.length < 1 && selectedHasCoords) {
       pts = [[Number(selectedLat), Number(selectedLng)]];
     }
-    if (pts.length < 1) return null;
-    const data = JSON.stringify(pts);
+    return pts.length ? JSON.stringify(pts) : null;
+  }, [selectedPath, selectedHasCoords, selectedLat, selectedLng]);
+
+  // Self-contained Leaflet + OpenStreetMap page drawing the exact route on real
+  // streets — white casing under a bold blue line for clarity, a dot at every
+  // recorded point, green start + red latest markers. Keyless (no Google Cloud).
+  const routeMapSrc = useMemo(() => {
+    if (!routePointsJson) return null;
     return `<!DOCTYPE html><html><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
@@ -264,14 +271,19 @@ export default function OverviewPage() {
 <body><div id="map"></div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-var pts=${data};
-var map=L.map('map');
+var pts=${routePointsJson};
+var map=L.map('map',{zoomControl:true});
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(map);
-if(pts.length>1){var line=L.polyline(pts,{color:'#2563eb',weight:4,opacity:0.9}).addTo(map);map.fitBounds(line.getBounds(),{padding:[25,25]});}else{map.setView(pts[0],17);}
-L.circleMarker(pts[0],{color:'#16a34a',fillColor:'#16a34a',fillOpacity:1,radius:6}).addTo(map).bindPopup('Start');
-L.circleMarker(pts[pts.length-1],{color:'#dc2626',fillColor:'#dc2626',fillOpacity:1,radius:6}).addTo(map).bindPopup('Latest');
+if(pts.length>1){
+  L.polyline(pts,{color:'#ffffff',weight:9,opacity:0.95,lineJoin:'round',lineCap:'round'}).addTo(map);
+  var line=L.polyline(pts,{color:'#2563eb',weight:5,opacity:1,lineJoin:'round',lineCap:'round'}).addTo(map);
+  for(var i=1;i<pts.length-1;i++){L.circleMarker(pts[i],{radius:3,color:'#2563eb',fillColor:'#ffffff',fillOpacity:1,weight:2}).addTo(map);}
+  map.fitBounds(line.getBounds(),{padding:[35,35]});
+}else{map.setView(pts[0],17);}
+L.circleMarker(pts[0],{color:'#ffffff',weight:3,fillColor:'#16a34a',fillOpacity:1,radius:8}).addTo(map).bindPopup('Start');
+L.circleMarker(pts[pts.length-1],{color:'#ffffff',weight:3,fillColor:'#dc2626',fillOpacity:1,radius:8}).addTo(map).bindPopup('Latest');
 </script></body></html>`;
-  }, [selectedPath, selectedHasCoords, selectedLat, selectedLng]);
+  }, [routePointsJson]);
   const present = records.filter(r => r.status === 'present' || r.status === 'late').length;
   const absent = records.filter(r => r.status === 'absent').length;
   const totalMinutes = records.reduce((s, r) => s + (r.total_minutes ?? 0), 0);

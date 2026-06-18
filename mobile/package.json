@@ -13,6 +13,7 @@
     "expo-asset": "~12.0.0",
     "expo-build-properties": "~1.0.10",
     "expo-constants": "~18.0.0",
+    "expo-intent-launcher": "~13.0.8",
     "expo-location": "~19.0.0",
     "expo-secure-store": "~15.0.0",
     "expo-task-manager": "~14.0.0",
