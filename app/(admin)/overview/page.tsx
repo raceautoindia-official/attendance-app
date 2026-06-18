@@ -250,38 +250,53 @@ export default function OverviewPage() {
   // changes — not on every 5s poll — so live updates are smooth (no reload
   // flicker) and feel real-time.
   const routePointsJson = useMemo(() => {
+    const fmt = (iso: string | null | undefined) =>
+      iso
+        ? new Date(iso).toLocaleTimeString(IST_LOCALE, {
+            timeZone: IST,
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: true,
+          })
+        : '';
     let pts = selectedPath
-      .map(p => [Number(p.latitude), Number(p.longitude)] as [number, number])
-      .filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b));
+      .map(p => ({ lat: Number(p.latitude), lng: Number(p.longitude), t: fmt(p.tracked_at_utc) }))
+      .filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lng));
     if (pts.length < 1 && selectedHasCoords) {
-      pts = [[Number(selectedLat), Number(selectedLng)]];
+      pts = [{ lat: Number(selectedLat), lng: Number(selectedLng), t: '' }];
     }
     return pts.length ? JSON.stringify(pts) : null;
   }, [selectedPath, selectedHasCoords, selectedLat, selectedLng]);
 
   // Self-contained Leaflet + OpenStreetMap page drawing the exact route on real
-  // streets — white casing under a bold blue line for clarity, a dot at every
-  // recorded point, green start + red latest markers. Keyless (no Google Cloud).
+  // streets — white casing under a bold blue line, a clickable dot at every
+  // recorded point that shows the IST time the employee was there, green start
+  // + red latest markers. Keyless (no Google Cloud).
   const routeMapSrc = useMemo(() => {
     if (!routePointsJson) return null;
     return `<!DOCTYPE html><html><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<style>html,body,#map{margin:0;height:100%;width:100%}</style></head>
+<style>html,body,#map{margin:0;height:100%;width:100%}.leaflet-popup-content{font:13px system-ui;margin:8px 12px}</style></head>
 <body><div id="map"></div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 var pts=${routePointsJson};
+var ll=pts.map(function(p){return [p.lat,p.lng];});
 var map=L.map('map',{zoomControl:true});
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(map);
-if(pts.length>1){
-  L.polyline(pts,{color:'#ffffff',weight:9,opacity:0.95,lineJoin:'round',lineCap:'round'}).addTo(map);
-  var line=L.polyline(pts,{color:'#2563eb',weight:5,opacity:1,lineJoin:'round',lineCap:'round'}).addTo(map);
-  for(var i=1;i<pts.length-1;i++){L.circleMarker(pts[i],{radius:3,color:'#2563eb',fillColor:'#ffffff',fillOpacity:1,weight:2}).addTo(map);}
+function popup(prefix,p){return '<b>'+prefix+'</b><br/>🕐 '+(p.t||'-');}
+if(ll.length>1){
+  L.polyline(ll,{color:'#ffffff',weight:9,opacity:0.95,lineJoin:'round',lineCap:'round'}).addTo(map);
+  var line=L.polyline(ll,{color:'#2563eb',weight:5,opacity:1,lineJoin:'round',lineCap:'round'}).addTo(map);
+  for(var i=1;i<pts.length-1;i++){
+    L.circleMarker(ll[i],{radius:5,color:'#2563eb',fillColor:'#ffffff',fillOpacity:1,weight:2}).addTo(map).bindPopup(popup('Was here at',pts[i]));
+  }
   map.fitBounds(line.getBounds(),{padding:[35,35]});
-}else{map.setView(pts[0],17);}
-L.circleMarker(pts[0],{color:'#ffffff',weight:3,fillColor:'#16a34a',fillOpacity:1,radius:8}).addTo(map).bindPopup('Start');
-L.circleMarker(pts[pts.length-1],{color:'#ffffff',weight:3,fillColor:'#dc2626',fillOpacity:1,radius:8}).addTo(map).bindPopup('Latest');
+}else{map.setView(ll[0],17);}
+L.circleMarker(ll[0],{color:'#ffffff',weight:3,fillColor:'#16a34a',fillOpacity:1,radius:8}).addTo(map).bindPopup(popup('Start',pts[0]));
+L.circleMarker(ll[ll.length-1],{color:'#ffffff',weight:3,fillColor:'#dc2626',fillOpacity:1,radius:8}).addTo(map).bindPopup(popup('Latest',pts[pts.length-1]));
 </script></body></html>`;
   }, [routePointsJson]);
   const present = records.filter(r => r.status === 'present' || r.status === 'late').length;
