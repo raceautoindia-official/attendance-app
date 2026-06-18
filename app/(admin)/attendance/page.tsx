@@ -5,7 +5,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { format } from 'date-fns';
+import { formatInTimeZone, fromZonedTime } from 'date-fns-tz';
 import Table from '@/components/ui/Table';
 import Button from '@/components/ui/Button';
 import Input from '@/components/ui/Input';
@@ -30,10 +30,16 @@ function toIST(d: Date | string | null | undefined) {
   if (!d) return '—';
   return new Date(d).toLocaleTimeString(IST_LOCALE, { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: true });
 }
-function toISOLocal(d: Date | string | null | undefined) {
+// UTC timestamp -> "yyyy-MM-ddTHH:mm" string in IST, for the datetime-local
+// input. Always IST regardless of the admin's browser timezone.
+function toISTInput(d: Date | string | null | undefined) {
   if (!d) return '';
-  const dt = new Date(d);
-  return format(dt, "yyyy-MM-dd'T'HH:mm");
+  return formatInTimeZone(new Date(d), TZ, "yyyy-MM-dd'T'HH:mm");
+}
+// The datetime-local value the admin typed is IST -> convert back to a UTC ISO
+// string for storage.
+function istInputToUtcISO(local: string): string {
+  return fromZonedTime(local, TZ).toISOString();
 }
 
 const editSchema = z.object({
@@ -48,7 +54,7 @@ const selectClass = 'block w-full rounded-lg border border-slate-300 dark:border
 
 export default function AttendancePage() {
   const qc = useQueryClient();
-  const today = format(new Date(), 'yyyy-MM-dd');
+  const today = formatInTimeZone(new Date(), TZ, 'yyyy-MM-dd');
   const [fromDate, setFromDate] = useState(today);
   const [toDate, setToDate] = useState(today);
   const [empSearch, setEmpSearch] = useState('');
@@ -73,8 +79,8 @@ export default function AttendancePage() {
   const editMutation = useMutation({
     mutationFn: async ({ id, values }: { id: number; values: EditForm }) => {
       const body: Record<string, unknown> = { status: values.status, notes: values.notes };
-      if (values.clock_in_utc) body.clock_in_utc = new Date(values.clock_in_utc).toISOString();
-      if (values.clock_out_utc) body.clock_out_utc = new Date(values.clock_out_utc).toISOString();
+      if (values.clock_in_utc) body.clock_in_utc = istInputToUtcISO(values.clock_in_utc);
+      if (values.clock_out_utc) body.clock_out_utc = istInputToUtcISO(values.clock_out_utc);
       const res = await fetch(`/api/attendance/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -89,8 +95,8 @@ export default function AttendancePage() {
   function openEdit(row: AttRow) {
     setEditTarget(row);
     editForm.reset({
-      clock_in_utc: toISOLocal(row.clock_in_utc),
-      clock_out_utc: toISOLocal(row.clock_out_utc),
+      clock_in_utc: toISTInput(row.clock_in_utc),
+      clock_out_utc: toISTInput(row.clock_out_utc),
       status: row.status,
       notes: row.notes ?? '',
     });
@@ -189,8 +195,8 @@ export default function AttendancePage() {
               {' — '}{formatDateOnly(editTarget.work_date)}
             </div>
 
-            <Input label="Clock In (UTC)" type="datetime-local" {...editForm.register('clock_in_utc')} />
-            <Input label="Clock Out (UTC)" type="datetime-local" {...editForm.register('clock_out_utc')} />
+            <Input label="Clock In (IST)" type="datetime-local" {...editForm.register('clock_in_utc')} />
+            <Input label="Clock Out (IST)" type="datetime-local" {...editForm.register('clock_out_utc')} />
 
             <div className="flex flex-col gap-1">
               <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Status</label>

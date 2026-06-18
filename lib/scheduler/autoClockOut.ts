@@ -1,21 +1,23 @@
 import { closeOpenSessions } from '@/lib/closeSessions';
+import { markAbsentees } from '@/lib/markAbsent';
+import { formatInTimeZone } from 'date-fns-tz';
+import { TIMEZONE } from '@/lib/constants';
 
 // ---------------------------------------------------------------------------
-// In-app scheduler for the automatic 9-hour clock-out.
+// In-app end-of-day scheduler. On a self-healing 15-minute sweep (plus a
+// startup catch-up) it does two things, both idempotent and safe to re-run:
 //
-// Anyone still clocked in from a PREVIOUS day (i.e. they never clocked out by
-// midnight) is auto clock-out with 9 hours credited.
+//   1. AUTO CLOCK-OUT — anyone still clocked in from a PREVIOUS day (never
+//      clocked out by midnight) is auto clock-out with 9 hours credited
+//      (closeOpenSessions, acts only on work_date < today).
 //
-// Design: instead of one fragile "fire at midnight" timer — which silently
-// misses if the server restarts near midnight or that single run hits a
-// transient DB error — we run a SELF-HEALING periodic sweep every 15 minutes,
-// plus an immediate catch-up on startup. closeOpenSessions() only ever acts on
-// sessions with work_date < today, so:
-//   • during the day it is a harmless no-op for everyone still working,
-//   • a forgotten session is closed within 15 min of midnight IST at the latest,
-//   • any missed/failed run is automatically retried on the next sweep.
-// The UPDATE guards on clock_out_utc IS NULL, so it is fully idempotent and
-// safe to run as often as we like and across multiple server instances.
+//   2. MARK ABSENT — employees who had a scheduled working day YESTERDAY but no
+//      attendance and no leave are marked absent (markAbsentees for the
+//      previous IST day, which is now complete).
+//
+// Using a periodic sweep instead of one fragile "fire at midnight" timer means
+// a server restart near midnight or a transient DB error can't make it miss —
+// the next sweep self-heals. No external crontab is required.
 // ---------------------------------------------------------------------------
 
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000; // every 15 minutes
@@ -23,14 +25,29 @@ const STARTUP_DELAY_MS = 10_000;          // brief delay so startup isn't blocke
 
 let started = false;
 
-async function runAutoClockOut(label: string): Promise<void> {
+function previousWorkDate(): string {
+  // Yesterday's IST calendar date (the day that is now complete).
+  return formatInTimeZone(new Date(Date.now() - 24 * 60 * 60 * 1000), TIMEZONE, 'yyyy-MM-dd');
+}
+
+async function runEndOfDay(label: string): Promise<void> {
   try {
     const closed = await closeOpenSessions(); // previous-day open sessions → 9h
     if (closed > 0) {
-      console.log(`[auto-clock-out] ${label}: closed ${closed} open session(s)`);
+      console.log(`[end-of-day] ${label}: auto clocked-out ${closed} session(s)`);
     }
   } catch (err) {
-    console.error(`[auto-clock-out] ${label}: failed (will retry next sweep)`, err);
+    console.error(`[end-of-day] ${label}: auto clock-out failed (will retry next sweep)`, err);
+  }
+
+  try {
+    const yesterday = previousWorkDate();
+    const absent = await markAbsentees(yesterday); // mark yesterday's no-shows absent
+    if (absent > 0) {
+      console.log(`[end-of-day] ${label}: marked ${absent} employee(s) absent for ${yesterday}`);
+    }
+  } catch (err) {
+    console.error(`[end-of-day] ${label}: mark-absent failed (will retry next sweep)`, err);
   }
 }
 
@@ -39,8 +56,8 @@ export function startAutoClockOutScheduler(): void {
   started = true;
 
   // Catch-up shortly after startup (covers a server that was down at midnight).
-  setTimeout(() => { void runAutoClockOut('startup catch-up'); }, STARTUP_DELAY_MS);
+  setTimeout(() => { void runEndOfDay('startup catch-up'); }, STARTUP_DELAY_MS);
 
   // Self-healing periodic sweep.
-  setInterval(() => { void runAutoClockOut('sweep'); }, SWEEP_INTERVAL_MS);
+  setInterval(() => { void runEndOfDay('sweep'); }, SWEEP_INTERVAL_MS);
 }
