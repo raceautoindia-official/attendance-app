@@ -89,11 +89,14 @@ export async function startBackgroundTracking(): Promise<void> {
 }
 
 export async function stopBackgroundTracking(): Promise<void> {
-  const running = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK).catch(
-    () => false,
-  );
-  if (running) {
+  // Force-stop unconditionally. Previously this was gated on a status check —
+  // if that check threw, the stop was skipped and the foreground service kept
+  // running after logout. Calling stop when it isn't running just throws, which
+  // we swallow, so this reliably kills tracking immediately.
+  try {
     await Location.stopLocationUpdatesAsync(LOCATION_TASK);
+  } catch {
+    // not running / already stopped — fine
   }
 }
 

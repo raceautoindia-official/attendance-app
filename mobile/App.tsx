@@ -5,6 +5,7 @@ import './src/location/tracking';
 import React, { useEffect, useState } from 'react';
 import { View, ActivityIndicator, StatusBar } from 'react-native';
 import { getAccessToken } from './src/storage/tokens';
+import { stopBackgroundTracking } from './src/location/tracking';
 import LoginScreen from './src/screens/LoginScreen';
 import DashboardScreen from './src/screens/DashboardScreen';
 
@@ -14,6 +15,14 @@ export default function App() {
   useEffect(() => {
     getAccessToken().then((t) => setAuthed(!!t));
   }, []);
+
+  // Whenever the user is logged out (logout button, or session lost), make sure
+  // background tracking is fully stopped — no tracking for a logged-out user.
+  useEffect(() => {
+    if (authed === false) {
+      void stopBackgroundTracking();
+    }
+  }, [authed]);
 
   if (authed === null) {
     return (
