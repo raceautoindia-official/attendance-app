@@ -124,6 +124,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [tracking, setTracking] = useState(false);
+  const [trackingEnabled, setTrackingEnabled] = useState(true); // admin per-employee toggle
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(new Date());
   const [liveCoords, setLiveCoords] = useState<{ lat: number; lng: number } | null>(null);
@@ -160,6 +161,16 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       if (e instanceof Error && e.message.includes('log in again')) onLogout();
     }
   }, [onLogout]);
+
+  // Whether the admin has enabled live tracking for THIS employee.
+  const loadTrackingEnabled = useCallback(async () => {
+    try {
+      const data = await apiFetch<{ enabled: boolean }>('/api/live-tracking/status');
+      setTrackingEnabled(data.enabled !== false);
+    } catch {
+      /* default to enabled if the check fails */
+    }
+  }, []);
 
   const loadHistory = useCallback(async () => {
     const to = new Date();
@@ -203,16 +214,24 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       loadToday();
       loadHistory();
       loadDailyUpdate();
+      loadTrackingEnabled();
     })();
     return () => {
       active = false;
     };
-  }, [loadToday, loadHistory, loadDailyUpdate]);
+  }, [loadToday, loadHistory, loadDailyUpdate, loadTrackingEnabled]);
 
   // Keep the live map updated while clocked in. Also auto-resume background
   // tracking — when the app is reopened mid-shift, the OS may have stopped the
   // service, so we restart it here so "tracking is on" and points keep flowing.
   useEffect(() => {
+    // Admin disabled tracking for this employee → make sure nothing is running.
+    if (!trackingEnabled) {
+      void stopBackgroundTracking();
+      setTracking(false);
+      setLiveCoords(null);
+      return;
+    }
     if (!clockedIn || clockedOut) {
       setLiveCoords(null);
       return;
@@ -252,13 +271,14 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       active = false;
       clearInterval(id);
     };
-  }, [clockedIn, clockedOut]);
+  }, [clockedIn, clockedOut, trackingEnabled]);
 
   const refresh = useCallback(() => {
     loadToday();
     loadHistory();
     loadDailyUpdate();
-  }, [loadToday, loadHistory, loadDailyUpdate]);
+    loadTrackingEnabled();
+  }, [loadToday, loadHistory, loadDailyUpdate, loadTrackingEnabled]);
 
   const handleClockIn = async () => {
     setBusy(true);
@@ -266,20 +286,23 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     try {
       const coords = await getCoords();
       await apiFetch('/api/attendance/clock-in', { method: 'POST', body: coords });
-      await startBackgroundTracking();
-      setTracking(true);
+      // Only start location tracking if the admin enabled it for this employee.
+      if (trackingEnabled) {
+        await startBackgroundTracking();
+        setTracking(true);
+        // One-time: ask the OS to keep tracking alive in the background.
+        const prompted = await SecureStore.getItemAsync('battery_prompted');
+        if (!prompted) {
+          await SecureStore.setItemAsync('battery_prompted', '1');
+          Alert.alert(
+            'Keep tracking running',
+            'So your location keeps recording while the screen is off, tap "Allow" on the next screen.',
+            [{ text: 'OK', onPress: () => { void requestIgnoreBatteryOptimization(); } }],
+          );
+        }
+      }
       refresh();
       toast('Clocked in successfully ✓');
-      // One-time: ask the OS to keep tracking alive in the background.
-      const prompted = await SecureStore.getItemAsync('battery_prompted');
-      if (!prompted) {
-        await SecureStore.setItemAsync('battery_prompted', '1');
-        Alert.alert(
-          'Keep tracking running',
-          'So your location keeps recording while the screen is off, tap "Allow" on the next screen.',
-          [{ text: 'OK', onPress: () => { void requestIgnoreBatteryOptimization(); } }],
-        );
-      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Clock-in failed.';
       setError(msg);
@@ -481,19 +504,26 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         </View>
 
         {/* Live tracking status + map */}
-        <TouchableOpacity
-          style={styles.trackPill}
-          activeOpacity={tracking ? 1 : 0.7}
-          onPress={tracking ? undefined : fixTracking}
-          disabled={tracking}
-        >
-          <View style={[styles.dot, { backgroundColor: tracking ? colors.greenText : colors.textFaint }]} />
-          <Text style={[styles.trackText, { color: tracking ? colors.greenText : '#fbbf24' }]}>
-            {tracking ? 'Location tracking is on' : 'Location tracking is off — tap to fix'}
-          </Text>
-        </TouchableOpacity>
+        {!trackingEnabled ? (
+          <View style={styles.trackPill}>
+            <View style={[styles.dot, { backgroundColor: colors.textFaint }]} />
+            <Text style={[styles.trackText, { color: colors.textMuted }]}>Location tracking is disabled</Text>
+          </View>
+        ) : (
+          <TouchableOpacity
+            style={styles.trackPill}
+            activeOpacity={tracking ? 1 : 0.7}
+            onPress={tracking ? undefined : fixTracking}
+            disabled={tracking}
+          >
+            <View style={[styles.dot, { backgroundColor: tracking ? colors.greenText : colors.textFaint }]} />
+            <Text style={[styles.trackText, { color: tracking ? colors.greenText : '#fbbf24' }]}>
+              {tracking ? 'Location tracking is on' : 'Location tracking is off — tap to fix'}
+            </Text>
+          </TouchableOpacity>
+        )}
 
-        {clockedIn && !clockedOut && liveCoords && (
+        {trackingEnabled && clockedIn && !clockedOut && liveCoords && (
           <View style={[styles.card, styles.mapCard]}>
             <View style={styles.mapHeader}>
               <Text style={styles.liveCoordsText}>

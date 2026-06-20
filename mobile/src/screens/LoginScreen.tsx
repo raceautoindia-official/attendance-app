@@ -10,6 +10,7 @@ import {
   Platform,
 } from 'react-native';
 import { login } from '../api/client';
+import { biometricAvailable, authenticateBiometric } from '../auth/biometric';
 import { colors } from '../theme';
 
 export default function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) {
@@ -27,6 +28,15 @@ export default function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) 
     setLoading(true);
     try {
       await login(empId.trim(), pin.trim());
+      // Second factor: require fingerprint/face if the device supports it
+      // (the mobile equivalent of the web's passkey).
+      if (await biometricAvailable()) {
+        const ok = await authenticateBiometric("Confirm it's you");
+        if (!ok) {
+          setError('Fingerprint / face verification is required to sign in.');
+          return;
+        }
+      }
       onLoggedIn();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Login failed. Please try again.');
