@@ -1,5 +1,7 @@
 import { closeOpenSessions } from '@/lib/closeSessions';
 import { markAbsentees } from '@/lib/markAbsent';
+import { markSundayHolidays } from '@/lib/markSundayHolidays';
+import { getWorkDateIST } from '@/lib/attendance';
 import { formatInTimeZone } from 'date-fns-tz';
 import { TIMEZONE } from '@/lib/constants';
 
@@ -48,6 +50,18 @@ async function runEndOfDay(label: string): Promise<void> {
     }
   } catch (err) {
     console.error(`[end-of-day] ${label}: mark-absent failed (will retry next sweep)`, err);
+  }
+
+  try {
+    // Sunday = company holiday. Cover today (so a current Sunday shows up right
+    // away) and yesterday (catch-up if the server was down on Sunday).
+    const holidays =
+      (await markSundayHolidays(getWorkDateIST())) + (await markSundayHolidays(previousWorkDate()));
+    if (holidays > 0) {
+      console.log(`[end-of-day] ${label}: marked ${holidays} Sunday holiday row(s)`);
+    }
+  } catch (err) {
+    console.error(`[end-of-day] ${label}: Sunday-holiday marking failed (will retry next sweep)`, err);
   }
 }
 

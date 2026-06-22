@@ -449,7 +449,7 @@ export default function EmployeesPage() {
             Enable live tracking for this employee
           </label>
           <Input label="Initial PIN (6 digits)" type="password" maxLength={6} inputMode="numeric"
-            {...addForm.register('pin')} error={addForm.formState.errors.pin?.message} />
+            autoComplete="new-password" {...addForm.register('pin')} error={addForm.formState.errors.pin?.message} />
 
           {addMutation.isError && (
             <p className="text-sm text-red-500">{(addMutation.error as Error).message}</p>
@@ -496,7 +496,7 @@ export default function EmployeesPage() {
               Enable live tracking for this employee
             </label>
             <Input label="New PIN (leave blank to keep)" type="password" maxLength={6} inputMode="numeric"
-              helper="Leave empty to keep current PIN" {...editForm.register('new_pin')} />
+              autoComplete="new-password" helper="Leave empty to keep current PIN" {...editForm.register('new_pin')} />
 
             {editMutation.isError && (
               <p className="text-sm text-red-500">{(editMutation.error as Error).message}</p>
