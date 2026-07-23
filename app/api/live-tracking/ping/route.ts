@@ -5,11 +5,34 @@ import { requireAuth } from '@/lib/auth';
 import { toMySQLDatetime } from '@/lib/attendance';
 import type { ApiResponse, LiveTrackingSession } from '@/lib/types';
 
-const PingSchema = z.object({
+const PointSchema = z.object({
   latitude: z.number({ error: 'latitude must be a number' }),
   longitude: z.number({ error: 'longitude must be a number' }),
   accuracy_meters: z.number().min(0).max(10000).nullable().optional(),
+  // GPS fix time from the device. Optional so old app builds (which send only
+  // coordinates) keep working; those points are stamped with the server time.
+  tracked_at_utc: z.iso.datetime().optional(),
 });
+
+// Either the legacy single-point body or a batch. The app batches when the OS
+// delivers several fixes at once and when it retries points buffered offline.
+const PingSchema = z.union([
+  z.object({ points: z.array(PointSchema).min(1).max(500) }),
+  PointSchema,
+]);
+
+// Device clocks drift and users change them; only trust a client timestamp
+// that is plausible (not in the future, not older than a day) — otherwise fall
+// back to the server time so the point still lands on the map.
+function normalizeTrackedAt(iso: string | undefined, nowMs: number): string {
+  if (iso) {
+    const t = new Date(iso).getTime();
+    if (!Number.isNaN(t) && t <= nowMs + 60_000 && t >= nowMs - 24 * 60 * 60 * 1000) {
+      return toMySQLDatetime(new Date(Math.min(t, nowMs)));
+    }
+  }
+  return toMySQLDatetime(new Date(nowMs));
+}
 
 export async function POST(request: NextRequest) {
   const auth = await requireAuth(request, ['employee', 'manager', 'super_admin']);
@@ -45,6 +68,8 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const points = 'points' in parsed.data ? parsed.data.points : [parsed.data];
+
   const activeSession = await queryOne<LiveTrackingSession>(
     `SELECT id, employee_id, started_at_utc, ended_at_utc, is_active, last_ping_utc, created_at
      FROM live_tracking_sessions
@@ -61,20 +86,28 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const { latitude, longitude, accuracy_meters } = parsed.data;
-  const now = toMySQLDatetime(new Date());
+  const nowMs = Date.now();
 
   await query(
     `UPDATE live_tracking_sessions
      SET last_ping_utc = ?
      WHERE id = ?`,
-    [now, activeSession.id],
+    [toMySQLDatetime(new Date(nowMs)), activeSession.id],
   );
 
+  const placeholders = points.map(() => '(?, ?, ?, ?, ?, ?)').join(', ');
+  const params = points.flatMap(p => [
+    activeSession.id,
+    auth.id,
+    normalizeTrackedAt(p.tracked_at_utc, nowMs),
+    p.latitude,
+    p.longitude,
+    p.accuracy_meters ?? null,
+  ]);
   await query(
     `INSERT INTO live_tracking_points (session_id, employee_id, tracked_at_utc, latitude, longitude, accuracy_meters)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [activeSession.id, auth.id, now, latitude, longitude, accuracy_meters ?? null],
+     VALUES ${placeholders}`,
+    params,
   );
 
   return NextResponse.json<ApiResponse>({ success: true, message: 'Live-tracking ping saved' });
