@@ -14,6 +14,7 @@ import Pagination from '@/components/ui/Pagination';
 import Avatar from '@/components/ui/Avatar';
 import Spinner from '@/components/ui/Spinner';
 import Card from '@/components/ui/Card';
+import EmployeeDocuments from '@/components/EmployeeDocuments';
 import type { Employee, ApiResponse, Role } from '@/lib/types';
 import { useCurrentUser } from '@/lib/useCurrentUser';
 
@@ -53,6 +54,12 @@ const empSchema = z.object({
 
 const editSchema = empSchema.omit({ pin: true }).extend({
   new_pin: z.string().length(6).regex(/^\d+$/).or(z.literal('')).optional(),
+  bank_account_name: z.string().max(100).optional(),
+  bank_account_number: z.string().regex(/^[A-Za-z0-9]{5,24}$/, 'Account number must be 5–24 letters/digits').or(z.literal('')).optional(),
+  bank_ifsc: z.string().regex(/^[A-Za-z]{4}0[A-Za-z0-9]{6}$/, 'IFSC must look like SBIN0001234').or(z.literal('')).optional(),
+  bank_name: z.string().max(100).optional(),
+  pan_number: z.string().regex(/^[A-Za-z]{5}\d{4}[A-Za-z]$/, 'PAN must look like ABCDE1234F').or(z.literal('')).optional(),
+  aadhaar_number: z.string().regex(/^\d{12}$/, 'Aadhaar must be 12 digits').or(z.literal('')).optional(),
 });
 
 type EmpForm = z.infer<typeof empSchema>;
@@ -211,6 +218,12 @@ export default function EmployeesPage() {
       manager_id: emp.manager_id ?? undefined,
       live_tracking_enabled: emp.live_tracking_enabled ?? true,
       new_pin: '',
+      bank_account_name: emp.bank_account_name ?? '',
+      bank_account_number: emp.bank_account_number ?? '',
+      bank_ifsc: emp.bank_ifsc ?? '',
+      bank_name: emp.bank_name ?? '',
+      pan_number: emp.pan_number ?? '',
+      aadhaar_number: emp.aadhaar_number ?? '',
     });
   }
 
@@ -376,6 +389,23 @@ export default function EmployeesPage() {
                         <p className="text-sm text-slate-400 italic">No active schedule assigned.</p>
                       )}
                     </div>
+                    {/* Bank & identity */}
+                    <div className="border-t border-slate-200 dark:border-slate-700 pt-3">
+                      <p className="text-xs text-slate-500 uppercase tracking-wide mb-2">Bank &amp; Identity</p>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                        <div><p className="text-xs text-slate-500">Account Holder</p><p className="mt-0.5 font-medium text-slate-800 dark:text-slate-200">{emp.bank_account_name ?? '—'}</p></div>
+                        <div><p className="text-xs text-slate-500">Account Number</p><p className="mt-0.5 font-medium text-slate-800 dark:text-slate-200">{emp.bank_account_number ?? '—'}</p></div>
+                        <div><p className="text-xs text-slate-500">IFSC</p><p className="mt-0.5 font-medium text-slate-800 dark:text-slate-200">{emp.bank_ifsc ?? '—'}</p></div>
+                        <div><p className="text-xs text-slate-500">Bank</p><p className="mt-0.5 font-medium text-slate-800 dark:text-slate-200">{emp.bank_name ?? '—'}</p></div>
+                        <div><p className="text-xs text-slate-500">PAN</p><p className="mt-0.5 font-medium text-slate-800 dark:text-slate-200">{emp.pan_number ?? '—'}</p></div>
+                        <div><p className="text-xs text-slate-500">Aadhaar</p><p className="mt-0.5 font-medium text-slate-800 dark:text-slate-200">{emp.aadhaar_number ?? '—'}</p></div>
+                      </div>
+                    </div>
+                    {/* Documents */}
+                    <div className="border-t border-slate-200 dark:border-slate-700 pt-3">
+                      <p className="text-xs text-slate-500 uppercase tracking-wide mb-2">Documents</p>
+                      <EmployeeDocuments employeeId={emp.id} canDelete={isSuperAdmin} />
+                    </div>
                   </div>
                 );
               })()}
@@ -495,6 +525,27 @@ export default function EmployeesPage() {
               <input type="checkbox" {...editForm.register('live_tracking_enabled')} />
               Enable live tracking for this employee
             </label>
+
+            {/* Bank & statutory identity */}
+            <div className="border-t border-slate-200 dark:border-slate-700 pt-4">
+              <p className="text-xs text-slate-500 uppercase tracking-wide mb-3">Bank &amp; Identity</p>
+              <div className="grid grid-cols-2 gap-4">
+                <Input label="Account Holder Name" {...editForm.register('bank_account_name')}
+                  error={editForm.formState.errors.bank_account_name?.message} />
+                <Input label="Account Number" {...editForm.register('bank_account_number')}
+                  error={editForm.formState.errors.bank_account_number?.message} />
+                <Input label="IFSC Code" placeholder="SBIN0001234" {...editForm.register('bank_ifsc')}
+                  error={editForm.formState.errors.bank_ifsc?.message} />
+                <Input label="Bank Name" {...editForm.register('bank_name')}
+                  error={editForm.formState.errors.bank_name?.message} />
+                <Input label="PAN Number" placeholder="ABCDE1234F" {...editForm.register('pan_number')}
+                  error={editForm.formState.errors.pan_number?.message} />
+                <Input label="Aadhaar Number" placeholder="12 digits" maxLength={12} inputMode="numeric"
+                  {...editForm.register('aadhaar_number')}
+                  error={editForm.formState.errors.aadhaar_number?.message} />
+              </div>
+            </div>
+
             <Input label="New PIN (leave blank to keep)" type="password" maxLength={6} inputMode="numeric"
               autoComplete="new-password" helper="Leave empty to keep current PIN" {...editForm.register('new_pin')} />
 

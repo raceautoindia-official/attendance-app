@@ -9,6 +9,8 @@ import Button from '@/components/ui/Button';
 import Spinner from '@/components/ui/Spinner';
 import Table from '@/components/ui/Table';
 import Pagination from '@/components/ui/Pagination';
+import LeaveBalanceCard from '@/components/LeaveBalanceCard';
+import MyDetailsCard from '@/components/MyDetailsCard';
 import { useCurrentUser } from '@/lib/useCurrentUser';
 import { REQUIRED_SHIFT_HOURS } from '@/lib/constants';
 import type { AttendanceRecord, AttendanceStatus, ApiResponse } from '@/lib/types';
@@ -759,6 +761,12 @@ export default function DashboardPage() {
           </div>
         )}
       </Card>
+
+      {/* Leave balance for the current year */}
+      <LeaveBalanceCard />
+
+      {/* Bank & identity details + document uploads */}
+      <MyDetailsCard />
 
       {/* 7-day history */}
       <Card padding={false}>

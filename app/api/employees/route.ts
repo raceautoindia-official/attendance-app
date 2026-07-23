@@ -4,6 +4,7 @@ import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth, hashPin } from '@/lib/auth';
 import { getWorkDateIST } from '@/lib/attendance';
 import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from '@/lib/constants';
+import { hasBankColumns, bankSelect } from '@/lib/employeeDetails';
 import type { ApiResponse, Employee } from '@/lib/types';
 
 async function hasLiveTrackingColumn() {
@@ -86,7 +87,10 @@ export async function GET(request: NextRequest) {
   }
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-  const liveTrackingColExists = await hasLiveTrackingColumn();
+  const [liveTrackingColExists, bankColsExist] = await Promise.all([
+    hasLiveTrackingColumn(),
+    hasBankColumns(),
+  ]);
   const liveTrackingSelect = liveTrackingColExists ? 'e.live_tracking_enabled' : 'TRUE AS live_tracking_enabled';
 
   const [countRow, rows] = await Promise.all([
@@ -96,7 +100,9 @@ export async function GET(request: NextRequest) {
     ),
     query<Employee>(
       // Never expose pin_hash
-      `SELECT e.id, e.emp_id, e.name, e.email, e.phone, e.department, e.role,
+      `SELECT e.id, e.emp_id, e.name, e.email, e.phone, e.department,
+              ${bankSelect(bankColsExist)},
+              e.role,
               e.is_active, ${liveTrackingSelect}, e.manager_id, e.created_at, e.updated_at,
               m.name       AS manager_name,
               s.name       AS shift_name,

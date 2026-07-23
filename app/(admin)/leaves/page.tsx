@@ -13,8 +13,10 @@ import Modal from '@/components/ui/Modal';
 import Badge from '@/components/ui/Badge';
 import Pagination from '@/components/ui/Pagination';
 import Spinner from '@/components/ui/Spinner';
+import LeaveQuotasPanel from '@/components/LeaveQuotasPanel';
 import type { Employee, ApiResponse } from '@/lib/types';
 import { formatDateOnly } from '@/lib/date';
+import { useCurrentUser } from '@/lib/useCurrentUser';
 
 interface LeaveRow {
   id: number;
@@ -67,9 +69,12 @@ const selectClass = 'block w-full rounded-lg border border-slate-300 dark:border
 
 export default function LeavesPage() {
   const qc = useQueryClient();
+  const currentUser = useCurrentUser();
+  const isSuperAdmin = currentUser?.role === 'super_admin';
   const today = format(new Date(), 'yyyy-MM-dd');
   const firstOfMonth = format(new Date(new Date().getFullYear(), new Date().getMonth(), 1), 'yyyy-MM-dd');
 
+  const [view, setView] = useState<'records' | 'quotas'>('records');
   const [fromDate, setFromDate] = useState(firstOfMonth);
   const [toDate, setToDate] = useState(today);
   const [page, setPage] = useState(1);
@@ -151,6 +156,27 @@ export default function LeavesPage() {
 
   return (
     <div className="space-y-4">
+      {/* View toggle: dated records vs yearly entitlements */}
+      <div className="flex gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 p-1 w-fit">
+        {([['records', 'Leave Records'], ['quotas', 'Yearly Quotas']] as const).map(([key, label]) => (
+          <button
+            key={key}
+            onClick={() => setView(key)}
+            className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
+              view === key
+                ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-sm'
+                : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {view === 'quotas' && <LeaveQuotasPanel canEdit={isSuperAdmin} />}
+
+      {view === 'records' && (
+      <>
       <div className="flex flex-wrap gap-3 items-end">
         <Input label="From" type="date" value={fromDate} onChange={e => { setFromDate(e.target.value); setPage(1); }} className="w-36" />
         <Input label="To" type="date" value={toDate} onChange={e => { setToDate(e.target.value); setPage(1); }} className="w-36" />
@@ -215,6 +241,8 @@ export default function LeavesPage() {
             <Pagination page={page} totalPages={pagination.totalPages} onPageChange={setPage} />
           )}
         </>
+      )}
+      </>
       )}
 
       {/* Add leave modal */}

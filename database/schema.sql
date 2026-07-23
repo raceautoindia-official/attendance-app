@@ -19,6 +19,12 @@ CREATE TABLE employees (
   email       VARCHAR(150)   NULL,
   phone       VARCHAR(20)    NULL,
   department  VARCHAR(100)   NULL,
+  bank_account_name   VARCHAR(100) NULL,
+  bank_account_number VARCHAR(24)  NULL,
+  bank_ifsc           VARCHAR(11)  NULL,
+  bank_name           VARCHAR(100) NULL,
+  pan_number          VARCHAR(10)  NULL,
+  aadhaar_number      VARCHAR(12)  NULL,
   pin_hash    VARCHAR(255)   NOT NULL,
   role        ENUM('employee','manager','super_admin') NOT NULL DEFAULT 'employee',
   is_active   BOOLEAN        NOT NULL DEFAULT TRUE,
@@ -333,7 +339,68 @@ CREATE TABLE live_tracking_points (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
--- 13. audit_log
+-- 13. employee_documents — uploaded files (PAN, Aadhaar, certificates, …)
+--     file_data holds base64; served only through the authenticated API.
+-- ---------------------------------------------------------------------------
+CREATE TABLE employee_documents (
+  id           INT           NOT NULL AUTO_INCREMENT,
+  employee_id  INT           NOT NULL,
+  doc_type     ENUM('pan_card','aadhaar_card','bank_proof','experience_certificate','relieving_letter','education_certificate','offer_letter','other') NOT NULL DEFAULT 'other',
+  title        VARCHAR(150)  NOT NULL,
+  file_name    VARCHAR(255)  NOT NULL,
+  mime_type    VARCHAR(100)  NOT NULL,
+  size_bytes   INT           NOT NULL,
+  file_data    LONGTEXT      NOT NULL,
+  uploaded_by  INT           NULL,
+  created_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  PRIMARY KEY (id),
+  INDEX idx_employee_documents_employee_id (employee_id),
+  INDEX idx_employee_documents_doc_type    (doc_type),
+
+  CONSTRAINT fk_employee_documents_employee
+    FOREIGN KEY (employee_id) REFERENCES employees (id)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE,
+
+  CONSTRAINT fk_employee_documents_uploaded_by
+    FOREIGN KEY (uploaded_by) REFERENCES employees (id)
+    ON DELETE SET NULL
+    ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
+-- 14. leave_quotas — yearly leave entitlement per employee; "used" is derived
+--     from leave_records at query time.
+-- ---------------------------------------------------------------------------
+CREATE TABLE leave_quotas (
+  id            INT       NOT NULL AUTO_INCREMENT,
+  employee_id   INT       NOT NULL,
+  year          SMALLINT  NOT NULL,
+  casual_total  INT       NOT NULL DEFAULT 0,
+  sick_total    INT       NOT NULL DEFAULT 0,
+  earned_total  INT       NOT NULL DEFAULT 0,
+  updated_by    INT       NULL,
+  created_at    DATETIME  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at    DATETIME  NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_leave_quotas_emp_year (employee_id, year),
+  INDEX idx_leave_quotas_year (year),
+
+  CONSTRAINT fk_leave_quotas_employee
+    FOREIGN KEY (employee_id) REFERENCES employees (id)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE,
+
+  CONSTRAINT fk_leave_quotas_updated_by
+    FOREIGN KEY (updated_by) REFERENCES employees (id)
+    ON DELETE SET NULL
+    ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
+-- 15. audit_log
 -- ---------------------------------------------------------------------------
 CREATE TABLE audit_log (
   id            BIGINT       NOT NULL AUTO_INCREMENT,

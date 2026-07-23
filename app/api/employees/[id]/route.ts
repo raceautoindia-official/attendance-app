@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth, hashPin } from '@/lib/auth';
 import { getWorkDateIST } from '@/lib/attendance';
+import { hasBankColumns, bankSelect, BankDetailsSchema, normalizeBankDetails } from '@/lib/employeeDetails';
 import type { ApiResponse, Employee, EmployeeSchedule } from '@/lib/types';
 
 // ---------------------------------------------------------------------------
@@ -61,13 +62,18 @@ export async function GET(request: NextRequest, context: Params) {
   const scopeError = await assertManagerScope(auth, employeeId);
   if (scopeError) return scopeError;
 
-  const liveTrackingColExists = await hasLiveTrackingColumn();
+  const [liveTrackingColExists, bankColsExist] = await Promise.all([
+    hasLiveTrackingColumn(),
+    hasBankColumns(),
+  ]);
   const employee = await queryOne<Employee>(
-    `SELECT id, emp_id, name, email, phone, department, role, is_active,
-            ${liveTrackingColExists ? 'live_tracking_enabled' : 'TRUE AS live_tracking_enabled'},
-            manager_id,
-            created_at, updated_at
-     FROM employees WHERE id = ?`,
+    `SELECT e.id, e.emp_id, e.name, e.email, e.phone, e.department,
+            ${bankSelect(bankColsExist)},
+            e.role, e.is_active,
+            ${liveTrackingColExists ? 'e.live_tracking_enabled' : 'TRUE AS live_tracking_enabled'},
+            e.manager_id,
+            e.created_at, e.updated_at
+     FROM employees e WHERE e.id = ?`,
     [employeeId],
   );
   if (!employee) {
@@ -128,7 +134,7 @@ const UpdateEmployeeSchema = z.object({
   is_active: z.boolean().optional(),
   live_tracking_enabled: z.boolean().optional(),
   new_pin: z.string().regex(/^\d{4,6}$/, 'PIN must be 4–6 digits').optional(),
-});
+}).extend(BankDetailsSchema.shape);
 
 export async function PUT(request: NextRequest, context: Params) {
   const auth = await requireAuth(request, ['super_admin']);
@@ -151,7 +157,10 @@ export async function PUT(request: NextRequest, context: Params) {
     );
   }
 
-  const liveTrackingColExists = await hasLiveTrackingColumn();
+  const [liveTrackingColExists, bankColsExist] = await Promise.all([
+    hasLiveTrackingColumn(),
+    hasBankColumns(),
+  ]);
   const existing = await queryOne<Employee>(
     `SELECT id, emp_id, name, email, phone, department, role, is_active,
             ${liveTrackingColExists ? 'live_tracking_enabled' : 'TRUE AS live_tracking_enabled'},
@@ -197,6 +206,18 @@ export async function PUT(request: NextRequest, context: Params) {
   if (liveTrackingColExists && live_tracking_enabled !== undefined) apply('live_tracking_enabled', live_tracking_enabled ? 1 : 0);
   if (new_pin !== undefined) apply('pin_hash', await hashPin(new_pin));
 
+  const bankFields = normalizeBankDetails(parsed.data);
+  if (Object.keys(bankFields).length > 0 && !bankColsExist) {
+    return NextResponse.json<ApiResponse>(
+      {
+        success: false,
+        error: 'Employee detail columns are missing. Run migration: database/migrations/2026-07-23_add_employee_details_documents_leave_quotas.sql',
+      },
+      { status: 503 },
+    );
+  }
+  for (const [col, val] of Object.entries(bankFields)) apply(col, val);
+
   if (setClauses.length === 0) {
     return NextResponse.json<ApiResponse>(
       { success: false, error: 'No fields to update' },
@@ -229,10 +250,12 @@ export async function PUT(request: NextRequest, context: Params) {
   });
 
   const updated = await queryOne<Employee>(
-    `SELECT id, emp_id, name, email, phone, department, role, is_active,
-            ${liveTrackingColExists ? 'live_tracking_enabled' : 'TRUE AS live_tracking_enabled'},
-            manager_id,
-            created_at, updated_at FROM employees WHERE id = ?`,
+    `SELECT e.id, e.emp_id, e.name, e.email, e.phone, e.department,
+            ${bankSelect(bankColsExist)},
+            e.role, e.is_active,
+            ${liveTrackingColExists ? 'e.live_tracking_enabled' : 'TRUE AS live_tracking_enabled'},
+            e.manager_id,
+            e.created_at, e.updated_at FROM employees e WHERE e.id = ?`,
     [employeeId],
   );
   return NextResponse.json<ApiResponse<Employee>>({ success: true, data: updated! });

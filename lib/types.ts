@@ -20,6 +20,16 @@ export type AttendanceStatus =
 
 export type LeaveType = 'casual' | 'sick' | 'earned' | 'holiday' | 'other';
 
+export type DocumentType =
+  | 'pan_card'
+  | 'aadhaar_card'
+  | 'bank_proof'
+  | 'experience_certificate'
+  | 'relieving_letter'
+  | 'education_certificate'
+  | 'offer_letter'
+  | 'other';
+
 // ---------------------------------------------------------------------------
 // Domain models — mirror DB columns exactly
 // ---------------------------------------------------------------------------
@@ -31,10 +41,44 @@ export interface Employee {
   email: string | null;
   phone: string | null;
   department?: string | null;
+  bank_account_name?: string | null;
+  bank_account_number?: string | null;
+  bank_ifsc?: string | null;
+  bank_name?: string | null;
+  pan_number?: string | null;
+  aadhaar_number?: string | null;
   role: Role;
   is_active: boolean;
   live_tracking_enabled?: boolean;
   manager_id: number | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+/** Uploaded document metadata — file_data (base64) is never included in lists */
+export interface EmployeeDocument {
+  id: number;
+  employee_id: number;
+  doc_type: DocumentType;
+  title: string;
+  file_name: string;
+  mime_type: string;
+  size_bytes: number;
+  uploaded_by: number | null;
+  created_at: Date;
+  // Populated via JOIN
+  uploaded_by_name?: string | null;
+}
+
+/** Yearly leave entitlement; used/remaining are derived from leave_records */
+export interface LeaveQuota {
+  id: number;
+  employee_id: number;
+  year: number;
+  casual_total: number;
+  sick_total: number;
+  earned_total: number;
+  updated_by: number | null;
   created_at: Date;
   updated_at: Date;
 }
