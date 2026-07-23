@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Button from '@/components/ui/Button';
 import Spinner from '@/components/ui/Spinner';
@@ -43,6 +43,8 @@ export default function LeaveQuotasPanel({ canEdit }: { canEdit: boolean }) {
   const [edits, setEdits] = useState<Record<number, Totals>>({});
   const [bulk, setBulk] = useState<Totals>({ casual_total: 12, sick_total: 6, earned_total: 12 });
   const [error, setError] = useState<string | null>(null);
+  const [importSummary, setImportSummary] = useState<{ message: string; skipped: string[] } | null>(null);
+  const importFileRef = useRef<HTMLInputElement>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ['leave-quotas', year],
@@ -70,6 +72,44 @@ export default function LeaveQuotasPanel({ canEdit }: { canEdit: boolean }) {
       setEdits({});
     },
     onError: (err: Error) => setError(err.message),
+  });
+
+  const importMutation = useMutation({
+    mutationFn: async (file: File) => {
+      setError(null);
+      setImportSummary(null);
+      if (file.size > 2 * 1024 * 1024) throw new Error('File is too large (max 2 MB).');
+      const dataBase64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).split(',')[1] ?? '');
+        reader.onerror = () => reject(new Error('Could not read the file.'));
+        reader.readAsDataURL(file);
+      });
+      const res = await fetch('/api/leave-quotas/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ year, file_name: file.name, data_base64: dataBase64 }),
+      });
+      const json = await res.json() as {
+        success: boolean; error?: string; message?: string;
+        data?: { updated: number; skipped: string[] };
+      };
+      if (!json.success) throw new Error(json.error ?? 'Import failed');
+      return json;
+    },
+    onSuccess: json => {
+      setImportSummary({
+        message: json.message ?? 'Import complete',
+        skipped: json.data?.skipped ?? [],
+      });
+      qc.invalidateQueries({ queryKey: ['leave-quotas'] });
+      setEdits({});
+      if (importFileRef.current) importFileRef.current.value = '';
+    },
+    onError: (err: Error) => {
+      setError(err.message);
+      if (importFileRef.current) importFileRef.current.value = '';
+    },
   });
 
   const rowValues = (row: QuotaRow): Totals =>
@@ -114,6 +154,32 @@ export default function LeaveQuotasPanel({ canEdit }: { canEdit: boolean }) {
         </a>
 
         {canEdit && (
+          <>
+            <input
+              ref={importFileRef}
+              type="file"
+              accept=".xlsx,.xls,.csv"
+              className="hidden"
+              onChange={e => {
+                const file = e.target.files?.[0];
+                if (file) importMutation.mutate(file);
+              }}
+            />
+            <Button
+              size="sm"
+              variant="secondary"
+              loading={importMutation.isPending}
+              onClick={() => importFileRef.current?.click()}
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 16V4m0 0L8 8m4-4l4 4" />
+              </svg>
+              Import from Excel
+            </Button>
+          </>
+        )}
+
+        {canEdit && (
           <div className="flex flex-wrap items-end gap-2 sm:ml-auto">
             {(['casual_total', 'sick_total', 'earned_total'] as const).map(key => (
               <div key={key} className="flex flex-col gap-1">
@@ -145,6 +211,24 @@ export default function LeaveQuotasPanel({ canEdit }: { canEdit: boolean }) {
       </div>
 
       {(error || loadError) && <p className="text-sm text-red-500">{error ?? loadError}</p>}
+
+      {importSummary && (
+        <div className="rounded-lg border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-900/20 px-4 py-3">
+          <p className="text-sm font-medium text-green-800 dark:text-green-300">{importSummary.message}</p>
+          {importSummary.skipped.length > 0 && (
+            <ul className="mt-1.5 space-y-0.5">
+              {importSummary.skipped.slice(0, 10).map((s, i) => (
+                <li key={i} className="text-xs text-amber-700 dark:text-amber-400">{s}</li>
+              ))}
+              {importSummary.skipped.length > 10 && (
+                <li className="text-xs text-amber-700 dark:text-amber-400">
+                  …and {importSummary.skipped.length - 10} more skipped rows
+                </li>
+              )}
+            </ul>
+          )}
+        </div>
+      )}
 
       {isLoading ? (
         <div className="flex justify-center py-12"><Spinner /></div>
