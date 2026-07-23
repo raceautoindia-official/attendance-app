@@ -39,6 +39,10 @@ const MAX_ACCURACY_M = Number(process.env.LIVE_TRACKING_MAX_ACCURACY_M) || 100;
 // employee — drop the jumping point instead of drawing a spike.
 const MAX_SPEED_MPS = 40;
 
+// Movement smaller than this never extends the path. Combined with each fix's
+// own accuracy radius, this collapses the "fuzz ball" a stationary phone draws.
+const MIN_MOVE_M = 30;
+
 function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const toRad = (d: number) => (d * Math.PI) / 180;
   const dLat = toRad(lat2 - lat1);
@@ -47,6 +51,37 @@ function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number)
     Math.sin(dLat / 2) ** 2 +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
   return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// Reduce raw fixes to genuine movement:
+//  - drift smaller than the fixes' accuracy radius is jitter, not walking;
+//  - segments faster than MAX_SPEED_MPS are glitches;
+//  - a single point that leaves the cluster and immediately snaps back is an
+//    outlier no matter how much time passed (this is what kills long spikes
+//    that a pure speed check misses across ping gaps).
+function cleanPath(points: LivePoint[]): LivePoint[] {
+  const kept: LivePoint[] = [];
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i];
+    const prev = kept[kept.length - 1];
+    if (!prev) {
+      kept.push(p);
+      continue;
+    }
+    const dist = haversineMeters(prev.latitude, prev.longitude, p.latitude, p.longitude);
+    const jitterRadius = Math.max(MIN_MOVE_M, p.accuracy_meters ?? 0, prev.accuracy_meters ?? 0);
+    if (dist <= jitterRadius) continue;
+    const seconds =
+      (new Date(p.tracked_at_utc).getTime() - new Date(prev.tracked_at_utc).getTime()) / 1000;
+    if (seconds > 0 ? dist / seconds > MAX_SPEED_MPS : dist > 600) continue;
+    const next = points[i + 1];
+    if (next) {
+      const returned = haversineMeters(prev.latitude, prev.longitude, Number(next.latitude), Number(next.longitude));
+      if (returned <= jitterRadius) continue; // one-point excursion
+    }
+    kept.push(p);
+  }
+  return kept;
 }
 
 // GET /api/live-tracking/live
@@ -156,33 +191,23 @@ export async function GET(request: NextRequest) {
     pointParams,
   );
 
-  const pathBySession = new Map<number, LivePoint[]>();
+  const rawBySession = new Map<number, LivePoint[]>();
   for (const point of pointRows) {
     if (point.latitude == null || point.longitude == null) continue;
-    const existing = pathBySession.get(point.session_id);
     const normalized: LivePoint = {
       tracked_at_utc: point.tracked_at_utc,
       latitude: Number(point.latitude),
       longitude: Number(point.longitude),
       accuracy_meters: point.accuracy_meters != null ? Number(point.accuracy_meters) : null,
     };
-    // Outlier rejection: a point implying impossible speed since the previous
-    // kept point is a GPS glitch (multipath / cell fallback) — skip it so the
-    // path doesn't grow spikes for someone sitting still.
-    const prev = existing?.[existing.length - 1];
-    if (prev) {
-      const meters = haversineMeters(prev.latitude, prev.longitude, normalized.latitude, normalized.longitude);
-      const seconds =
-        (new Date(normalized.tracked_at_utc).getTime() - new Date(prev.tracked_at_utc).getTime()) / 1000;
-      if (seconds > 0 ? meters / seconds > MAX_SPEED_MPS : meters > 600) continue;
-    }
+    const existing = rawBySession.get(point.session_id);
     if (existing) existing.push(normalized);
-    else pathBySession.set(point.session_id, [normalized]);
+    else rawBySession.set(point.session_id, [normalized]);
   }
 
   const sessionsWithPath = rows.map(row => ({
     ...row,
-    path: pathBySession.get(row.session_id) ?? [],
+    path: cleanPath(rawBySession.get(row.session_id) ?? []),
   }));
 
   return NextResponse.json<ApiResponse<{ sessions: LiveRow[] }>>({
