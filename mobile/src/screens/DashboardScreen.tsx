@@ -13,6 +13,7 @@ import {
   Linking,
   ToastAndroid,
   Alert,
+  AppState,
 } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { WebView } from 'react-native-webview';
@@ -267,9 +268,19 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     ensureTracking();
     fetchPos();
     const id = setInterval(fetchPos, 20_000);
+    // When the app returns to the foreground mid-shift, the OS may have killed
+    // the tracking service (battery saver, task swipe) — restart it right away
+    // instead of waiting for the user to notice the "tracking is off" pill.
+    const appState = AppState.addEventListener('change', state => {
+      if (state === 'active') {
+        ensureTracking();
+        fetchPos();
+      }
+    });
     return () => {
       active = false;
       clearInterval(id);
+      appState.remove();
     };
   }, [clockedIn, clockedOut, trackingEnabled]);
 
