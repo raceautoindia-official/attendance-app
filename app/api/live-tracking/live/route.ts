@@ -29,6 +29,26 @@ interface LivePointRow extends LivePoint {
   session_id: number;
 }
 
+// GPS fixes worse than this are Wi-Fi/cell-tower guesses that scatter hundreds
+// of meters around a stationary phone — they stay in the DB (they still prove
+// the app is alive) but are excluded from the map so the path shows real
+// movement only.
+const MAX_ACCURACY_M = Number(process.env.LIVE_TRACKING_MAX_ACCURACY_M) || 100;
+
+// A segment faster than this (~144 km/h between pings) is a GPS glitch, not an
+// employee — drop the jumping point instead of drawing a spike.
+const MAX_SPEED_MPS = 40;
+
+function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 // GET /api/live-tracking/live
 // employee -> own live session
 // manager  -> team live sessions
@@ -85,12 +105,13 @@ export async function GET(request: NextRequest) {
          SELECT p2.id
          FROM live_tracking_points p2
          WHERE p2.session_id = s.id
-         ORDER BY p2.tracked_at_utc DESC, p2.id DESC
+         ORDER BY (p2.accuracy_meters IS NULL OR p2.accuracy_meters <= ?) DESC,
+                  p2.tracked_at_utc DESC, p2.id DESC
          LIMIT 1
        )
      WHERE ${conditions.join(' AND ')}
      ORDER BY s.last_ping_utc DESC, s.started_at_utc DESC`,
-    params,
+    [MAX_ACCURACY_M, ...params],
   );
 
   if (!rows.length) {
@@ -109,8 +130,11 @@ export async function GET(request: NextRequest) {
 
   const sessionIds = Array.from(new Set(rows.map(r => r.session_id)));
   const placeholders = sessionIds.map(() => '?').join(',');
-  const pointConditions: string[] = [`session_id IN (${placeholders})`];
-  const pointParams: unknown[] = [...sessionIds];
+  const pointConditions: string[] = [
+    `session_id IN (${placeholders})`,
+    '(accuracy_meters IS NULL OR accuracy_meters <= ?)',
+  ];
+  const pointParams: unknown[] = [...sessionIds, MAX_ACCURACY_M];
   if (fromUtc) {
     pointConditions.push('tracked_at_utc >= ?');
     pointParams.push(fromUtc);
@@ -142,6 +166,16 @@ export async function GET(request: NextRequest) {
       longitude: Number(point.longitude),
       accuracy_meters: point.accuracy_meters != null ? Number(point.accuracy_meters) : null,
     };
+    // Outlier rejection: a point implying impossible speed since the previous
+    // kept point is a GPS glitch (multipath / cell fallback) — skip it so the
+    // path doesn't grow spikes for someone sitting still.
+    const prev = existing?.[existing.length - 1];
+    if (prev) {
+      const meters = haversineMeters(prev.latitude, prev.longitude, normalized.latitude, normalized.longitude);
+      const seconds =
+        (new Date(normalized.tracked_at_utc).getTime() - new Date(prev.tracked_at_utc).getTime()) / 1000;
+      if (seconds > 0 ? meters / seconds > MAX_SPEED_MPS : meters > 600) continue;
+    }
     if (existing) existing.push(normalized);
     else pathBySession.set(point.session_id, [normalized]);
   }
