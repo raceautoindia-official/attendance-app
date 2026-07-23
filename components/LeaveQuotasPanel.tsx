@@ -102,6 +102,17 @@ export default function LeaveQuotasPanel({ canEdit }: { canEdit: boolean }) {
           </select>
         </div>
 
+        <a
+          href={`/api/leave-quotas/export?year=${year}`}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700"
+          download
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12m0 0l-4-4m4 4l4-4" />
+          </svg>
+          Export to Excel
+        </a>
+
         {canEdit && (
           <div className="flex flex-wrap items-end gap-2 sm:ml-auto">
             {(['casual_total', 'sick_total', 'earned_total'] as const).map(key => (
