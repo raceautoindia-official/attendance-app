@@ -43,11 +43,13 @@ function clockOffsetMs(deviceNowIso: string | undefined, nowMs: number): number 
 // Device clocks drift and users change them; after skew correction, only trust
 // a timestamp that is plausible (not in the future, not older than a day) —
 // otherwise fall back to the server time so the point still lands on the map.
-function normalizeTrackedAt(iso: string | undefined, nowMs: number, offsetMs: number): string {
+// floorMs is the session's server-stamped start: no point may predate it, so a
+// wrong phone clock can never make tracking appear to run before login.
+function normalizeTrackedAt(iso: string | undefined, nowMs: number, offsetMs: number, floorMs: number): string {
   if (iso) {
     const t = new Date(iso).getTime() + offsetMs;
     if (!Number.isNaN(t) && t <= nowMs + 60_000 && t >= nowMs - 24 * 60 * 60 * 1000) {
-      return toMySQLDatetime(new Date(Math.min(t, nowMs)));
+      return toMySQLDatetime(new Date(Math.max(Math.min(t, nowMs), floorMs)));
     }
   }
   return toMySQLDatetime(new Date(nowMs));
@@ -108,6 +110,8 @@ export async function POST(request: NextRequest) {
 
   const nowMs = Date.now();
   const offsetMs = clockOffsetMs(deviceNowUtc, nowMs);
+  const sessionStartMs = new Date(activeSession.started_at_utc as unknown as string | Date).getTime();
+  const floorMs = Number.isNaN(sessionStartMs) ? 0 : sessionStartMs;
 
   await query(
     `UPDATE live_tracking_sessions
@@ -120,7 +124,7 @@ export async function POST(request: NextRequest) {
   const params = points.flatMap(p => [
     activeSession.id,
     auth.id,
-    normalizeTrackedAt(p.tracked_at_utc, nowMs, offsetMs),
+    normalizeTrackedAt(p.tracked_at_utc, nowMs, offsetMs, floorMs),
     p.latitude,
     p.longitude,
     p.accuracy_meters ?? null,
