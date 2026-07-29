@@ -17,16 +17,35 @@ const PointSchema = z.object({
 // Either the legacy single-point body or a batch. The app batches when the OS
 // delivers several fixes at once and when it retries points buffered offline.
 const PingSchema = z.union([
-  z.object({ points: z.array(PointSchema).min(1).max(500) }),
+  z.object({
+    points: z.array(PointSchema).min(1).max(500),
+    // The device's current time when it sent this request. Comparing it with
+    // the server clock gives the phone's clock error, which is then removed
+    // from every point — a phone set 20 minutes slow otherwise shows all its
+    // tracking times 20 minutes early on the admin map.
+    device_now_utc: z.iso.datetime().optional(),
+  }),
   PointSchema,
 ]);
 
-// Device clocks drift and users change them; only trust a client timestamp
-// that is plausible (not in the future, not older than a day) — otherwise fall
-// back to the server time so the point still lands on the map.
-function normalizeTrackedAt(iso: string | undefined, nowMs: number): string {
+// Ignore skew smaller than this — that's just network latency, not a wrong
+// clock, and GPS fix times are more precise than send time in that range.
+const CLOCK_SKEW_TOLERANCE_MS = 30_000;
+
+function clockOffsetMs(deviceNowIso: string | undefined, nowMs: number): number {
+  if (!deviceNowIso) return 0;
+  const deviceNow = new Date(deviceNowIso).getTime();
+  if (Number.isNaN(deviceNow)) return 0;
+  const offset = nowMs - deviceNow;
+  return Math.abs(offset) > CLOCK_SKEW_TOLERANCE_MS ? offset : 0;
+}
+
+// Device clocks drift and users change them; after skew correction, only trust
+// a timestamp that is plausible (not in the future, not older than a day) —
+// otherwise fall back to the server time so the point still lands on the map.
+function normalizeTrackedAt(iso: string | undefined, nowMs: number, offsetMs: number): string {
   if (iso) {
-    const t = new Date(iso).getTime();
+    const t = new Date(iso).getTime() + offsetMs;
     if (!Number.isNaN(t) && t <= nowMs + 60_000 && t >= nowMs - 24 * 60 * 60 * 1000) {
       return toMySQLDatetime(new Date(Math.min(t, nowMs)));
     }
@@ -69,6 +88,7 @@ export async function POST(request: NextRequest) {
   }
 
   const points = 'points' in parsed.data ? parsed.data.points : [parsed.data];
+  const deviceNowUtc = 'points' in parsed.data ? parsed.data.device_now_utc : undefined;
 
   const activeSession = await queryOne<LiveTrackingSession>(
     `SELECT id, employee_id, started_at_utc, ended_at_utc, is_active, last_ping_utc, created_at
@@ -87,6 +107,7 @@ export async function POST(request: NextRequest) {
   }
 
   const nowMs = Date.now();
+  const offsetMs = clockOffsetMs(deviceNowUtc, nowMs);
 
   await query(
     `UPDATE live_tracking_sessions
@@ -99,7 +120,7 @@ export async function POST(request: NextRequest) {
   const params = points.flatMap(p => [
     activeSession.id,
     auth.id,
-    normalizeTrackedAt(p.tracked_at_utc, nowMs),
+    normalizeTrackedAt(p.tracked_at_utc, nowMs, offsetMs),
     p.latitude,
     p.longitude,
     p.accuracy_meters ?? null,

@@ -20,7 +20,13 @@ interface TrackedPoint {
 let pending: TrackedPoint[] = [];
 
 async function pingBatch(points: TrackedPoint[]): Promise<void> {
-  await apiFetch('/api/live-tracking/ping', { method: 'POST', body: { points } });
+  await apiFetch('/api/live-tracking/ping', {
+    method: 'POST',
+    // device_now_utc lets the server measure this phone's clock error and
+    // correct the point timestamps — a phone with a wrong clock otherwise
+    // shows all its tracking times shifted on the admin map.
+    body: { points, device_now_utc: new Date().toISOString() },
+  });
 }
 
 // Transient failures (no network, DNS, timeout, server 5xx) are worth
