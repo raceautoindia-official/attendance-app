@@ -49,6 +49,8 @@ type TodayData = {
       required_hours?: number | null;
     } | null;
   } | null;
+  /** Plant staff: may clock in again after completing a session today */
+  multi_session?: boolean;
 };
 
 type LiveTrackingStatusData = {
@@ -333,7 +335,9 @@ export default function DashboardPage() {
   const schedule = todayData?.data?.schedule;
   const clockedIn = !!attendance?.clock_in_utc;
   const clockedOut = !!attendance?.clock_out_utc;
-  const canClockIn = !clockedIn;
+  const multiSession = todayData?.data?.multi_session === true;
+  // Plant staff may start another session after completing one.
+  const canClockIn = !clockedIn || (clockedOut && multiSession);
   const canClockOut = clockedIn && !clockedOut;
   const liveTrackingAllowed = liveTrackingStatus?.data?.enabled !== false;
   const activeLiveSession = liveTrackingStatus?.data?.session ?? liveSelf;
@@ -372,8 +376,10 @@ export default function DashboardPage() {
     const clockInMs = new Date(attendance.clock_in_utc).getTime();
     if (Number.isNaN(clockInMs)) return attendance?.total_minutes ?? null;
     const diff = Math.max(0, Math.floor((now.getTime() - clockInMs) / 60_000));
-    return diff;
-  }, [attendance?.clock_in_utc, attendance?.clock_out_utc, attendance?.total_minutes, now]);
+    // Multi-session (plant) employees carry minutes banked from earlier
+    // sessions today on top of the current one.
+    return Number(attendance?.banked_minutes ?? 0) + diff;
+  }, [attendance?.clock_in_utc, attendance?.clock_out_utc, attendance?.total_minutes, attendance?.banked_minutes, now]);
 
   // Open a live-tracking session as soon as tracking should be active. The
   // ping loop below only records points into an existing session — without

@@ -186,3 +186,37 @@ export async function sendLiveTrackingAlert(
     `,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Geofence auto clock-out alert
+// ---------------------------------------------------------------------------
+
+export interface GeofenceAutoClockoutData {
+  employeeName: string;
+  empId: string;
+  locationName: string | null;
+  minutesOutside: number;
+  detectedAt: Date;
+}
+
+export async function sendGeofenceAutoClockoutAlert(
+  adminEmail: string,
+  payload: GeofenceAutoClockoutData,
+): Promise<void> {
+  const detectedAtStr = format(payload.detectedAt, 'dd MMM yyyy, hh:mm a');
+  await send(
+    adminEmail,
+    `Geofence Alert: ${payload.employeeName} (${payload.empId}) auto clocked out`,
+    `
+      <p>Hi,</p>
+      <p><strong>${payload.employeeName} (${payload.empId})</strong> stayed outside
+      ${payload.locationName ? `<strong>${payload.locationName}</strong>` : 'their work location'}
+      for over ${payload.minutesOutside} minutes while clocked in, and has been
+      <strong>automatically clocked out</strong>.</p>
+      <ul>
+        <li><strong>Detected At:</strong> ${detectedAtStr}</li>
+      </ul>
+      <p>Please review their attendance and tracking history.</p>
+    `,
+  );
+}

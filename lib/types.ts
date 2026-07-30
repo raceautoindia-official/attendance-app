@@ -50,6 +50,10 @@ export interface Employee {
   role: Role;
   is_active: boolean;
   live_tracking_enabled?: boolean;
+  /** on_site: geofence enforced; off_site: field staff, no geofence */
+  work_mode?: 'on_site' | 'off_site';
+  /** Plant staff — may clock in/out several times a day */
+  allow_multiple_sessions?: boolean;
   manager_id: number | null;
   created_at: Date;
   updated_at: Date;
@@ -182,6 +186,9 @@ export interface AttendanceRecord {
   geofence_status: GeofenceStatus;
   auth_method: AuthMethod | null;
   total_minutes: number | null;
+  /** Minutes completed in earlier sessions today (multi-session employees) */
+  banked_minutes?: number;
+  session_count?: number;
   status: AttendanceStatus;
   notes: string | null;
   edited_by: number | null;

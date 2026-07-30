@@ -33,6 +33,7 @@ interface TodayAttendance {
   clock_in_utc: string | null;
   clock_out_utc: string | null;
   total_minutes: number | null;
+  banked_minutes?: number | null;
   status: string | null;
   geofence_status?: string | null;
 }
@@ -127,6 +128,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   const [busy, setBusy] = useState(false);
   const [tracking, setTracking] = useState(false);
   const [trackingEnabled, setTrackingEnabled] = useState(true); // admin per-employee toggle
+  const [multiSession, setMultiSession] = useState(false); // plant: several clock-ins per day
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(new Date());
   const [liveCoords, setLiveCoords] = useState<{ lat: number; lng: number } | null>(null);
@@ -138,12 +140,13 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   const today = istYmd(now);
   const showClockOutReminder = clockedIn && !clockedOut && istHour(now) >= 19;
 
-  // Hours ticks live while clocked in (matches the web).
+  // Hours ticks live while clocked in (matches the web). Multi-session (plant)
+  // employees carry minutes banked from earlier sessions today.
   const liveWorkedMinutes = useMemo(() => {
     if (!attendance?.clock_in_utc || attendance?.clock_out_utc) return attendance?.total_minutes ?? null;
     const ms = new Date(attendance.clock_in_utc).getTime();
     if (Number.isNaN(ms)) return attendance?.total_minutes ?? null;
-    return Math.max(0, Math.floor((now.getTime() - ms) / 60_000));
+    return Number(attendance?.banked_minutes ?? 0) + Math.max(0, Math.floor((now.getTime() - ms) / 60_000));
   }, [attendance, now]);
 
   useEffect(() => {
@@ -153,11 +156,14 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
 
   const loadToday = useCallback(async () => {
     try {
-      const data = await apiFetch<{ attendance: TodayAttendance | null; schedule: { shift?: Shift } | null }>(
-        '/api/attendance/today',
-      );
+      const data = await apiFetch<{
+        attendance: TodayAttendance | null;
+        schedule: { shift?: Shift } | null;
+        multi_session?: boolean;
+      }>('/api/attendance/today');
       setAttendance(data.attendance);
       setShift(data.schedule?.shift ?? null);
+      setMultiSession(data.multi_session === true);
       saveTodayCache(istYmd(new Date()), data.attendance);
     } catch (e) {
       if (e instanceof Error && e.message.includes('log in again')) onLogout();
@@ -491,9 +497,13 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
             </View>
           )}
 
-          {!clockedIn && (
+          {(!clockedIn || (clockedOut && multiSession)) && (
             <TouchableOpacity style={styles.action} onPress={handleClockIn} disabled={busy} activeOpacity={0.8}>
-              {busy ? <ActivityIndicator color={colors.text} /> : <Text style={styles.actionText}>⏻  Clock In</Text>}
+              {busy ? <ActivityIndicator color={colors.text} /> : (
+                <Text style={styles.actionText}>
+                  {clockedOut ? '⏻  Clock In Again' : '⏻  Clock In'}
+                </Text>
+              )}
             </TouchableOpacity>
           )}
           {clockedIn && !clockedOut && (
@@ -501,7 +511,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
               {busy ? <ActivityIndicator color={colors.text} /> : <Text style={styles.actionText}>⏻  Clock Out</Text>}
             </TouchableOpacity>
           )}
-          {clockedIn && clockedOut && <Text style={styles.done}>Attendance completed for today ✓</Text>}
+          {clockedIn && clockedOut && !multiSession && <Text style={styles.done}>Attendance completed for today ✓</Text>}
         </View>
 
         {/* Geofence warning */}

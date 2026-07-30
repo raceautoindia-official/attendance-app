@@ -29,6 +29,11 @@ CREATE TABLE employees (
   role        ENUM('employee','manager','super_admin') NOT NULL DEFAULT 'employee',
   is_active   BOOLEAN        NOT NULL DEFAULT TRUE,
   live_tracking_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  -- on_site: geofence enforced (no clock-in outside the fence, auto clock-out
+  -- after 30 min outside). off_site: field staff, clock in from anywhere.
+  work_mode   ENUM('on_site','off_site') NOT NULL DEFAULT 'on_site',
+  -- Plant staff may clock in/out several times a day; hours accumulate.
+  allow_multiple_sessions BOOLEAN NOT NULL DEFAULT FALSE,
   manager_id  INT            NULL,
   created_at  DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at  DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -219,6 +224,10 @@ CREATE TABLE attendance (
   geofence_status  ENUM('inside','outside','not_required') NOT NULL DEFAULT 'not_required',
   auth_method      ENUM('webauthn','pin_exemption')        NULL,
   total_minutes    INT            NULL,
+  -- Minutes completed in earlier sessions today (multi-session employees) and
+  -- how many clock-in sessions this row represents.
+  banked_minutes   INT            NOT NULL DEFAULT 0,
+  session_count    INT            NOT NULL DEFAULT 1,
   status           ENUM('present','late','early_departure','absent','leave','holiday') NOT NULL DEFAULT 'present',
   notes            TEXT           NULL,
   edited_by        INT            NULL,

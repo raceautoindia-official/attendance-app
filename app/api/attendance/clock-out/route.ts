@@ -7,6 +7,7 @@ import {
   getClientIp,
   toMySQLDatetime,
 } from '@/lib/attendance';
+import { hasSessionColumns } from '@/lib/employeeDetails';
 import type { ApiResponse, AttendanceRecord } from '@/lib/types';
 
 // ---------------------------------------------------------------------------
@@ -127,13 +128,16 @@ export async function POST(request: NextRequest) {
   // 5. Close EVERY open session for this employee (normally just one). This also
   //    cleans up any duplicate open rows left over from earlier clock/timezone
   //    skew, so the dashboard never gets stuck showing "Clock Out". total_minutes
-  //    is computed per row from its own clock-in.
+  //    is this session (from its own clock-in) plus minutes banked from earlier
+  //    sessions today (multi-session/plant employees).
+  const sessionCols = await hasSessionColumns();
+  const bankedExpr = sessionCols ? 'banked_minutes + ' : '';
   await query(
     `UPDATE attendance
      SET clock_out_utc = ?,
          clock_out_lat = ?,
          clock_out_lng = ?,
-         total_minutes = GREATEST(0, TIMESTAMPDIFF(MINUTE, clock_in_utc, ?))
+         total_minutes = ${bankedExpr}GREATEST(0, TIMESTAMPDIFF(MINUTE, clock_in_utc, ?))
      WHERE employee_id = ?
        AND clock_in_utc IS NOT NULL
        AND clock_out_utc IS NULL`,
@@ -170,17 +174,8 @@ export async function POST(request: NextRequest) {
 
   const newStatus = record.status;
 
-  // 6. Audit log
-  await insertAuditLog({
-    action: 'clock_out',
-    entity: 'attendance',
-    entity_id: record.id,
-    performed_by: auth.id,
-    details: { work_date: workDate, total_minutes: totalMinutes, status: newStatus },
-    ip_address: ip,
-  });
-
-  // 7. Return the updated record
+  // 6. Read the updated row first so the audit records the FULL day total
+  //    (banked earlier sessions + this one), not just this session.
   const updated = await queryOne<AttendanceRecord>(
     `SELECT a.*, e.name AS employee_name, e.emp_id
      FROM attendance a
@@ -188,6 +183,19 @@ export async function POST(request: NextRequest) {
      WHERE a.id = ?`,
     [record.id],
   );
+
+  await insertAuditLog({
+    action: 'clock_out',
+    entity: 'attendance',
+    entity_id: record.id,
+    performed_by: auth.id,
+    details: {
+      work_date: workDate,
+      total_minutes: updated?.total_minutes ?? totalMinutes,
+      status: newStatus,
+    },
+    ip_address: ip,
+  });
 
   return NextResponse.json<ApiResponse<AttendanceRecord>>(
     { success: true, data: updated! },

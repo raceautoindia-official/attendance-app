@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { queryOne } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import { getWorkDateIST } from '@/lib/attendance';
+import { hasWorkModeColumns } from '@/lib/employeeDetails';
 import type { ApiResponse, AttendanceRecord, EmployeeSchedule } from '@/lib/types';
 
 // ---------------------------------------------------------------------------
@@ -13,6 +14,8 @@ import type { ApiResponse, AttendanceRecord, EmployeeSchedule } from '@/lib/type
 interface TodayResponse {
   attendance: AttendanceRecord | null;
   schedule: EmployeeSchedule | null;
+  /** Plant staff: may clock in again after completing a session today */
+  multi_session: boolean;
 }
 
 export async function GET(request: NextRequest) {
@@ -83,12 +86,22 @@ export async function GET(request: NextRequest) {
     } catch { s.location = null; }
   }
 
+  const multiSession = (await hasWorkModeColumns())
+    ? !!Number(
+        (await queryOne<{ allow_multiple_sessions: number | boolean }>(
+          'SELECT allow_multiple_sessions FROM employees WHERE id = ?',
+          [auth.id],
+        ))?.allow_multiple_sessions ?? 0,
+      )
+    : false;
+
   return NextResponse.json<ApiResponse<TodayResponse>>(
     {
       success: true,
       data: {
         attendance: attendance ?? null,
         schedule: schedule ?? null,
+        multi_session: multiSession,
       },
     },
     { headers: { 'Cache-Control': 'no-store' } },

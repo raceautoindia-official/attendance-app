@@ -54,6 +54,8 @@ const empSchema = z.object({
 
 const editSchema = empSchema.omit({ pin: true }).extend({
   new_pin: z.string().length(6).regex(/^\d+$/).or(z.literal('')).optional(),
+  work_mode: z.enum(['on_site', 'off_site']).optional(),
+  allow_multiple_sessions: z.boolean().optional(),
   bank_account_name: z.string().max(100).optional(),
   bank_account_number: z.string().regex(/^[A-Za-z0-9]{5,24}$/, 'Account number must be 5–24 letters/digits').or(z.literal('')).optional(),
   bank_ifsc: z.string().regex(/^[A-Za-z]{4}0[A-Za-z0-9]{6}$/, 'IFSC must look like SBIN0001234').or(z.literal('')).optional(),
@@ -217,6 +219,8 @@ export default function EmployeesPage() {
       department: emp.department ?? '',
       manager_id: emp.manager_id ?? undefined,
       live_tracking_enabled: emp.live_tracking_enabled ?? true,
+      work_mode: emp.work_mode ?? 'on_site',
+      allow_multiple_sessions: !!emp.allow_multiple_sessions,
       new_pin: '',
       bank_account_name: emp.bank_account_name ?? '',
       bank_account_number: emp.bank_account_number ?? '',
@@ -353,6 +357,8 @@ export default function EmployeesPage() {
                       <div><p className="text-xs text-slate-500 uppercase tracking-wide">Manager</p><p className="mt-0.5 font-medium text-slate-800 dark:text-slate-200">{emp.manager_name ?? '—'}</p></div>
                       <div><p className="text-xs text-slate-500 uppercase tracking-wide">Passkeys</p><p className="mt-0.5 font-medium text-slate-800 dark:text-slate-200">{Number(emp.passkey_count ?? 0)}</p></div>
                       <div><p className="text-xs text-slate-500 uppercase tracking-wide">Live Tracking</p><p className="mt-0.5"><Badge variant={emp.live_tracking_enabled ? 'info' : 'neutral'}>{emp.live_tracking_enabled ? 'Enabled' : 'Disabled'}</Badge></p></div>
+                      <div><p className="text-xs text-slate-500 uppercase tracking-wide">Work Mode</p><p className="mt-0.5"><Badge variant={emp.work_mode === 'off_site' ? 'warning' : 'info'}>{emp.work_mode === 'off_site' ? 'Off-site' : 'On-site'}</Badge></p></div>
+                      <div><p className="text-xs text-slate-500 uppercase tracking-wide">Multiple Shifts</p><p className="mt-0.5"><Badge variant={emp.allow_multiple_sessions ? 'success' : 'neutral'}>{emp.allow_multiple_sessions ? 'Allowed' : 'Single'}</Badge></p></div>
                       <div>
                         <p className="text-xs text-slate-500 uppercase tracking-wide">PIN Exemption</p>
                         <div className="mt-0.5 flex items-center gap-2">
@@ -525,6 +531,21 @@ export default function EmployeesPage() {
               <input type="checkbox" {...editForm.register('live_tracking_enabled')} />
               Enable live tracking for this employee
             </label>
+
+            {/* Work mode + multi-session */}
+            <div className="grid grid-cols-2 gap-4">
+              <div className="flex flex-col gap-1">
+                <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Work Mode</label>
+                <select {...editForm.register('work_mode')} className={selectClass}>
+                  <option value="on_site">On-site (geofence enforced)</option>
+                  <option value="off_site">Off-site (field — no geofence)</option>
+                </select>
+              </div>
+              <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300 mt-7">
+                <input type="checkbox" {...editForm.register('allow_multiple_sessions')} />
+                Allow multiple clock-ins per day (plant)
+              </label>
+            </div>
 
             {/* Bank & statutory identity */}
             <div className="border-t border-slate-200 dark:border-slate-700 pt-4">

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import { isWithinGeofence } from '@/lib/geo';
+import { hasWorkModeColumns, hasSessionColumns } from '@/lib/employeeDetails';
 import {
   getWorkDateIST,
   isLate,
@@ -24,6 +25,11 @@ const ClockInSchema = z.object({
   latitude: z.number({ error: 'latitude must be a number' }),
   longitude: z.number({ error: 'longitude must be a number' }),
 });
+
+// Clock-in is allowed within at least this distance of the work location, even
+// if the location's configured radius is smaller — GPS accuracy near buildings
+// makes tighter fences reject people standing at the gate.
+const MIN_LOGIN_RADIUS_M = 200;
 
 // ---------------------------------------------------------------------------
 // Shape returned from the schedule JOIN query
@@ -105,13 +111,44 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const [workModeCols, sessionCols] = await Promise.all([
+    hasWorkModeColumns(),
+    hasSessionColumns(),
+  ]);
+  const flags = workModeCols
+    ? await queryOne<{ work_mode: string; allow_multiple_sessions: number | boolean }>(
+        'SELECT work_mode, allow_multiple_sessions FROM employees WHERE id = ?',
+        [auth.id],
+      )
+    : null;
+  const workMode = flags?.work_mode ?? 'on_site';
+  const allowMultipleSessions = !!(flags?.allow_multiple_sessions ?? false);
+
   // A row may already exist for today's date (a previously completed session, or
   // an 'absent'/leave placeholder). We convert it in place rather than inserting
   // a duplicate, which would violate the unique (employee_id, work_date) key.
-  const existing = await queryOne<{ id: number }>(
-    `SELECT id FROM attendance WHERE employee_id = ? AND work_date = ?`,
+  const existing = await queryOne<{
+    id: number;
+    clock_in_utc: Date | null;
+    clock_out_utc: Date | null;
+    total_minutes: number | null;
+  }>(
+    `SELECT id, clock_in_utc, clock_out_utc, total_minutes
+     FROM attendance WHERE employee_id = ? AND work_date = ?`,
     [auth.id, workDate],
   );
+
+  // A COMPLETED session already exists today. Multi-session employees (plant
+  // staff) open a fresh session with the earlier minutes banked; everyone else
+  // is done for the day — previously this silently ERASED the first session.
+  const completedToday = !!(existing?.clock_in_utc && existing?.clock_out_utc);
+  if (completedToday && !allowMultipleSessions) {
+    return NextResponse.json<ApiResponse>(
+      { success: false, error: 'Attendance already completed for today' },
+      { status: 409 },
+    );
+  }
+  const bankedMinutes = completedToday ? Number(existing?.total_minutes ?? 0) : 0;
 
   // 3. Fetch active schedule (shift + location details via JOIN)
   const schedule = await queryOne<ActiveSchedule>(
@@ -140,27 +177,33 @@ export async function POST(request: NextRequest) {
     [auth.id, workDate, workDate],
   );
 
-  // 4. Geofence check
+  // 4. Geofence check — enforced for on-site employees only. Off-site (field)
+  //    staff clock in from anywhere. The fence is at least MIN_LOGIN_RADIUS_M.
   let geofenceStatus: GeofenceStatus = 'not_required';
 
   if (
+    workMode === 'on_site' &&
     schedule?.geofencing_enabled &&
     schedule.location_id &&
     schedule.loc_lat !== null &&
     schedule.loc_lng !== null
   ) {
+    const effectiveRadius = Math.max(Number(schedule.loc_radius ?? 100), MIN_LOGIN_RADIUS_M);
     const inside = isWithinGeofence(
       lat,
       lng,
       schedule.loc_lat,
       schedule.loc_lng,
-      schedule.loc_radius ?? 100,
+      effectiveRadius,
     );
     geofenceStatus = inside ? 'inside' : 'outside';
 
     if (geofenceStatus === 'outside') {
       return NextResponse.json<ApiResponse>(
-        { success: false, error: 'You are outside the required location' },
+        {
+          success: false,
+          error: `You are outside ${schedule.loc_name ?? 'your work location'} — move within ${effectiveRadius} m to clock in`,
+        },
         { status: 403 },
       );
     }
@@ -190,6 +233,12 @@ export async function POST(request: NextRequest) {
   //    convert it in place; otherwise insert a new record.
   let insertId: number;
   if (existing) {
+    // For a multi-session re-open, keep the finished minutes in banked_minutes
+    // so clock-out adds this session on top instead of starting from zero.
+    const sessionSet = sessionCols
+      ? ', banked_minutes = ?, session_count = session_count + ?'
+      : '';
+    const sessionParams = sessionCols ? [bankedMinutes, completedToday ? 1 : 0] : [];
     await query(
       `UPDATE attendance
        SET clock_in_utc    = ?,
@@ -201,8 +250,9 @@ export async function POST(request: NextRequest) {
            status          = ?,
            clock_out_utc   = NULL,
            total_minutes   = NULL
+           ${sessionSet}
        WHERE id = ?`,
-      [toMySQLDatetime(nowUtc), lat, lng, ip, geofenceStatus, authMethod, status, existing.id],
+      [toMySQLDatetime(nowUtc), lat, lng, ip, geofenceStatus, authMethod, status, ...sessionParams, existing.id],
     );
     insertId = existing.id;
   } else {

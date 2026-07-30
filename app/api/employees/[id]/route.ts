@@ -3,7 +3,14 @@ import { z } from 'zod';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth, hashPin } from '@/lib/auth';
 import { getWorkDateIST } from '@/lib/attendance';
-import { hasBankColumns, bankSelect, BankDetailsSchema, normalizeBankDetails } from '@/lib/employeeDetails';
+import {
+  hasBankColumns,
+  bankSelect,
+  BankDetailsSchema,
+  normalizeBankDetails,
+  hasWorkModeColumns,
+  workModeSelect,
+} from '@/lib/employeeDetails';
 import type { ApiResponse, Employee, EmployeeSchedule } from '@/lib/types';
 
 // ---------------------------------------------------------------------------
@@ -62,13 +69,15 @@ export async function GET(request: NextRequest, context: Params) {
   const scopeError = await assertManagerScope(auth, employeeId);
   if (scopeError) return scopeError;
 
-  const [liveTrackingColExists, bankColsExist] = await Promise.all([
+  const [liveTrackingColExists, bankColsExist, workModeColsExist] = await Promise.all([
     hasLiveTrackingColumn(),
     hasBankColumns(),
+    hasWorkModeColumns(),
   ]);
   const employee = await queryOne<Employee>(
     `SELECT e.id, e.emp_id, e.name, e.email, e.phone, e.department,
             ${bankSelect(bankColsExist)},
+            ${workModeSelect(workModeColsExist)},
             e.role, e.is_active,
             ${liveTrackingColExists ? 'e.live_tracking_enabled' : 'TRUE AS live_tracking_enabled'},
             e.manager_id,
@@ -133,6 +142,8 @@ const UpdateEmployeeSchema = z.object({
   manager_id: z.number().int().positive().nullable().optional(),
   is_active: z.boolean().optional(),
   live_tracking_enabled: z.boolean().optional(),
+  work_mode: z.enum(['on_site', 'off_site']).optional(),
+  allow_multiple_sessions: z.boolean().optional(),
   new_pin: z.string().regex(/^\d{4,6}$/, 'PIN must be 4–6 digits').optional(),
 }).extend(BankDetailsSchema.shape);
 
@@ -172,7 +183,20 @@ export async function PUT(request: NextRequest, context: Params) {
     return NextResponse.json<ApiResponse>({ success: false, error: 'Employee not found' }, { status: 404 });
   }
 
-  const { name, email, phone, department, role, manager_id, is_active, live_tracking_enabled, new_pin } = parsed.data;
+  const {
+    name, email, phone, department, role, manager_id, is_active,
+    live_tracking_enabled, work_mode, allow_multiple_sessions, new_pin,
+  } = parsed.data;
+  const workModeColsExist = await hasWorkModeColumns();
+  if ((work_mode !== undefined || allow_multiple_sessions !== undefined) && !workModeColsExist) {
+    return NextResponse.json<ApiResponse>(
+      {
+        success: false,
+        error: 'Work-mode columns are missing. Run migration: database/migrations/2026-07-30_geofence_modes_multi_session.sql',
+      },
+      { status: 503 },
+    );
+  }
 
   // Email uniqueness check if changing
   if (email !== undefined && email !== existing.email) {
@@ -204,6 +228,8 @@ export async function PUT(request: NextRequest, context: Params) {
   if (manager_id !== undefined) apply('manager_id', manager_id);
   if (is_active !== undefined) apply('is_active', is_active ? 1 : 0);
   if (liveTrackingColExists && live_tracking_enabled !== undefined) apply('live_tracking_enabled', live_tracking_enabled ? 1 : 0);
+  if (workModeColsExist && work_mode !== undefined) apply('work_mode', work_mode);
+  if (workModeColsExist && allow_multiple_sessions !== undefined) apply('allow_multiple_sessions', allow_multiple_sessions ? 1 : 0);
   if (new_pin !== undefined) apply('pin_hash', await hashPin(new_pin));
 
   const bankFields = normalizeBankDetails(parsed.data);
@@ -252,6 +278,7 @@ export async function PUT(request: NextRequest, context: Params) {
   const updated = await queryOne<Employee>(
     `SELECT e.id, e.emp_id, e.name, e.email, e.phone, e.department,
             ${bankSelect(bankColsExist)},
+            ${workModeSelect(workModeColsExist)},
             e.role, e.is_active,
             ${liveTrackingColExists ? 'e.live_tracking_enabled' : 'TRUE AS live_tracking_enabled'},
             e.manager_id,

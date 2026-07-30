@@ -27,6 +27,36 @@ export async function hasBankColumns(): Promise<boolean> {
   return Number(row?.c ?? 0) > 0;
 }
 
+/** True once the 2026-07-30 work-mode migration has run. */
+export async function hasWorkModeColumns(): Promise<boolean> {
+  const row = await queryOne<{ c: number }>(
+    `SELECT COUNT(*) AS c
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'employees'
+       AND COLUMN_NAME = 'work_mode'`,
+  );
+  return Number(row?.c ?? 0) > 0;
+}
+
+export function workModeSelect(exists: boolean, alias = 'e'): string {
+  return exists
+    ? `${alias}.work_mode, ${alias}.allow_multiple_sessions`
+    : `'on_site' AS work_mode, FALSE AS allow_multiple_sessions`;
+}
+
+/** True once attendance has the multi-session columns. */
+export async function hasSessionColumns(): Promise<boolean> {
+  const row = await queryOne<{ c: number }>(
+    `SELECT COUNT(*) AS c
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'attendance'
+       AND COLUMN_NAME = 'banked_minutes'`,
+  );
+  return Number(row?.c ?? 0) > 0;
+}
+
 export function bankSelect(exists: boolean, alias = 'e'): string {
   return exists
     ? BANK_COLUMNS.map(c => `${alias}.${c}`).join(', ')
