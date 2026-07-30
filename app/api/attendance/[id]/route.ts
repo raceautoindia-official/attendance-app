@@ -125,7 +125,11 @@ export async function PUT(
 
   let totalMinutes: number | null = existing.total_minutes;
   if (newClockIn && newClockOut) {
-    totalMinutes = Math.round((newClockOut.getTime() - newClockIn.getTime()) / 60_000);
+    // The clock times cover only the LAST session; minutes banked from earlier
+    // sessions today (multi-session/plant employees) must stay in the total.
+    totalMinutes =
+      Number(existing.banked_minutes ?? 0) +
+      Math.round((newClockOut.getTime() - newClockIn.getTime()) / 60_000);
   } else if (!newClockOut) {
     totalMinutes = null;
   }

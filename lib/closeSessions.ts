@@ -1,5 +1,6 @@
 import { query, insertAuditLog } from '@/lib/db';
 import { getWorkDateIST } from '@/lib/attendance';
+import { hasSessionColumns } from '@/lib/employeeDetails';
 import { REQUIRED_SHIFT_MINUTES } from '@/lib/constants';
 
 export interface CloseOpenSessionsOptions {
@@ -36,13 +37,27 @@ export async function closeOpenSessions(
     whereParams.push(employeeId);
   }
 
-  const result = await query<{ affectedRows?: number }>(
-    `UPDATE attendance
-     SET clock_out_utc = clock_in_utc + INTERVAL ? MINUTE,
-         total_minutes  = ?
-     WHERE ${conditions.join(' AND ')}`,
-    [REQUIRED_SHIFT_MINUTES, REQUIRED_SHIFT_MINUTES, ...whereParams],
-  );
+  // Multi-session (plant) employees may carry banked minutes from completed
+  // sessions earlier in the day. The standard credit applies to the whole DAY:
+  // the day total becomes at least REQUIRED_SHIFT_MINUTES, never less than the
+  // minutes already banked, and the synthetic clock-out spans only the
+  // remaining credit so the timeline stays consistent.
+  const sessionCols = await hasSessionColumns();
+  const result = sessionCols
+    ? await query<{ affectedRows?: number }>(
+        `UPDATE attendance
+         SET clock_out_utc = DATE_ADD(clock_in_utc, INTERVAL GREATEST(0, ? - banked_minutes) MINUTE),
+             total_minutes  = GREATEST(banked_minutes, ?)
+         WHERE ${conditions.join(' AND ')}`,
+        [REQUIRED_SHIFT_MINUTES, REQUIRED_SHIFT_MINUTES, ...whereParams],
+      )
+    : await query<{ affectedRows?: number }>(
+        `UPDATE attendance
+         SET clock_out_utc = clock_in_utc + INTERVAL ? MINUTE,
+             total_minutes  = ?
+         WHERE ${conditions.join(' AND ')}`,
+        [REQUIRED_SHIFT_MINUTES, REQUIRED_SHIFT_MINUTES, ...whereParams],
+      );
 
   const closed = (result as unknown as { affectedRows: number }).affectedRows ?? 0;
 

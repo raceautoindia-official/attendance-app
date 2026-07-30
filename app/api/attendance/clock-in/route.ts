@@ -132,8 +132,9 @@ export async function POST(request: NextRequest) {
     clock_in_utc: Date | null;
     clock_out_utc: Date | null;
     total_minutes: number | null;
+    status: string;
   }>(
-    `SELECT id, clock_in_utc, clock_out_utc, total_minutes
+    `SELECT id, clock_in_utc, clock_out_utc, total_minutes, status
      FROM attendance WHERE employee_id = ? AND work_date = ?`,
     [auth.id, workDate],
   );
@@ -141,8 +142,11 @@ export async function POST(request: NextRequest) {
   // A COMPLETED session already exists today. Multi-session employees (plant
   // staff) open a fresh session with the earlier minutes banked; everyone else
   // is done for the day — previously this silently ERASED the first session.
+  // The bypass also requires the banking columns: in a half-migrated database
+  // (employees ALTER ran, attendance ALTER did not) re-opening would silently
+  // destroy the completed session, so refuse instead.
   const completedToday = !!(existing?.clock_in_utc && existing?.clock_out_utc);
-  if (completedToday && !allowMultipleSessions) {
+  if (completedToday && !(allowMultipleSessions && sessionCols)) {
     return NextResponse.json<ApiResponse>(
       { success: false, error: 'Attendance already completed for today' },
       { status: 409 },
@@ -235,6 +239,10 @@ export async function POST(request: NextRequest) {
   if (existing) {
     // For a multi-session re-open, keep the finished minutes in banked_minutes
     // so clock-out adds this session on top instead of starting from zero.
+    // The day's STATUS is set by the FIRST session (a punctual morning arrival
+    // must not turn 'late' because the afternoon session starts after the
+    // shift's start time) — preserve it on re-open.
+    const effectiveStatus = completedToday ? existing.status : status;
     const sessionSet = sessionCols
       ? ', banked_minutes = ?, session_count = session_count + ?'
       : '';
@@ -252,7 +260,7 @@ export async function POST(request: NextRequest) {
            total_minutes   = NULL
            ${sessionSet}
        WHERE id = ?`,
-      [toMySQLDatetime(nowUtc), lat, lng, ip, geofenceStatus, authMethod, status, ...sessionParams, existing.id],
+      [toMySQLDatetime(nowUtc), lat, lng, ip, geofenceStatus, authMethod, effectiveStatus, ...sessionParams, existing.id],
     );
     insertId = existing.id;
   } else {

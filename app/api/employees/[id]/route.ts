@@ -187,16 +187,10 @@ export async function PUT(request: NextRequest, context: Params) {
     name, email, phone, department, role, manager_id, is_active,
     live_tracking_enabled, work_mode, allow_multiple_sessions, new_pin,
   } = parsed.data;
+  // The edit form always submits these fields, so with the migration not yet
+  // run they are silently skipped (the form could only contain the synthesized
+  // defaults anyway) — a 503 here would block editing EVERY employee field.
   const workModeColsExist = await hasWorkModeColumns();
-  if ((work_mode !== undefined || allow_multiple_sessions !== undefined) && !workModeColsExist) {
-    return NextResponse.json<ApiResponse>(
-      {
-        success: false,
-        error: 'Work-mode columns are missing. Run migration: database/migrations/2026-07-30_geofence_modes_multi_session.sql',
-      },
-      { status: 503 },
-    );
-  }
 
   // Email uniqueness check if changing
   if (email !== undefined && email !== existing.email) {
@@ -232,17 +226,12 @@ export async function PUT(request: NextRequest, context: Params) {
   if (workModeColsExist && allow_multiple_sessions !== undefined) apply('allow_multiple_sessions', allow_multiple_sessions ? 1 : 0);
   if (new_pin !== undefined) apply('pin_hash', await hashPin(new_pin));
 
+  // Same graceful degradation for the bank/identity fields: the edit form
+  // always submits them, so pre-migration they are skipped, not fatal.
   const bankFields = normalizeBankDetails(parsed.data);
-  if (Object.keys(bankFields).length > 0 && !bankColsExist) {
-    return NextResponse.json<ApiResponse>(
-      {
-        success: false,
-        error: 'Employee detail columns are missing. Run migration: database/migrations/2026-07-23_add_employee_details_documents_leave_quotas.sql',
-      },
-      { status: 503 },
-    );
+  if (bankColsExist) {
+    for (const [col, val] of Object.entries(bankFields)) apply(col, val);
   }
-  for (const [col, val] of Object.entries(bankFields)) apply(col, val);
 
   if (setClauses.length === 0) {
     return NextResponse.json<ApiResponse>(
