@@ -299,17 +299,17 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   }, [loadToday, loadHistory, loadDailyUpdate, loadTrackingEnabled]);
 
   // OS-level "shift over, please clock out" notifications — they fire on the
-  // lock screen even with the app closed. Anchored to the clock-in time, so
-  // reopening the app mid-shift (or reinstalling) re-schedules them correctly;
-  // clocking out cancels them.
+  // lock screen even with the app closed, exactly 9 hours after clock-in.
+  // Reopening the app mid-shift (or reinstalling) re-schedules them from the
+  // same clock-in time; clocking out cancels them.
   useEffect(() => {
     if (loading) return;
     if (clockedIn && !clockedOut && attendance?.clock_in_utc) {
-      void scheduleShiftEndReminders(attendance.clock_in_utc, shift?.required_hours);
+      void scheduleShiftEndReminders(attendance.clock_in_utc);
     } else {
       void cancelShiftEndReminders();
     }
-  }, [attendance?.clock_in_utc, clockedIn, clockedOut, loading, shift?.required_hours]);
+  }, [attendance?.clock_in_utc, clockedIn, clockedOut, loading]);
 
   const handleClockIn = async () => {
     setBusy(true);

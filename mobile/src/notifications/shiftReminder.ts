@@ -13,8 +13,11 @@ Notifications.setNotificationHandler({
 });
 
 const CHANNEL_ID = 'shift-reminders';
-const DEFAULT_SHIFT_HOURS = 9;
-// First alert exactly at shift end, then nags if they still haven't clocked out.
+// Always 9 working hours counted from the actual clock-in — the reminder is
+// personal to each employee's own start time, never a fixed wall-clock time.
+const SHIFT_HOURS = 9;
+// First alert exactly when the 9 hours complete, then nags if they still
+// haven't clocked out.
 const REMINDER_OFFSETS_MIN = [0, 30, 60];
 
 async function ensureChannel(): Promise<void> {
@@ -27,13 +30,11 @@ async function ensureChannel(): Promise<void> {
   });
 }
 
-/** Schedules OS-level "shift over, please clock out" notifications, anchored
- *  to the clock-in time. They fire on the lock screen / notification bar even
- *  with the app closed. Re-scheduling replaces any previous set. */
-export async function scheduleShiftEndReminders(
-  clockInUtc: string,
-  requiredHours?: number | null,
-): Promise<void> {
+/** Schedules OS-level "shift over, please clock out" notifications exactly
+ *  9 hours after the given clock-in. They fire on the lock screen /
+ *  notification bar even with the app closed. Nothing is shown at clock-in
+ *  itself; re-scheduling replaces any previous set. */
+export async function scheduleShiftEndReminders(clockInUtc: string): Promise<void> {
   const clockInMs = new Date(clockInUtc).getTime();
   if (Number.isNaN(clockInMs)) return;
 
@@ -42,8 +43,7 @@ export async function scheduleShiftEndReminders(
   if (!perm.granted) return;
   await ensureChannel();
 
-  const hours = requiredHours && requiredHours > 0 ? requiredHours : DEFAULT_SHIFT_HOURS;
-  const shiftEndMs = clockInMs + hours * 60 * 60 * 1000;
+  const shiftEndMs = clockInMs + SHIFT_HOURS * 60 * 60 * 1000;
 
   for (const offsetMin of REMINDER_OFFSETS_MIN) {
     const fireAt = new Date(shiftEndMs + offsetMin * 60 * 1000);
@@ -53,7 +53,7 @@ export async function scheduleShiftEndReminders(
         title: offsetMin === 0 ? 'Shift time is over' : 'Reminder: please clock out',
         body:
           offsetMin === 0
-            ? `Your ${hours}-hour shift is complete. Open Attendance and clock out.`
+            ? `Your ${SHIFT_HOURS}-hour shift is complete. Open Attendance and clock out.`
             : 'You are still clocked in. Open Attendance and clock out.',
         sound: 'default',
       },
