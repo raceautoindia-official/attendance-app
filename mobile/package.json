@@ -16,6 +16,7 @@
     "expo-intent-launcher": "~13.0.8",
     "expo-local-authentication": "~17.0.8",
     "expo-location": "~19.0.0",
+    "expo-notifications": "~0.32.17",
     "expo-secure-store": "~15.0.0",
     "expo-task-manager": "~14.0.0",
     "react": "19.1.0",

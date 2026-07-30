@@ -22,6 +22,7 @@ import { apiFetch, logout } from '../api/client';
 import { getStoredEmployee, StoredEmployee } from '../storage/tokens';
 import { saveTodayCache, getTodayCache, clearTodayCache } from '../storage/cache';
 import { startBackgroundTracking, stopBackgroundTracking, isTrackingRunning } from '../location/tracking';
+import { scheduleShiftEndReminders, cancelShiftEndReminders } from '../notifications/shiftReminder';
 import { requestIgnoreBatteryOptimization, openAppSettings } from '../location/batteryOptimization';
 import { colors } from '../theme';
 
@@ -297,6 +298,19 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     loadTrackingEnabled();
   }, [loadToday, loadHistory, loadDailyUpdate, loadTrackingEnabled]);
 
+  // OS-level "shift over, please clock out" notifications — they fire on the
+  // lock screen even with the app closed. Anchored to the clock-in time, so
+  // reopening the app mid-shift (or reinstalling) re-schedules them correctly;
+  // clocking out cancels them.
+  useEffect(() => {
+    if (loading) return;
+    if (clockedIn && !clockedOut && attendance?.clock_in_utc) {
+      void scheduleShiftEndReminders(attendance.clock_in_utc, shift?.required_hours);
+    } else {
+      void cancelShiftEndReminders();
+    }
+  }, [attendance?.clock_in_utc, clockedIn, clockedOut, loading, shift?.required_hours]);
+
   const handleClockIn = async () => {
     setBusy(true);
     setError(null);
@@ -369,6 +383,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
 
   const handleLogout = async () => {
     await stopBackgroundTracking().catch(() => {});
+    await cancelShiftEndReminders();
     await clearTodayCache();
     await logout();
     onLogout();
