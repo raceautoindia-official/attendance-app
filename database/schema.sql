@@ -298,8 +298,12 @@ CREATE TABLE live_tracking_sessions (
   is_active       BOOLEAN  NOT NULL DEFAULT TRUE,
   last_ping_utc   DATETIME NULL,
   created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  -- employee_id while active, NULL when ended — the UNIQUE key below thereby
+  -- allows at most ONE active session per employee (concurrent starts race).
+  active_employee_id INT GENERATED ALWAYS AS (IF(is_active, employee_id, NULL)) VIRTUAL,
 
   PRIMARY KEY (id),
+  UNIQUE KEY uq_live_tracking_sessions_active_emp (active_employee_id),
   INDEX idx_live_tracking_sessions_employee_id (employee_id),
   INDEX idx_live_tracking_sessions_is_active   (is_active),
   INDEX idx_live_tracking_sessions_started_at  (started_at_utc),

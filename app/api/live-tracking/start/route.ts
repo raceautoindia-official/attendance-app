@@ -73,18 +73,40 @@ export async function POST(request: NextRequest) {
   }
 
   if (!session) {
-    const result = await query<{ insertId: number }>(
-      `INSERT INTO live_tracking_sessions (employee_id, started_at_utc, is_active, last_ping_utc)
-       VALUES (?, ?, TRUE, ?)`,
-      [auth.id, now, now],
-    );
-    const insertId = (result as unknown as { insertId: number }).insertId;
-    session = await queryOne<LiveTrackingSession>(
-      `SELECT id, employee_id, started_at_utc, ended_at_utc, is_active, last_ping_utc, created_at
-       FROM live_tracking_sessions
-       WHERE id = ?`,
-      [insertId],
-    );
+    try {
+      const result = await query<{ insertId: number }>(
+        `INSERT INTO live_tracking_sessions (employee_id, started_at_utc, is_active, last_ping_utc)
+         VALUES (?, ?, TRUE, ?)`,
+        [auth.id, now, now],
+      );
+      const insertId = (result as unknown as { insertId: number }).insertId;
+      session = await queryOne<LiveTrackingSession>(
+        `SELECT id, employee_id, started_at_utc, ended_at_utc, is_active, last_ping_utc, created_at
+         FROM live_tracking_sessions
+         WHERE id = ?`,
+        [insertId],
+      );
+    } catch (error) {
+      // A concurrent start (phone app + web login racing) won the insert — the
+      // unique index on active sessions rejects ours, so reuse the winner's
+      // session instead of showing the employee twice on the admin map.
+      if ((error as { code?: string })?.code !== 'ER_DUP_ENTRY') throw error;
+      session = await queryOne<LiveTrackingSession>(
+        `SELECT id, employee_id, started_at_utc, ended_at_utc, is_active, last_ping_utc, created_at
+         FROM live_tracking_sessions
+         WHERE employee_id = ? AND is_active = TRUE
+         ORDER BY started_at_utc DESC
+         LIMIT 1`,
+        [auth.id],
+      );
+      if (!session) {
+        return NextResponse.json<ApiResponse>(
+          { success: false, error: 'Could not open a live-tracking session, please retry' },
+          { status: 503 },
+        );
+      }
+      await query(`UPDATE live_tracking_sessions SET last_ping_utc = ? WHERE id = ?`, [now, session.id]);
+    }
   } else {
     await query(
       `UPDATE live_tracking_sessions SET last_ping_utc = ? WHERE id = ?`,
