@@ -226,6 +226,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   // tracking — when the app is reopened mid-shift, the OS may have stopped the
   // service, so we restart it here so "tracking is on" and points keep flowing.
   useEffect(() => {
+    if (loading) return; // don't touch the service before cached state arrives
     // Admin disabled tracking for this employee → make sure nothing is running.
     if (!trackingEnabled) {
       void stopBackgroundTracking();
@@ -234,6 +235,11 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       return;
     }
     if (!clockedIn || clockedOut) {
+      // Not on shift: kill any leftover service from a previous day (e.g. the
+      // employee never clocked out and attendance was auto-closed) so the
+      // phone doesn't keep reporting location while they are not logged in.
+      void stopBackgroundTracking();
+      setTracking(false);
       setLiveCoords(null);
       return;
     }
@@ -282,7 +288,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       clearInterval(id);
       appState.remove();
     };
-  }, [clockedIn, clockedOut, trackingEnabled]);
+  }, [clockedIn, clockedOut, trackingEnabled, loading]);
 
   const refresh = useCallback(() => {
     loadToday();

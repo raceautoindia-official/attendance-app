@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import { toMySQLDatetime } from '@/lib/attendance';
+import { requireOpenShift } from '@/lib/liveTracking';
 import type { ApiResponse, LiveTrackingSession } from '@/lib/types';
 
 const StartSchema = z.object({
@@ -29,6 +30,9 @@ export async function POST(request: NextRequest) {
     const err = error as { code?: string };
     if (err?.code !== 'ER_BAD_FIELD_ERROR') throw error;
   }
+
+  const shiftError = await requireOpenShift(auth.id);
+  if (shiftError) return shiftError;
 
   let body: unknown;
   try {

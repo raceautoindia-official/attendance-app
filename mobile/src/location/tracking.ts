@@ -42,6 +42,13 @@ async function sendPoints(fresh: TrackedPoint[]): Promise<void> {
   try {
     await pingBatch(batch);
   } catch (err) {
+    // 403 = the shift is over (clocked out / auto-closed at midnight) or the
+    // admin disabled tracking. Kill the service so the phone doesn't keep
+    // reporting location on days the employee never logged in.
+    if (err instanceof ApiError && err.status === 403) {
+      await stopBackgroundTracking();
+      return;
+    }
     if (err instanceof ApiError && err.status === 404) {
       // No active session (app relaunched in background, or the server closed
       // the session as stale during an outage) → reopen one and retry the batch
@@ -58,6 +65,10 @@ async function sendPoints(fresh: TrackedPoint[]): Promise<void> {
         });
         await pingBatch(batch);
       } catch (err2) {
+        if (err2 instanceof ApiError && err2.status === 403) {
+          await stopBackgroundTracking();
+          return;
+        }
         if (shouldRetry(err2)) pending = batch;
       }
       return;
