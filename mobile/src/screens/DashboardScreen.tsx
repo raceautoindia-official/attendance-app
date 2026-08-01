@@ -24,7 +24,10 @@ import { saveTodayCache, getTodayCache, clearTodayCache } from '../storage/cache
 import { startBackgroundTracking, stopBackgroundTracking, isTrackingRunning } from '../location/tracking';
 import { scheduleShiftEndReminders, cancelShiftEndReminders } from '../notifications/shiftReminder';
 import { requestIgnoreBatteryOptimization, openAppSettings } from '../location/batteryOptimization';
+import ConsentModal from './ConsentModal';
 import { colors } from '../theme';
+
+const CONSENT_KEY = 'location_consent_v1';
 
 const STATUS_BAR_PAD = Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 : 0;
 const TZ = 'Asia/Kolkata'; // all dates/times shown in IST, matching the web app
@@ -129,6 +132,9 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   const [tracking, setTracking] = useState(false);
   const [trackingEnabled, setTrackingEnabled] = useState(true); // admin per-employee toggle
   const [multiSession, setMultiSession] = useState(false); // plant: several clock-ins per day
+  // Google Play prominent-disclosure consent. null = not yet loaded.
+  const [hasConsent, setHasConsent] = useState<boolean | null>(null);
+  const [consentVisible, setConsentVisible] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(new Date());
   const [liveCoords, setLiveCoords] = useState<{ lat: number; lng: number } | null>(null);
@@ -214,7 +220,18 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         getTodayCache<TodayAttendance | null>(istYmd(new Date())),
         isTrackingRunning(),
       ]);
+      // Consent: stored flag, or grandfathered for existing installs that
+      // already granted background location before this screen existed.
+      let consent = (await SecureStore.getItemAsync(CONSENT_KEY)) === '1';
+      if (!consent) {
+        const bg = await Location.getBackgroundPermissionsAsync().catch(() => null);
+        if (bg?.granted) {
+          consent = true;
+          await SecureStore.setItemAsync(CONSENT_KEY, '1');
+        }
+      }
       if (!active) return;
+      setHasConsent(consent);
       setEmployee(emp);
       if (cached !== null) setAttendance(cached);
       setTracking(running);
@@ -250,6 +267,8 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       setLiveCoords(null);
       return;
     }
+    // No auto-start (or map polling) before the disclosure has been accepted.
+    if (hasConsent !== true) return;
     let active = true;
 
     const ensureTracking = async () => {
@@ -295,7 +314,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       clearInterval(id);
       appState.remove();
     };
-  }, [clockedIn, clockedOut, trackingEnabled, loading]);
+  }, [clockedIn, clockedOut, trackingEnabled, loading, hasConsent]);
 
   const refresh = useCallback(() => {
     loadToday();
@@ -317,7 +336,25 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     }
   }, [attendance?.clock_in_utc, clockedIn, clockedOut, loading]);
 
+  // Consent must precede ANY location access (Google Play prominent
+  // disclosure). Clock-in itself needs coordinates, so without consent we show
+  // the notice instead of proceeding.
   const handleClockIn = async () => {
+    if (!hasConsent) {
+      setConsentVisible(true);
+      return;
+    }
+    await performClockIn();
+  };
+
+  const acceptConsent = async () => {
+    await SecureStore.setItemAsync(CONSENT_KEY, '1');
+    setHasConsent(true);
+    setConsentVisible(false);
+    await performClockIn();
+  };
+
+  const performClockIn = async () => {
     setBusy(true);
     setError(null);
     try {
@@ -429,6 +466,14 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
 
   return (
     <View style={styles.container}>
+      <ConsentModal
+        visible={consentVisible}
+        onAccept={acceptConsent}
+        onDecline={() => {
+          setConsentVisible(false);
+          setError('Location consent is required to mark attendance.');
+        }}
+      />
       <View style={styles.header}>
         <View style={styles.brandRow}>
           <View style={styles.logo}>
