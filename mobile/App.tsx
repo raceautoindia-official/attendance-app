@@ -1,6 +1,8 @@
-// Importing the tracking module registers the background location task at app
-// startup, so the OS can invoke it even after the app is relaunched.
+// Importing these modules registers the background tasks (location updates and
+// geofence auto-attendance) at app startup, so the OS can invoke them even
+// after the app is killed and relaunched in the background.
 import './src/location/tracking';
+import './src/location/geofenceAuto';
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { View, Text, TouchableOpacity, ActivityIndicator, StatusBar, StyleSheet } from 'react-native';

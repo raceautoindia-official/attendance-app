@@ -30,6 +30,11 @@ export default function ConsentModal({
             <Text style={styles.text}>
               • Location is <Text style={styles.bold}>never collected outside your shift</Text> — it
               stops automatically at clock-out.{'\n'}
+              • For staff with automatic attendance, the app additionally monitors{' '}
+              <Text style={styles.bold}>entry and exit of your assigned work site</Text> between
+              your first clock-in and final clock-out of the day, to clock you out when you leave
+              and back in when you return. Only these entry/exit events are used — not your
+              position elsewhere.{'\n'}
               • A visible notification is always shown while tracking is active.{'\n'}
               • Your data is visible only to your employer's authorised administrators and is not
               shared with or sold to any third party.{'\n'}

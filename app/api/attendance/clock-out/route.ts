@@ -17,6 +17,9 @@ import type { ApiResponse, AttendanceRecord } from '@/lib/types';
 const ClockOutSchema = z.object({
   latitude: z.number({ error: 'latitude must be a number' }),
   longitude: z.number({ error: 'longitude must be a number' }),
+  // True when the phone's geofence auto-attendance performed this action
+  // (leaving the work site) rather than the employee tapping the button.
+  auto: z.boolean().optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -193,6 +196,7 @@ export async function POST(request: NextRequest) {
       work_date: workDate,
       total_minutes: updated?.total_minutes ?? totalMinutes,
       status: newStatus,
+      auto: parsed.data.auto === true,
     },
     ip_address: ip,
   });

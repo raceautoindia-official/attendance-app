@@ -39,7 +39,10 @@ export default function PrivacyPolicyPage() {
               app is closed), to verify work-site presence and work hours. Location collection
               stops automatically when you clock out, when your shift is closed, or when tracking
               is disabled by an administrator. A persistent notification is always visible while
-              tracking is active.
+              tracking is active. For staff with automatic attendance enabled, the app also
+              monitors entry and exit of the assigned work-site boundary between the first
+              clock-in and final clock-out of the day, solely to clock attendance out on leaving
+              and back in on returning; only these entry/exit events are processed.
             </li>
             <li>
               <strong>Documents you or your employer upload</strong> — such as PAN card, Aadhaar

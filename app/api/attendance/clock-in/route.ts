@@ -24,6 +24,9 @@ import type {
 const ClockInSchema = z.object({
   latitude: z.number({ error: 'latitude must be a number' }),
   longitude: z.number({ error: 'longitude must be a number' }),
+  // True when the phone's geofence auto-attendance performed this action
+  // (re-entering the work site) rather than the employee tapping the button.
+  auto: z.boolean().optional(),
 });
 
 // Clock-in is allowed within at least this distance of the work location, even
@@ -291,7 +294,12 @@ export async function POST(request: NextRequest) {
     entity: 'attendance',
     entity_id: insertId,
     performed_by: auth.id,
-    details: { work_date: workDate, status, geofence_status: geofenceStatus },
+    details: {
+      work_date: workDate,
+      status,
+      geofence_status: geofenceStatus,
+      auto: parsed.data.auto === true,
+    },
     ip_address: ip,
   });
 

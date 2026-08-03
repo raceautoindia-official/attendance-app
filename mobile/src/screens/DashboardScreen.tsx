@@ -22,6 +22,7 @@ import { apiFetch, logout } from '../api/client';
 import { getStoredEmployee, StoredEmployee } from '../storage/tokens';
 import { saveTodayCache, getTodayCache, clearTodayCache } from '../storage/cache';
 import { startBackgroundTracking, stopBackgroundTracking, isTrackingRunning } from '../location/tracking';
+import { startGeofenceAutoMode, stopGeofenceAutoMode } from '../location/geofenceAuto';
 import { scheduleShiftEndReminders, cancelShiftEndReminders } from '../notifications/shiftReminder';
 import { requestIgnoreBatteryOptimization, openAppSettings } from '../location/batteryOptimization';
 import ConsentModal from './ConsentModal';
@@ -55,6 +56,12 @@ interface Shift {
   start_time?: string;
   end_time?: string;
   required_hours?: number;
+}
+
+interface FenceLocation {
+  latitude: number;
+  longitude: number;
+  radius_meters: number;
 }
 
 function minutesToHours(m: number | null): string {
@@ -132,6 +139,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   const [tracking, setTracking] = useState(false);
   const [trackingEnabled, setTrackingEnabled] = useState(true); // admin per-employee toggle
   const [multiSession, setMultiSession] = useState(false); // plant: several clock-ins per day
+  const [fenceLocation, setFenceLocation] = useState<FenceLocation | null>(null);
   // Google Play prominent-disclosure consent. null = not yet loaded.
   const [hasConsent, setHasConsent] = useState<boolean | null>(null);
   const [consentVisible, setConsentVisible] = useState(false);
@@ -164,12 +172,22 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     try {
       const data = await apiFetch<{
         attendance: TodayAttendance | null;
-        schedule: { shift?: Shift } | null;
+        schedule: { shift?: Shift; location?: { latitude: number | string; longitude: number | string; radius_meters: number | string } | null } | null;
         multi_session?: boolean;
       }>('/api/attendance/today');
       setAttendance(data.attendance);
       setShift(data.schedule?.shift ?? null);
       setMultiSession(data.multi_session === true);
+      const loc = data.schedule?.location;
+      setFenceLocation(
+        loc
+          ? {
+              latitude: Number(loc.latitude),
+              longitude: Number(loc.longitude),
+              radius_meters: Number(loc.radius_meters) || 200,
+            }
+          : null,
+      );
       saveTodayCache(istYmd(new Date()), data.attendance);
     } catch (e) {
       if (e instanceof Error && e.message.includes('log in again')) onLogout();
@@ -336,6 +354,26 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     }
   }, [attendance?.clock_in_utc, clockedIn, clockedOut, loading]);
 
+  // Auto attendance (plant staff): after the day's first MANUAL clock-in the
+  // phone watches the work-site geofence — leaving clocks out, returning
+  // clocks in again. Deliberately NOT stopped when clockedOut here: an AUTO
+  // clock-out must keep monitoring so re-entry clocks back in. The manual
+  // clock-out button and logout stop it explicitly.
+  useEffect(() => {
+    if (loading || hasConsent !== true) return;
+    if (!multiSession || !fenceLocation || !trackingEnabled) {
+      void stopGeofenceAutoMode();
+      return;
+    }
+    if (clockedIn && !clockedOut) {
+      void startGeofenceAutoMode(
+        fenceLocation.latitude,
+        fenceLocation.longitude,
+        fenceLocation.radius_meters,
+      );
+    }
+  }, [clockedIn, clockedOut, multiSession, fenceLocation, trackingEnabled, loading, hasConsent]);
+
   // Consent must precede ANY location access (Google Play prominent
   // disclosure). Clock-in itself needs coordinates, so without consent we show
   // the notice instead of proceeding.
@@ -393,6 +431,8 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       const coords = await getCoords();
       await apiFetch('/api/attendance/clock-out', { method: 'POST', body: coords });
       await stopBackgroundTracking();
+      // Manual clock-out means done for the day — end geofence auto mode.
+      await stopGeofenceAutoMode();
       setTracking(false);
       refresh();
       toast('Clocked out successfully ✓');
@@ -426,6 +466,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
 
   const handleLogout = async () => {
     await stopBackgroundTracking().catch(() => {});
+    await stopGeofenceAutoMode().catch(() => {});
     await cancelShiftEndReminders();
     await clearTodayCache();
     await logout();
