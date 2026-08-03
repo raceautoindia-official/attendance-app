@@ -1,6 +1,6 @@
 import { query, insertAuditLog } from '@/lib/db';
 import { getWorkDateIST } from '@/lib/attendance';
-import { hasSessionColumns } from '@/lib/employeeDetails';
+import { hasSessionColumns, hasWorkModeColumns } from '@/lib/employeeDetails';
 import { REQUIRED_SHIFT_MINUTES } from '@/lib/constants';
 
 export interface CloseOpenSessionsOptions {
@@ -37,12 +37,34 @@ export async function closeOpenSessions(
     whereParams.push(employeeId);
   }
 
-  // Multi-session (plant) employees may carry banked minutes from completed
-  // sessions earlier in the day. The standard credit applies to the whole DAY:
-  // the day total becomes at least REQUIRED_SHIFT_MINUTES, never less than the
-  // minutes already banked, and the synthetic clock-out spans only the
-  // remaining credit so the timeline stays consistent.
-  const sessionCols = await hasSessionColumns();
+  const [sessionCols, workModeCols] = await Promise.all([
+    hasSessionColumns(),
+    hasWorkModeColumns(),
+  ]);
+
+  // Multi-session (plant) employees have their hours tracked precisely across
+  // sessions all day, so midnight SETTLES the day at the ACTUAL total: minutes
+  // banked from completed sessions plus however long the still-open session
+  // really ran until now. No flat credit — that would overpay someone whose
+  // real sessions summed to less than a standard day.
+  let closedMulti = 0;
+  if (sessionCols && workModeCols) {
+    const aliasedConditions = conditions.map(c => `a.${c}`);
+    const multiResult = await query<{ affectedRows?: number }>(
+      `UPDATE attendance a
+       JOIN employees e ON e.id = a.employee_id AND e.allow_multiple_sessions = TRUE
+       SET a.clock_out_utc = UTC_TIMESTAMP(),
+           a.total_minutes = a.banked_minutes + GREATEST(0, TIMESTAMPDIFF(MINUTE, a.clock_in_utc, UTC_TIMESTAMP()))
+       WHERE ${aliasedConditions.join(' AND ')}`,
+      [...whereParams],
+    );
+    closedMulti = (multiResult as unknown as { affectedRows: number }).affectedRows ?? 0;
+  }
+
+  // Everyone else keeps the standard credit: forgetting to clock out yields
+  // the required shift length (never less than any banked minutes). Rows the
+  // multi-session pass already closed are skipped by the clock_out IS NULL
+  // guard.
   const result = sessionCols
     ? await query<{ affectedRows?: number }>(
         `UPDATE attendance
@@ -59,7 +81,7 @@ export async function closeOpenSessions(
         [REQUIRED_SHIFT_MINUTES, REQUIRED_SHIFT_MINUTES, ...whereParams],
       );
 
-  const closed = (result as unknown as { affectedRows: number }).affectedRows ?? 0;
+  const closed = ((result as unknown as { affectedRows: number }).affectedRows ?? 0) + closedMulti;
 
   if (closed > 0) {
     await insertAuditLog({
@@ -68,6 +90,7 @@ export async function closeOpenSessions(
       performed_by: null,
       details: {
         count: closed,
+        settled_actual_time: closedMulti,
         closed_before: today,
         include_today: includeToday,
         employee_id: employeeId,
