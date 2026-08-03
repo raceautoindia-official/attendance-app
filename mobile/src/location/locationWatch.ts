@@ -5,6 +5,9 @@ import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 import { apiFetch, ApiError } from '../api/client';
+import { stopBackgroundTracking } from './tracking';
+import { reconcileGeofenceAttendance } from './geofenceAuto';
+import { cancelShiftEndReminders } from '../notifications/shiftReminder';
 
 // Location-off enforcement: while an employee is clocked in, the phone checks
 // that location services and permissions are still on — every ~15 minutes in
@@ -59,17 +62,36 @@ export async function resetLocationStrikes(): Promise<void> {
 /** One enforcement check. Safe to call from anywhere, any frequency — the
  *  10-minute spacing between strikes is enforced internally. */
 export async function checkLocationAndWarn(): Promise<void> {
+  // Piggyback: repair any missed geofence auto clock-in/out (no-op unless
+  // plant auto mode is active). Runs on the same background cadence.
+  await reconcileGeofenceAttendance().catch(() => {});
+
   // Only relevant during an open shift; server state is authoritative.
   let today: TodayResponse;
   try {
     today = await apiFetch<TodayResponse>('/api/attendance/today');
-  } catch {
-    return; // offline — the admin-side signal-lost alerts cover this
+  } catch (err) {
+    // Logged out → stop watching entirely; offline → retry next check.
+    if (err instanceof ApiError && err.status === 401) await stopLocationWatch();
+    return;
   }
   const att = today.attendance;
   const onShift = !!att?.clock_in_utc && !att?.clock_out_utc;
   if (!onShift) {
     await resetLocationStrikes();
+    return;
+  }
+
+  // Admin-disabled tracking = no location obligation → stand down entirely
+  // (also unregisters a watch left over from before the admin disabled it).
+  try {
+    const status = await apiFetch<{ enabled: boolean }>('/api/live-tracking/status');
+    if (status.enabled === false) {
+      await stopLocationWatch();
+      return;
+    }
+  } catch {
+    // status unavailable — err on the side of not punishing the employee
     return;
   }
 
@@ -120,17 +142,24 @@ async function autoClockOut(): Promise<void> {
       },
     });
     await resetLocationStrikes();
+    // The tracking service can't self-stop via ping-403 with location off
+    // (no fixes → no pings), so kill it and the shift reminders here.
+    await stopBackgroundTracking().catch(() => {});
+    await cancelShiftEndReminders().catch(() => {});
     await notify(
       'Clocked out — location was off',
       'Location stayed off after 4 warnings, so your attendance has been clocked out automatically.',
     );
   } catch (err) {
-    if (err instanceof ApiError) {
-      // 404 = already clocked out elsewhere — nothing left to enforce.
+    // 4xx = the server understood and refused (404 already clocked out,
+    // 401 logged out) — nothing left to enforce. 5xx and network errors keep
+    // the counter at MAX so the next check retries the clock-out rather than
+    // restarting the whole warning cycle.
+    if (err instanceof ApiError && err.status < 500) {
       await resetLocationStrikes().catch(() => {});
+      await stopBackgroundTracking().catch(() => {});
+      await cancelShiftEndReminders().catch(() => {});
     }
-    // Network errors: keep the counter at MAX so the next check retries the
-    // clock-out instead of restarting the warning cycle.
   }
 }
 

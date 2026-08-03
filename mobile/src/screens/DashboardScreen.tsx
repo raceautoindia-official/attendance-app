@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -22,7 +22,12 @@ import { apiFetch, logout } from '../api/client';
 import { getStoredEmployee, StoredEmployee } from '../storage/tokens';
 import { saveTodayCache, getTodayCache, clearTodayCache } from '../storage/cache';
 import { startBackgroundTracking, stopBackgroundTracking, isTrackingRunning } from '../location/tracking';
-import { startGeofenceAutoMode, stopGeofenceAutoMode } from '../location/geofenceAuto';
+import {
+  startGeofenceAutoMode,
+  stopGeofenceAutoMode,
+  reconcileGeofenceAttendance,
+  isAutoOutPending,
+} from '../location/geofenceAuto';
 import { startLocationWatch, stopLocationWatch, checkLocationAndWarn } from '../location/locationWatch';
 import { scheduleShiftEndReminders, cancelShiftEndReminders } from '../notifications/shiftReminder';
 import { requestIgnoreBatteryOptimization, openAppSettings } from '../location/batteryOptimization';
@@ -144,6 +149,11 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   // Google Play prominent-disclosure consent. null = not yet loaded.
   const [hasConsent, setHasConsent] = useState<boolean | null>(null);
   const [consentVisible, setConsentVisible] = useState(false);
+  // Which action the consent modal should continue with after acceptance.
+  const consentActionRef = useRef<'in' | 'out'>('in');
+  // True once /today has actually answered — effects that stop/start the
+  // geofence auto mode must not act on the initial empty state.
+  const [todayLoaded, setTodayLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(new Date());
   const [liveCoords, setLiveCoords] = useState<{ lat: number; lng: number } | null>(null);
@@ -190,6 +200,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
           : null,
       );
       saveTodayCache(istYmd(new Date()), data.attendance);
+      setTodayLoaded(true);
     } catch (e) {
       if (e instanceof Error && e.message.includes('log in again')) onLogout();
     }
@@ -270,9 +281,11 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   // service, so we restart it here so "tracking is on" and points keep flowing.
   useEffect(() => {
     if (loading) return; // don't touch the service before cached state arrives
-    // Admin disabled tracking for this employee → make sure nothing is running.
+    // Admin disabled tracking for this employee → make sure nothing is
+    // running, including a location watch registered on an earlier day.
     if (!trackingEnabled) {
       void stopBackgroundTracking();
+      void stopLocationWatch();
       setTracking(false);
       setLiveCoords(null);
       return;
@@ -330,6 +343,9 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     // instead of waiting for the user to notice the "tracking is off" pill.
     const appState = AppState.addEventListener('change', state => {
       if (state === 'active') {
+        // Refresh server truth first — a background auto clock-out may have
+        // closed the day while this screen still shows an open shift.
+        loadToday();
         ensureTracking();
         fetchPos();
       }
@@ -340,7 +356,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       clearInterval(watchId);
       appState.remove();
     };
-  }, [clockedIn, clockedOut, trackingEnabled, loading, hasConsent]);
+  }, [clockedIn, clockedOut, trackingEnabled, loading, hasConsent, loadToday]);
 
   const refresh = useCallback(() => {
     loadToday();
@@ -364,29 +380,45 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
 
   // Auto attendance (plant staff): after the day's first MANUAL clock-in the
   // phone watches the work-site geofence — leaving clocks out, returning
-  // clocks in again. Deliberately NOT stopped when clockedOut here: an AUTO
-  // clock-out must keep monitoring so re-entry clocks back in. The manual
-  // clock-out button and logout stop it explicitly.
+  // clocks in again. Gated on todayLoaded: acting on the initial empty state
+  // would stop monitoring on every app open, permanently killing re-entry
+  // auto clock-in during a break. While auto-clocked-out (our own pending
+  // flag), monitoring is re-ensured and missed events are reconciled.
   useEffect(() => {
-    if (loading || hasConsent !== true) return;
+    if (loading || hasConsent !== true || !todayLoaded) return;
     if (!multiSession || !fenceLocation || !trackingEnabled) {
       void stopGeofenceAutoMode();
       return;
     }
     if (clockedIn && !clockedOut) {
-      void startGeofenceAutoMode(
-        fenceLocation.latitude,
-        fenceLocation.longitude,
-        fenceLocation.radius_meters,
-      );
+      void (async () => {
+        await startGeofenceAutoMode(
+          fenceLocation.latitude,
+          fenceLocation.longitude,
+          fenceLocation.radius_meters,
+        );
+        await reconcileGeofenceAttendance().catch(() => {});
+      })();
+    } else if (clockedIn && clockedOut) {
+      void (async () => {
+        if (await isAutoOutPending()) {
+          await startGeofenceAutoMode(
+            fenceLocation.latitude,
+            fenceLocation.longitude,
+            fenceLocation.radius_meters,
+          );
+          await reconcileGeofenceAttendance().catch(() => {});
+        }
+      })();
     }
-  }, [clockedIn, clockedOut, multiSession, fenceLocation, trackingEnabled, loading, hasConsent]);
+  }, [clockedIn, clockedOut, multiSession, fenceLocation, trackingEnabled, loading, hasConsent, todayLoaded]);
 
   // Consent must precede ANY location access (Google Play prominent
   // disclosure). Clock-in itself needs coordinates, so without consent we show
   // the notice instead of proceeding.
   const handleClockIn = async () => {
     if (!hasConsent) {
+      consentActionRef.current = 'in';
       setConsentVisible(true);
       return;
     }
@@ -397,7 +429,8 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     await SecureStore.setItemAsync(CONSENT_KEY, '1');
     setHasConsent(true);
     setConsentVisible(false);
-    await performClockIn();
+    if (consentActionRef.current === 'in') await performClockIn();
+    else await performClockOut();
   };
 
   const performClockIn = async () => {
@@ -432,7 +465,18 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     }
   };
 
+  // Consent must precede ALL location access — clock-out also reads GPS, so a
+  // restored session on a fresh install goes through the notice first too.
   const handleClockOut = async () => {
+    if (!hasConsent) {
+      consentActionRef.current = 'out';
+      setConsentVisible(true);
+      return;
+    }
+    await performClockOut();
+  };
+
+  const performClockOut = async () => {
     setBusy(true);
     setError(null);
     try {

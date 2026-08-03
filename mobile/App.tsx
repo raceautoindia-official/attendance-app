@@ -9,6 +9,8 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { View, Text, TouchableOpacity, ActivityIndicator, StatusBar, StyleSheet } from 'react-native';
 import { getAccessToken } from './src/storage/tokens';
 import { stopBackgroundTracking } from './src/location/tracking';
+import { stopGeofenceAutoMode } from './src/location/geofenceAuto';
+import { stopLocationWatch } from './src/location/locationWatch';
 import { biometricAvailable, authenticateBiometric } from './src/auth/biometric';
 import LoginScreen from './src/screens/LoginScreen';
 import DashboardScreen from './src/screens/DashboardScreen';
@@ -44,7 +46,11 @@ export default function App() {
 
   useEffect(() => {
     if (authed === false) {
+      // Covers FORCED logouts (expired session) too, not just the button:
+      // nothing may keep watching location on a logged-out device.
       void stopBackgroundTracking();
+      void stopGeofenceAutoMode();
+      void stopLocationWatch();
     }
   }, [authed]);
 
