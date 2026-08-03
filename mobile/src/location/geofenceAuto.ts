@@ -112,7 +112,7 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }) => {
     if (dist !== null && dist <= innerRadius) return; // jitter — still at the site
     try {
       const coords = await currentCoords();
-      await apiFetch('/api/attendance/clock-out', { method: 'POST', body: { ...coords, auto: true } });
+      await apiFetch('/api/attendance/clock-out', { method: 'POST', body: { ...coords, auto: true, reason: 'geofence_exit' } });
       await stopBackgroundTracking();
       await notify('Auto clocked out', 'You left the work site, so your attendance was clocked out. Re-entering will clock you in again.');
     } catch {

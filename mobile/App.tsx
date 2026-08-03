@@ -3,6 +3,7 @@
 // after the app is killed and relaunched in the background.
 import './src/location/tracking';
 import './src/location/geofenceAuto';
+import './src/location/locationWatch';
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { View, Text, TouchableOpacity, ActivityIndicator, StatusBar, StyleSheet } from 'react-native';

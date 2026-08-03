@@ -15,12 +15,18 @@ import type { ApiResponse, AttendanceRecord } from '@/lib/types';
 // ---------------------------------------------------------------------------
 
 const ClockOutSchema = z.object({
-  latitude: z.number({ error: 'latitude must be a number' }),
-  longitude: z.number({ error: 'longitude must be a number' }),
-  // True when the phone's geofence auto-attendance performed this action
-  // (leaving the work site) rather than the employee tapping the button.
+  latitude: z.number({ error: 'latitude must be a number' }).nullable().optional(),
+  longitude: z.number({ error: 'longitude must be a number' }).nullable().optional(),
+  // True when the phone performed this action itself (geofence exit, or
+  // location kept off through all warnings) rather than a button tap.
   auto: z.boolean().optional(),
-});
+  reason: z.enum(['geofence_exit', 'location_off']).optional(),
+}).refine(
+  // Coordinates are mandatory for manual clock-outs; only the automatic
+  // location-off path may omit them (location is off — no fix exists).
+  d => (d.latitude != null && d.longitude != null) || d.auto === true,
+  { message: 'latitude and longitude are required' },
+);
 
 // ---------------------------------------------------------------------------
 // Shape of the attendance + shift info we need
@@ -77,7 +83,8 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const { latitude: lat, longitude: lng } = parsed.data;
+  const lat = parsed.data.latitude ?? null;
+  const lng = parsed.data.longitude ?? null;
   const workDate = getWorkDateIST();
   const ip = getClientIp(request);
 
@@ -152,11 +159,15 @@ export async function POST(request: NextRequest) {
   // runs end-to-end (clock-in → … → clock-out) instead of stopping at the last
   // ping up to ~15s earlier. Non-fatal if the tables are absent.
   try {
-    const liveSessions = await query<{ id: number }>(
-      `SELECT id FROM live_tracking_sessions
-       WHERE employee_id = ? AND is_active = TRUE`,
-      [auth.id],
-    );
+    // No anchor point when coordinates are unknown (auto clock-out with
+    // location off) — the points table requires lat/lng.
+    const liveSessions = lat != null && lng != null
+      ? await query<{ id: number }>(
+          `SELECT id FROM live_tracking_sessions
+           WHERE employee_id = ? AND is_active = TRUE`,
+          [auth.id],
+        )
+      : [];
     for (const s of liveSessions) {
       await query(
         `INSERT INTO live_tracking_points
@@ -197,6 +208,7 @@ export async function POST(request: NextRequest) {
       total_minutes: updated?.total_minutes ?? totalMinutes,
       status: newStatus,
       auto: parsed.data.auto === true,
+      reason: parsed.data.reason ?? null,
     },
     ip_address: ip,
   });

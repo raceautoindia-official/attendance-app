@@ -23,6 +23,7 @@ import { getStoredEmployee, StoredEmployee } from '../storage/tokens';
 import { saveTodayCache, getTodayCache, clearTodayCache } from '../storage/cache';
 import { startBackgroundTracking, stopBackgroundTracking, isTrackingRunning } from '../location/tracking';
 import { startGeofenceAutoMode, stopGeofenceAutoMode } from '../location/geofenceAuto';
+import { startLocationWatch, stopLocationWatch, checkLocationAndWarn } from '../location/locationWatch';
 import { scheduleShiftEndReminders, cancelShiftEndReminders } from '../notifications/shiftReminder';
 import { requestIgnoreBatteryOptimization, openAppSettings } from '../location/batteryOptimization';
 import ConsentModal from './ConsentModal';
@@ -317,6 +318,12 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
 
     ensureTracking();
     fetchPos();
+    // Location-off enforcement: background check every ~15 min plus a fast
+    // in-app check every minute while the dashboard is open (strike spacing
+    // is enforced inside checkLocationAndWarn, so this cannot spam).
+    void startLocationWatch();
+    void checkLocationAndWarn();
+    const watchId = setInterval(() => void checkLocationAndWarn(), 60_000);
     const id = setInterval(fetchPos, 20_000);
     // When the app returns to the foreground mid-shift, the OS may have killed
     // the tracking service (battery saver, task swipe) — restart it right away
@@ -330,6 +337,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     return () => {
       active = false;
       clearInterval(id);
+      clearInterval(watchId);
       appState.remove();
     };
   }, [clockedIn, clockedOut, trackingEnabled, loading, hasConsent]);
@@ -431,8 +439,10 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       const coords = await getCoords();
       await apiFetch('/api/attendance/clock-out', { method: 'POST', body: coords });
       await stopBackgroundTracking();
-      // Manual clock-out means done for the day — end geofence auto mode.
+      // Manual clock-out means done for the day — end geofence auto mode and
+      // the location-off watchdog.
       await stopGeofenceAutoMode();
+      await stopLocationWatch();
       setTracking(false);
       refresh();
       toast('Clocked out successfully ✓');
@@ -467,6 +477,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   const handleLogout = async () => {
     await stopBackgroundTracking().catch(() => {});
     await stopGeofenceAutoMode().catch(() => {});
+    await stopLocationWatch().catch(() => {});
     await cancelShiftEndReminders();
     await clearTodayCache();
     await logout();
