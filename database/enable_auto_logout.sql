@@ -103,7 +103,10 @@ ORDER BY outcome DESC, e.emp_id;
 -- 1. BEFORE -------------------------------------------------------------------
 SELECT IF(@dry_run = 1, 'DRY RUN — nothing will be changed', 'APPLYING CHANGES') AS mode;
 
-SELECT COUNT(*) AS employees_with_auto_logout_working_BEFORE
+-- DISTINCT: an employee with two overlapping current schedule rows would
+-- otherwise be counted twice, and the total would disagree with the readiness
+-- table above, which takes only their latest schedule.
+SELECT COUNT(DISTINCT e.id) AS employees_with_auto_logout_working_BEFORE
 FROM employees e
 JOIN employee_schedules es ON es.employee_id = e.id
   AND es.effective_from <= CURDATE()
@@ -156,7 +159,10 @@ WHERE @dry_run = 0
 
 
 -- 4. AFTER --------------------------------------------------------------------
-SELECT COUNT(*) AS employees_with_auto_logout_working_AFTER
+-- DISTINCT: an employee with two overlapping current schedule rows would
+-- otherwise be counted twice, and the total would disagree with the readiness
+-- table above, which takes only their latest schedule.
+SELECT COUNT(DISTINCT e.id) AS employees_with_auto_logout_working_AFTER
 FROM employees e
 JOIN employee_schedules es ON es.employee_id = e.id
   AND es.effective_from <= CURDATE()
@@ -211,7 +217,14 @@ SELECT e.emp_id, e.name,
          WHEN es.location_id IS NULL   THEN 'NO WORK LOCATION — assign one'
          WHEN l.is_active <> 1         THEN 'location is deactivated'
          WHEN e.work_mode <> 'on_site' THEN 'off-site staff — left alone on purpose'
-         ELSE 'phone not reporting — see the list above'
+         WHEN lp.last_ping IS NULL
+           OR lp.last_ping < DATE_SUB(UTC_TIMESTAMP(), INTERVAL @min_ping_hours HOUR)
+                                       THEN 'phone not reporting — see the list above'
+         -- Ready in every respect, just not switched on yet. During a dry run
+         -- this is where everyone who is about to be armed appears; calling
+         -- them "not reporting" was wrong and read as a fault when it was not.
+         WHEN @dry_run = 1             THEN 'ready — set @dry_run := 0 to arm them'
+         ELSE 'geofencing flag not set — re-run this script'
        END AS why_not
 FROM employees e
 LEFT JOIN employee_schedules es ON es.id = (
@@ -220,6 +233,12 @@ LEFT JOIN employee_schedules es ON es.id = (
      AND (effective_to IS NULL OR effective_to >= CURDATE())
    ORDER BY effective_from DESC, id DESC LIMIT 1)
 LEFT JOIN locations l ON l.id = es.location_id
+LEFT JOIN (
+  SELECT employee_id, MAX(tracked_at_utc) AS last_ping
+  FROM live_tracking_points
+  WHERE tracked_at_utc >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 DAY)
+  GROUP BY employee_id
+) lp ON lp.employee_id = e.id
 WHERE e.is_active = TRUE
   AND e.role = 'employee'
   AND (@who = '' OR e.name LIKE CONCAT('%', @who, '%') OR e.emp_id LIKE CONCAT('%', @who, '%'))

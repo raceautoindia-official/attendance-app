@@ -45,6 +45,30 @@ const MONITOR_INTERVAL_MS =
 let started = false;
 
 /**
+ * What actually went wrong, in one line.
+ *
+ * `console.error('...', err)` on a production build prints "Error:" and a stack
+ * through minified chunk names — no message, no SQL, nothing to act on. A
+ * database error carries everything worth knowing on its own properties, so
+ * pull those out by name instead of trusting the default formatting.
+ */
+function describeError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const e = err as Error & {
+    code?: string; errno?: number; sqlState?: string; sqlMessage?: string; sql?: string;
+  };
+  const parts = [
+    e.sqlMessage || e.message || e.name || 'no message',
+    e.code ? `code=${e.code}` : '',
+    e.errno ? `errno=${e.errno}` : '',
+    e.sqlState ? `sqlState=${e.sqlState}` : '',
+    // Enough of the statement to identify it, not enough to fill the log.
+    e.sql ? `sql=${e.sql.replace(/\s+/g, ' ').slice(0, 300)}` : '',
+  ].filter(Boolean);
+  return parts.join(' | ');
+}
+
+/**
  * Auto clock-out for being away from the work site, plus alerts for a phone
  * that has gone silent.
  *
@@ -70,7 +94,7 @@ async function runMonitor(label: string): Promise<void> {
       console.log(`[live-monitor] ${label}: ran, nothing to do`);
     }
   } catch (err) {
-    console.error(`[live-monitor] ${label}: failed (will retry next sweep)`, err);
+    console.error(`[live-monitor] ${label}: failed (will retry next sweep) — ${describeError(err)}`);
   }
 }
 
@@ -88,7 +112,7 @@ async function runEndOfDay(label: string): Promise<void> {
       console.log(`[end-of-day] ${label}: auto clocked-out ${closed} session(s)`);
     }
   } catch (err) {
-    console.error(`[end-of-day] ${label}: auto clock-out failed (will retry next sweep)`, err);
+    console.error(`[end-of-day] ${label}: auto clock-out failed (will retry next sweep) — ${describeError(err)}`);
   }
 
   try {
@@ -98,7 +122,7 @@ async function runEndOfDay(label: string): Promise<void> {
       console.log(`[end-of-day] ${label}: marked ${absent} employee(s) absent for ${yesterday}`);
     }
   } catch (err) {
-    console.error(`[end-of-day] ${label}: mark-absent failed (will retry next sweep)`, err);
+    console.error(`[end-of-day] ${label}: mark-absent failed (will retry next sweep) — ${describeError(err)}`);
   }
 
   try {
@@ -110,7 +134,7 @@ async function runEndOfDay(label: string): Promise<void> {
       console.log(`[end-of-day] ${label}: marked ${holidays} Sunday holiday row(s)`);
     }
   } catch (err) {
-    console.error(`[end-of-day] ${label}: Sunday-holiday marking failed (will retry next sweep)`, err);
+    console.error(`[end-of-day] ${label}: Sunday-holiday marking failed (will retry next sweep) — ${describeError(err)}`);
   }
 }
 
