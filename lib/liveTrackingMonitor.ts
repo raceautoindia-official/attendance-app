@@ -22,7 +22,7 @@ import {
 import { toMySQLDatetime } from '@/lib/attendance';
 import { activeOnDuty, hasOnDutyColumn } from '@/lib/permissions';
 import { formatInTimeZone } from 'date-fns-tz';
-import { TIMEZONE } from '@/lib/constants';
+import { TIMEZONE, MIN_FENCE_RADIUS_M } from '@/lib/constants';
 
 interface StaleSessionRow {
   session_id: number;
@@ -42,8 +42,6 @@ interface StaleSessionRow {
 // midnight credited a whole shift. Absence of evidence is now treated as
 // absence, not as attendance.
 const OUTSIDE_LIMIT_MIN = Number(process.env.GEOFENCE_PRESENCE_GRACE_MIN) || 30;
-// Fences are enforced with at least this radius (matches clock-in).
-const MIN_FENCE_RADIUS_M = 200;
 // A fuzzy fix should not be able to "prove" presence from an arbitrary
 // distance, so the benefit of the doubt given to its accuracy is capped here.
 const MAX_ACCURACY_ALLOWANCE_M = 500;

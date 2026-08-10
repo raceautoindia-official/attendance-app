@@ -11,7 +11,7 @@ import {
   toMySQLDatetime,
 } from '@/lib/attendance';
 import { formatInTimeZone } from 'date-fns-tz';
-import { TIMEZONE } from '@/lib/constants';
+import { TIMEZONE, MIN_FENCE_RADIUS_M } from '@/lib/constants';
 import { shiftForClockIn, type DayShift } from '@/lib/shifts';
 import { assessLocation } from '@/lib/locationTrust';
 import { checkDevice } from '@/lib/deviceBinding';
@@ -37,11 +37,6 @@ const ClockInSchema = z.object({
   is_mocked: z.boolean().optional(),
   accuracy_m: z.number().nullable().optional(),
 });
-
-// Clock-in is allowed within at least this distance of the work location, even
-// if the location's configured radius is smaller — GPS accuracy near buildings
-// makes tighter fences reject people standing at the gate.
-const MIN_LOGIN_RADIUS_M = 200;
 
 // ---------------------------------------------------------------------------
 // Shape returned from the schedule JOIN query
@@ -248,7 +243,7 @@ export async function POST(request: NextRequest) {
   const schedule = pickScheduleForArrival(daySchedules, nowIstHHMM);
 
   // 4. Geofence check — enforced for on-site employees only. Off-site (field)
-  //    staff clock in from anywhere. The fence is at least MIN_LOGIN_RADIUS_M.
+  //    staff clock in from anywhere. The fence is at least MIN_FENCE_RADIUS_M.
   let geofenceStatus: GeofenceStatus = 'not_required';
 
   // A schedule that says "fenced" but carries no location has nothing to check
@@ -284,7 +279,7 @@ export async function POST(request: NextRequest) {
     schedule.loc_lat !== null &&
     schedule.loc_lng !== null
   ) {
-    const effectiveRadius = Math.max(Number(schedule.loc_radius ?? 100), MIN_LOGIN_RADIUS_M);
+    const effectiveRadius = Math.max(Number(schedule.loc_radius ?? 100), MIN_FENCE_RADIUS_M);
     const inside = isWithinGeofence(
       lat,
       lng,

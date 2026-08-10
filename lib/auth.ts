@@ -44,9 +44,19 @@ export function signAccessToken(payload: JWTPayload & { tv?: number }): string {
 }
 
 export function signRefreshToken(payload: Pick<JWTPayload, 'id'>): string {
-  return jwt.sign({ id: payload.id }, refreshSecret(), {
-    expiresIn: REFRESH_TOKEN_EXPIRY as jwt.SignOptions['expiresIn'],
-  });
+  return jwt.sign(
+    {
+      id: payload.id,
+      // A random id per token. Without it the payload is just {id, iat, exp},
+      // so two sign-ins in the same SECOND produce byte-identical tokens — and
+      // therefore identical stored hashes. A token revoked by signing out would
+      // then be indistinguishable from the fresh one issued moments later, and
+      // rotation could hand back the value it was supposed to replace.
+      jti: crypto.randomBytes(16).toString('hex'),
+    },
+    refreshSecret(),
+    { expiresIn: REFRESH_TOKEN_EXPIRY as jwt.SignOptions['expiresIn'] },
+  );
 }
 
 // ---------------------------------------------------------------------------

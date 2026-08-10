@@ -37,6 +37,29 @@ export const AUTO_CLOSE_MAX_MINUTES: number | null =
     ? Math.round(Number(process.env.AUTO_CLOSE_MAX_HOURS) * 60)
     : null;
 
+/**
+ * Smallest fence the system will actually enforce, in metres.
+ *
+ * A phone's position is an estimate, not a point. Outdoors a good fix is
+ * accurate to 5-20 m; beside a building, indoors, or on a cheap handset it is
+ * routinely 50 m or worse. A fence tighter than the error simply reports the
+ * employee stepping in and out all day while they sit at their desk — and every
+ * one of those is an automatic clock-out.
+ *
+ * So a location's radius is raised to this floor before anything is measured
+ * against it. That used to happen silently, three times over, which meant an
+ * admin could set 10 m and be quietly given 200 m with nothing on screen
+ * saying so. The admin screen now shows the figure that will really be used.
+ *
+ * Lower it with MIN_FENCE_RADIUS_M if the sites are small and you accept the
+ * false clock-outs. Android's own geofencing is unreliable below about 100 m
+ * whatever this says, so the phone-side trigger will suffer first.
+ */
+export const MIN_FENCE_RADIUS_M =
+  Number(process.env.MIN_FENCE_RADIUS_M) > 0
+    ? Number(process.env.MIN_FENCE_RADIUS_M)
+    : 200;
+
 export const ACCESS_TOKEN_EXPIRY =
   (process.env.JWT_ACCESS_EXPIRY as string) || '15m';
 

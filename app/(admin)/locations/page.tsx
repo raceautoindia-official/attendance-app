@@ -23,6 +23,28 @@ const locationSchema = z.object({
 
 type LocationForm = z.infer<typeof locationSchema>;
 
+
+// Smallest fence the server will actually measure against. Keep in step with
+// MIN_FENCE_RADIUS_M in lib/constants.ts.
+const MIN_ENFORCED_RADIUS_M = 200;
+
+/**
+ * A radius tighter than the floor is silently widened by the server before
+ * anything is measured against it. Saying so here is the whole point: an admin
+ * could type 10 m, be given 200 m, and spend a day wondering why nobody is ever
+ * clocked out for stepping outside.
+ */
+function RadiusNote({ value }: { value: number }) {
+  if (!Number.isFinite(value) || value <= 0 || value >= MIN_ENFORCED_RADIUS_M) return null;
+  return (
+    <p className="-mt-2 text-xs text-amber-600 dark:text-amber-400">
+      {value} m is tighter than a phone can reliably measure, so
+      {' '}<strong>{MIN_ENFORCED_RADIUS_M} m will be enforced</strong>. A fence smaller than
+      the GPS error would clock people out while they sat at their desk.
+    </p>
+  );
+}
+
 export default function LocationsPage() {
   const qc = useQueryClient();
   const [addOpen, setAddOpen] = useState(false);
@@ -177,6 +199,7 @@ export default function LocationsPage() {
           <Input label="Radius (meters)" type="number" {...addForm.register('radius_meters')}
             error={addForm.formState.errors.radius_meters?.message}
             helper="Employees must be within this radius to clock in" />
+          <RadiusNote value={Number(addForm.watch('radius_meters'))} />
 
           {createMutation.isError && (
             <p className="text-sm text-red-500">{(createMutation.error as Error).message}</p>
@@ -201,6 +224,7 @@ export default function LocationsPage() {
                 error={editForm.formState.errors.longitude?.message} />
             </div>
             <Input label="Radius (meters)" type="number" {...editForm.register('radius_meters')} />
+            <RadiusNote value={Number(editForm.watch('radius_meters'))} />
 
             {editMutation.isError && (
               <p className="text-sm text-red-500">{(editMutation.error as Error).message}</p>

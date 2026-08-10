@@ -12,7 +12,7 @@ import {
   requiredMinutesForShift,
 } from '@/lib/permissions';
 import { formatInTimeZone } from 'date-fns-tz';
-import { TIMEZONE } from '@/lib/constants';
+import { TIMEZONE, MIN_FENCE_RADIUS_M } from '@/lib/constants';
 import type {
   ApiResponse,
   AttendanceRecord,
@@ -83,7 +83,13 @@ export async function GET(request: NextRequest) {
            'name',           l.name,
            'latitude',       l.latitude,
            'longitude',      l.longitude,
-           'radius_meters',  l.radius_meters
+           -- The radius that will ACTUALLY be enforced, not the one typed into
+           -- the admin form. The server raises a too-tight fence to
+           -- MIN_FENCE_RADIUS_M before measuring anything against it, so
+           -- sending the raw value would have the phone drawing one circle
+           -- while the server judged against another.
+           'radius_meters',  GREATEST(l.radius_meters, ${MIN_FENCE_RADIUS_M}),
+           'radius_configured', l.radius_meters
          ),
          NULL
        ) AS location
