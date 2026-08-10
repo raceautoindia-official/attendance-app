@@ -83,13 +83,10 @@ export async function GET(request: NextRequest) {
            'name',           l.name,
            'latitude',       l.latitude,
            'longitude',      l.longitude,
-           -- The radius that will ACTUALLY be enforced, not the one typed into
-           -- the admin form. The server raises a too-tight fence to
-           -- MIN_FENCE_RADIUS_M before measuring anything against it, so
-           -- sending the raw value would have the phone drawing one circle
-           -- while the server judged against another.
-           'radius_meters',  GREATEST(l.radius_meters, ${MIN_FENCE_RADIUS_M}),
-           'radius_configured', l.radius_meters
+           -- The radius the server will actually measure against, so the phone
+           -- draws the same circle rather than one of its own. MIN_FENCE_RADIUS_M
+           -- is 0 by default, so this is simply the site's configured radius.
+           'radius_meters',  GREATEST(l.radius_meters, ${MIN_FENCE_RADIUS_M})
          ),
          NULL
        ) AS location

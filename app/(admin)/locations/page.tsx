@@ -24,23 +24,25 @@ const locationSchema = z.object({
 type LocationForm = z.infer<typeof locationSchema>;
 
 
-// Smallest fence the server will actually measure against. Keep in step with
-// MIN_FENCE_RADIUS_M in lib/constants.ts.
-const MIN_ENFORCED_RADIUS_M = 200;
+// Below roughly this, a phone's own position error is comparable to the fence
+// itself. The radius is still enforced exactly as entered — this only decides
+// when to mention the trade-off.
+const TIGHT_RADIUS_M = 50;
 
 /**
- * A radius tighter than the floor is silently widened by the server before
- * anything is measured against it. Saying so here is the whole point: an admin
- * could type 10 m, be given 200 m, and spend a day wondering why nobody is ever
- * clocked out for stepping outside.
+ * The radius is used exactly as typed: a 10 m site means 10 m. That is worth a
+ * word of caution rather than a silent override — a fence smaller than the GPS
+ * error will occasionally place a stationary employee outside their own office.
  */
 function RadiusNote({ value }: { value: number }) {
-  if (!Number.isFinite(value) || value <= 0 || value >= MIN_ENFORCED_RADIUS_M) return null;
+  if (!Number.isFinite(value) || value <= 0 || value >= TIGHT_RADIUS_M) return null;
   return (
     <p className="-mt-2 text-xs text-amber-600 dark:text-amber-400">
-      {value} m is tighter than a phone can reliably measure, so
-      {' '}<strong>{MIN_ENFORCED_RADIUS_M} m will be enforced</strong>. A fence smaller than
-      the GPS error would clock people out while they sat at their desk.
+      <strong>{value} m will be enforced exactly.</strong> A phone fix is usually accurate to
+      5–20 m outdoors and worse indoors, so a fence this tight may sometimes read
+      as “outside” while the employee is at their desk. They are only clocked out
+      after being continuously unconfirmed for the grace period, not on one stray
+      reading.
     </p>
   );
 }

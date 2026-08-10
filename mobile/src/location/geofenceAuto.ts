@@ -291,11 +291,22 @@ export async function startGeofenceAutoMode(
   const bg = await Location.getBackgroundPermissionsAsync().catch(() => null);
   if (!fg?.granted || !bg?.granted) return false;
 
-  const inner = Math.max(Number(radiusMeters) || 200, 200);
+  // The configured radius is the one every DECISION uses — the jitter check on
+  // an exit event, and reconcileGeofenceAttendance's distance maths. It is
+  // stored as-is, with no floor: a 10 m site means 10 m.
+  const inner = Number(radiusMeters) > 0 ? Number(radiusMeters) : 200;
   await SecureStore.setItemAsync(FENCE_KEY, JSON.stringify({ latitude, longitude, radius: inner })).catch(() => {});
+
+  // The OS region is only a WAKE-UP, not the ruling. Android's geofencing is
+  // unreliable much below ~100 m — it may fire late or not at all — so the
+  // region registered with the OS is widened to that, while the app still
+  // judges in/out against `inner`. A small site therefore gets woken slightly
+  // early and then decides for itself, rather than never being woken at all.
+  const OS_MIN_REGION_M = 100;
+  const osInner = Math.max(inner, OS_MIN_REGION_M);
   await Location.startGeofencingAsync(GEOFENCE_TASK, [
-    { identifier: INNER_ID, latitude, longitude, radius: inner, notifyOnEnter: true, notifyOnExit: false },
-    { identifier: OUTER_ID, latitude, longitude, radius: inner + EXIT_MARGIN_M, notifyOnEnter: false, notifyOnExit: true },
+    { identifier: INNER_ID, latitude, longitude, radius: osInner, notifyOnEnter: true, notifyOnExit: false },
+    { identifier: OUTER_ID, latitude, longitude, radius: osInner + EXIT_MARGIN_M, notifyOnEnter: false, notifyOnExit: true },
   ]);
   return true;
 }

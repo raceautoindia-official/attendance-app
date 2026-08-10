@@ -38,27 +38,42 @@ export const AUTO_CLOSE_MAX_MINUTES: number | null =
     : null;
 
 /**
- * Smallest fence the system will actually enforce, in metres.
+ * Floor applied to a location's radius. ZERO by default: the fence an admin
+ * configures is the fence that is enforced.
  *
- * A phone's position is an estimate, not a point. Outdoors a good fix is
- * accurate to 5-20 m; beside a building, indoors, or on a cheap handset it is
- * routinely 50 m or worse. A fence tighter than the error simply reports the
- * employee stepping in and out all day while they sit at their desk — and every
- * one of those is an automatic clock-out.
+ * There used to be a hidden 200 m floor here. Setting a site to 10 m quietly
+ * became 200 m, so a small yard could never trigger an away-from-site
+ * clock-out and nothing explained why.
  *
- * So a location's radius is raised to this floor before anything is measured
- * against it. That used to happen silently, three times over, which meant an
- * admin could set 10 m and be quietly given 200 m with nothing on screen
- * saying so. The admin screen now shows the figure that will really be used.
+ * Worth knowing what a tight fence means in practice: a phone's position is an
+ * estimate. A good outdoor fix is accurate to 5-20 m, and beside a building or
+ * indoors it is routinely worse. A radius smaller than that error will
+ * sometimes place a stationary employee outside their own office. The
+ * away-from-site rule only acts after GEOFENCE_PRESENCE_GRACE_MIN of
+ * *unbroken* absence, so a single stray fix does not end anyone's day — but
+ * with a very small radius, expect the occasional false clock-out.
  *
- * Lower it with MIN_FENCE_RADIUS_M if the sites are small and you accept the
- * false clock-outs. Android's own geofencing is unreliable below about 100 m
- * whatever this says, so the phone-side trigger will suffer first.
+ * Set MIN_FENCE_RADIUS_M to reintroduce a floor for every site at once.
  */
 export const MIN_FENCE_RADIUS_M =
   Number(process.env.MIN_FENCE_RADIUS_M) > 0
     ? Number(process.env.MIN_FENCE_RADIUS_M)
-    : 200;
+    : 0;
+
+/**
+ * How much of a fix's own reported accuracy may be forgiven when deciding
+ * whether it proves the employee was INSIDE the fence.
+ *
+ * Capped at the fence radius, never a flat number. A blanket 500 m allowance
+ * turned a 10 m fence into a 510 m one — presence would be "confirmed" from
+ * half a kilometre away and the away-from-site rule could never fire. Tying it
+ * to the radius keeps a small fence small: at worst a fix may vouch from twice
+ * the configured distance.
+ */
+export const MAX_ACCURACY_ALLOWANCE_M =
+  Number(process.env.MAX_ACCURACY_ALLOWANCE_M) >= 0
+    ? Number(process.env.MAX_ACCURACY_ALLOWANCE_M)
+    : 500;
 
 export const ACCESS_TOKEN_EXPIRY =
   (process.env.JWT_ACCESS_EXPIRY as string) || '15m';

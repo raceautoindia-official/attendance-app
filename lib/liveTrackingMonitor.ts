@@ -22,7 +22,7 @@ import {
 import { toMySQLDatetime } from '@/lib/attendance';
 import { activeOnDuty, hasOnDutyColumn } from '@/lib/permissions';
 import { formatInTimeZone } from 'date-fns-tz';
-import { TIMEZONE, MIN_FENCE_RADIUS_M } from '@/lib/constants';
+import { TIMEZONE, MIN_FENCE_RADIUS_M, MAX_ACCURACY_ALLOWANCE_M } from '@/lib/constants';
 
 interface StaleSessionRow {
   session_id: number;
@@ -42,9 +42,6 @@ interface StaleSessionRow {
 // midnight credited a whole shift. Absence of evidence is now treated as
 // absence, not as attendance.
 const OUTSIDE_LIMIT_MIN = Number(process.env.GEOFENCE_PRESENCE_GRACE_MIN) || 30;
-// A fuzzy fix should not be able to "prove" presence from an arbitrary
-// distance, so the benefit of the doubt given to its accuracy is capped here.
-const MAX_ACCURACY_ALLOWANCE_M = 500;
 
 interface GeofenceCandidateRow {
   attendance_id: number;
@@ -83,7 +80,7 @@ async function lastConfirmedInside(
       c.employee_id,
       toMySQLDatetime(new Date(c.clock_in_utc)),
       c.loc_lat, c.loc_lat, c.loc_lng,
-      fence, MAX_ACCURACY_ALLOWANCE_M,
+      fence, Math.min(MAX_ACCURACY_ALLOWANCE_M, fence),
     ],
   );
 }
