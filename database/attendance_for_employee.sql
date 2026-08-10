@@ -8,6 +8,14 @@
 -- be. Times are shown in IST; the database stores UTC.
 -- =============================================================================
 
+-- The tables are utf8mb4_unicode_ci, but the mysql CLI on MySQL 8 connects as
+-- utf8mb4_0900_ai_ci — and comparing a user variable against a column across
+-- those two collations is an error, not a silent coercion. Pin the connection
+-- to the tables' collation so @variables match. (The app's own driver already
+-- negotiates utf8mb4_unicode_ci, which is why this only bites from the CLI.)
+SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+
 SET @who   := 'reena';        -- <<< name or emp_id, partial match
 SET @from  := '2026-08-01';   -- <<< period start
 SET @to    := '2026-08-31';   -- <<< period end
