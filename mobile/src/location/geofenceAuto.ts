@@ -11,12 +11,16 @@ import { scheduleShiftEndReminders, cancelShiftEndReminders } from '../notificat
 //   - the FIRST clock-in of the day is always manual;
 //   - leaving the work site  → automatic clock-out, for ANY employee with a
 //     fence, so nobody stays on the clock after walking off site;
-//   - re-entering the site   → automatic clock-in (a new session, hours add up),
-//     for PLANT (multi-session) employees only — see the multi_session guard in
-//     the Enter branch below
+//   - re-entering the site   → automatic clock-in (a new session, hours add up)
 //     — but ONLY when the closure was the phone's own geofence clock-out. A
 //     manual clock-out (phone or web), the server watchdog, or the midnight
 //     auto-close means the day is over: re-entry must not reopen it.
+//
+//     Re-entry is attempted for EVERY employee. Reopening the day genuinely
+//     requires allow_multiple_sessions — a single-session account gets a 409
+//     from the server — but that refusal is now told to the employee rather
+//     than skipped in silence. The silence was the worst outcome: we clocked
+//     them out for stepping away, then did nothing at all when they came back.
 //   - manual clock-out / logout / a fresh day stop the monitoring.
 //
 // Implemented with OS-level geofencing: an inner ENTER circle and an outer
@@ -131,8 +135,25 @@ async function doAutoClockIn(coords: { latitude: number; longitude: number }): P
     return true;
   } catch (err) {
     if (err instanceof ApiError && err.status === 409) {
+      // A 409 here means one of two very different things.
+      //
+      // "Attendance already completed for today" — the account is limited to a
+      // single session, so returning to the site can never reopen the day. That
+      // is the trap: we clocked them out when they stepped away, and they
+      // cannot get back in. Silently giving up left them stranded outside their
+      // own shift with no idea why, so say it plainly.
+      if (/completed/i.test(err.message)) {
+        await notify(
+          'Back at the site — but today is already closed',
+          'You were clocked out when you left, and your account allows only one clock-in per day. ' +
+          'Ask your admin to enable multiple sessions for you.',
+        );
+        await stopGeofenceAutoMode();
+        return true;
+      }
+      // Otherwise: already clocked in. Nothing to do.
       await SecureStore.deleteItemAsync(AUTO_OUT_KEY).catch(() => {});
-      return true; // already open
+      return true;
     }
     if (err instanceof ApiError && err.status === 401) await stopGeofenceAutoMode();
     return false; // 403 stale fix / network — reconciliation retries
@@ -205,7 +226,11 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }) => {
       await stopGeofenceAutoMode();
       return;
     }
-    if (today.multi_session !== true) return;
+    // No multi_session pre-check. It used to skip re-entry SILENTLY for anyone
+    // limited to one session a day — the same people we had just clocked out
+    // for stepping away. They came back to nothing at all: no clock-in, no
+    // notification, no explanation. Attempt it and let doAutoClockIn() report
+    // what the server says.
     const coords = await currentCoords();
     if (coords) {
       const dist = haversineMeters(coords.latitude, coords.longitude, center.latitude, center.longitude);
@@ -243,7 +268,9 @@ export async function reconcileGeofenceAttendance(): Promise<void> {
   if (onShift && dist > fence.radius + EXIT_MARGIN_M) {
     if (today.on_duty_now) return;
     await doAutoClockOut(coords);
-  } else if (!onShift && (await autoOutPending()) && today.multi_session === true && dist <= fence.radius) {
+  } else if (!onShift && (await autoOutPending()) && dist <= fence.radius) {
+    // Same as the live handler: no multi_session pre-check, so a refusal is
+    // reported to the employee instead of vanishing.
     await doAutoClockIn(coords);
   }
 }

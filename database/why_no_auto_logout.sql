@@ -74,6 +74,20 @@ SELECT
     WHEN l.is_active <> 1                       THEN 'skipped: location inactive'
     WHEN TIMESTAMPDIFF(MINUTE, a.clock_in_utc, UTC_TIMESTAMP()) < @grace_min
                                                 THEN 'skipped: within grace'
+    -- A fix has placed them INSIDE the fence recently, so their presence is
+    -- vouched for and the watchdog rightly leaves them alone. Without this the
+    -- report claimed people would be clocked out who never should be.
+    WHEN (SELECT TIMESTAMPDIFF(MINUTE, MAX(p.tracked_at_utc), UTC_TIMESTAMP())
+            FROM live_tracking_points p
+           WHERE p.employee_id = e.id
+             AND p.tracked_at_utc >= a.clock_in_utc
+             AND (6371000 * 2 * ASIN(SQRT(
+                   POWER(SIN(RADIANS(p.latitude - l.latitude)/2), 2) +
+                   COS(RADIANS(l.latitude)) * COS(RADIANS(p.latitude)) *
+                   POWER(SIN(RADIANS(p.longitude - l.longitude)/2), 2)
+                 ))) <= GREATEST(COALESCE(l.radius_meters,100), 200)
+                        + LEAST(COALESCE(p.accuracy_meters,0), 500)) < @grace_min
+                                                THEN 'skipped: seen inside the fence recently'
     ELSE '>>> WOULD BE CLOCKED OUT'
   END                                                                AS verdict
 
