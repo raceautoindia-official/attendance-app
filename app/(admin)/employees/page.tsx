@@ -140,7 +140,11 @@ export default function EmployeesPage() {
     resolver: zodResolver(empSchema) as unknown as Resolver<EmpForm>,
     defaultValues: {
       role: 'employee',
-      geofencing_enabled: false,
+      // Default ON, matching the Schedules screen: assigning a work location
+      // and not fencing it is the exception. The server still forces it off
+      // when no location is chosen, so this never claims a fence that has
+      // nothing to measure against.
+      geofencing_enabled: true,
       live_tracking_enabled: true,
       schedule_effective_from: new Date().toISOString().slice(0, 10),
     },

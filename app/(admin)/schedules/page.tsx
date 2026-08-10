@@ -187,7 +187,13 @@ export default function SchedulesPage() {
   const assignForm = useForm<AssignForm>({
     resolver: zodResolver(assignSchema) as unknown as Resolver<AssignForm>,
     defaultValues: {
-      geofencing_enabled: false,
+      // Default ON. Choosing a work location and then NOT fencing it is the
+      // unusual case, but the form used to default off — so an admin who
+      // assigned a site got no fence, no warning, and no away-from-site
+      // clock-out, with nothing on screen saying why. The checkbox is disabled
+      // until a location is picked, and the server forces it off without one,
+      // so this cannot switch on a fence that has nothing to check against.
+      geofencing_enabled: true,
       additional: false,
       effective_from: new Date().toISOString().slice(0, 10),
     },
