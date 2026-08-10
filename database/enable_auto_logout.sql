@@ -16,6 +16,11 @@
 -- reported at the end rather than silently left half-configured.
 -- =============================================================================
 
+-- Narrow to ONE person (partial match on name or emp_id), or leave EMPTY to
+-- cover everybody.
+SET @who := '';   -- <<< e.g. 'RACE013' or 'reena', or '' for all
+
+
 -- 1. BEFORE -------------------------------------------------------------------
 SELECT COUNT(*) AS employees_with_auto_logout_working
 FROM employees e
@@ -25,6 +30,7 @@ JOIN employee_schedules es ON es.employee_id = e.id
 JOIN locations l ON l.id = es.location_id AND l.is_active = TRUE
 WHERE e.is_active = TRUE
   AND e.role = 'employee'
+  AND (@who = '' OR e.name LIKE CONCAT('%', @who, '%') OR e.emp_id LIKE CONCAT('%', @who, '%'))
   AND e.work_mode = 'on_site'
   AND e.live_tracking_enabled = TRUE
   AND es.geofencing_enabled = TRUE;
@@ -41,7 +47,8 @@ JOIN locations l ON l.id = es.location_id AND l.is_active = TRUE
 SET e.work_mode = 'on_site',
     e.live_tracking_enabled = TRUE
 WHERE e.is_active = TRUE
-  AND e.role = 'employee';
+  AND e.role = 'employee'
+  AND (@who = '' OR e.name LIKE CONCAT('%', @who, '%') OR e.emp_id LIKE CONCAT('%', @who, '%'));
 
 
 -- 3. THE FENCE ITSELF ---------------------------------------------------------
@@ -54,7 +61,8 @@ SET es.geofencing_enabled = TRUE
 WHERE e.is_active = TRUE
   AND e.role = 'employee'
   AND es.effective_from <= CURDATE()
-  AND (es.effective_to IS NULL OR es.effective_to >= CURDATE());
+  AND (es.effective_to IS NULL OR es.effective_to >= CURDATE())
+  AND (@who = '' OR e.name LIKE CONCAT('%', @who, '%') OR e.emp_id LIKE CONCAT('%', @who, '%'));
 
 
 -- 4. AFTER --------------------------------------------------------------------
@@ -66,6 +74,7 @@ JOIN employee_schedules es ON es.employee_id = e.id
 JOIN locations l ON l.id = es.location_id AND l.is_active = TRUE
 WHERE e.is_active = TRUE
   AND e.role = 'employee'
+  AND (@who = '' OR e.name LIKE CONCAT('%', @who, '%') OR e.emp_id LIKE CONCAT('%', @who, '%'))
   AND e.work_mode = 'on_site'
   AND e.live_tracking_enabled = TRUE
   AND es.geofencing_enabled = TRUE;
@@ -91,6 +100,7 @@ LEFT JOIN employee_schedules es ON es.id = (
 LEFT JOIN locations l ON l.id = es.location_id
 WHERE e.is_active = TRUE
   AND e.role = 'employee'
+  AND (@who = '' OR e.name LIKE CONCAT('%', @who, '%') OR e.emp_id LIKE CONCAT('%', @who, '%'))
   AND NOT (es.location_id IS NOT NULL AND l.is_active = 1
            AND e.work_mode = 'on_site' AND es.geofencing_enabled = 1)
 ORDER BY why_not, e.emp_id;
