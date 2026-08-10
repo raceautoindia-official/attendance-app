@@ -57,7 +57,15 @@ SELECT
                                                                     AS extra_hm,
   COALESCE(perm.minutes, 0)                                         AS permission_min,
   a.geofence_status,
-  IF(a.edited_by IS NOT NULL, 'edited by admin', '')                AS note
+  -- in_ist/out_ist are the LAST session's times. On a multi-session day the
+  -- earlier stretches live in banked_minutes and are counted in worked_hm, so
+  -- a row can read "13:02 to 13:03" and still show hours — say so, rather than
+  -- leaving it looking like broken data.
+  TRIM(CONCAT_WS(', ',
+    IF(a.edited_by IS NOT NULL, 'edited by admin', NULL),
+    IF(COALESCE(a.session_count,1) > 1,
+       CONCAT('times are the last of ', a.session_count, ' sessions'), NULL)
+  ))                                                                AS note
 FROM attendance a
 JOIN employees e ON e.id = a.employee_id
 -- Minutes the day required: every DISTINCT shift in force that works that
@@ -131,11 +139,26 @@ ORDER BY s.start_time;
 -- 4. AUTOMATIC ACTIONS ON THIS EMPLOYEE ---------------------------------------
 -- Why a day looks the way it does: auto clock-out, away-from-site, marked
 -- absent, refused location, refused device.
+-- Each action records its own detail keys, so pull whichever is present rather
+-- than one fixed name — a geofence clock-out has no 'credited_minutes', and
+-- printing NULL there makes a working feature look broken.
 SELECT DATE_FORMAT(CONVERT_TZ(al.created_at,'+00:00','+05:30'), '%d-%m-%Y %H:%i') AS when_ist,
        al.action,
        JSON_UNQUOTE(JSON_EXTRACT(al.details,'$.reason'))           AS reason,
-       JSON_UNQUOTE(JSON_EXTRACT(al.details,'$.work_date'))        AS work_date,
-       JSON_UNQUOTE(JSON_EXTRACT(al.details,'$.credited_minutes')) AS credited_min
+       COALESCE(
+         JSON_UNQUOTE(JSON_EXTRACT(al.details,'$.work_date')),
+         DATE_FORMAT(CONVERT_TZ(al.created_at,'+00:00','+05:30'), '%Y-%m-%d')
+       )                                                           AS work_date,
+       TRIM(CONCAT_WS('  ',
+         IF(JSON_EXTRACT(al.details,'$.credited_minutes') IS NULL, NULL,
+            CONCAT('credited ', JSON_UNQUOTE(JSON_EXTRACT(al.details,'$.credited_minutes')), 'm')),
+         IF(JSON_EXTRACT(al.details,'$.minutes_unconfirmed') IS NULL, NULL,
+            CONCAT('unconfirmed ', JSON_UNQUOTE(JSON_EXTRACT(al.details,'$.minutes_unconfirmed')), 'm')),
+         IF(JSON_EXTRACT(al.details,'$.fence_radius_m') IS NULL, NULL,
+            CONCAT('fence ', JSON_UNQUOTE(JSON_EXTRACT(al.details,'$.fence_radius_m')), 'm')),
+         IF(JSON_EXTRACT(al.details,'$.location') IS NULL, NULL,
+            JSON_UNQUOTE(JSON_EXTRACT(al.details,'$.location')))
+       ))                                                          AS detail
 FROM audit_log al
 JOIN employees e ON e.id = CAST(JSON_UNQUOTE(JSON_EXTRACT(al.details,'$.employee_id')) AS UNSIGNED)
 WHERE (e.name LIKE CONCAT('%', @who, '%') OR e.emp_id LIKE CONCAT('%', @who, '%'))
