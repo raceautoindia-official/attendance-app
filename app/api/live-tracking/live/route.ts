@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
-import { toMySQLDatetime } from '@/lib/attendance';
+import { getWorkDateIST, toMySQLDatetime } from '@/lib/attendance';
 import type { ApiResponse } from '@/lib/types';
 
 interface LiveRow {
@@ -15,8 +15,23 @@ interface LiveRow {
   latitude: number | null;
   longitude: number | null;
   accuracy_meters: number | null;
+  /** Name of the work site this employee marks attendance at, if one is assigned */
+  location_name: string | null;
+  location_address: string | null;
+  /** Jitter-filtered route, for drawing a clean line on the map */
   path?: LivePoint[];
+  /** Every fix actually recorded, in order — the admin's audit log. A
+   *  stationary phone keeps pinging, and those points are dropped from `path`
+   *  as jitter, so only this shows exactly where the employee was and when. */
+  recorded_path?: LivePoint[];
+  /** Total fixes recorded in the window, before any display cap */
+  recorded_count?: number;
 }
+
+// The audit log is a UI list, not a dataset — cap what we ship per session so a
+// long window can't return tens of thousands of rows. recorded_count still
+// reports the true total.
+const MAX_RECORDED_POINTS = 500;
 
 interface LivePoint {
   tracked_at_utc: string;
@@ -132,9 +147,24 @@ export async function GET(request: NextRequest) {
        p.tracked_at_utc,
        p.latitude,
        p.longitude,
-       p.accuracy_meters
+       p.accuracy_meters,
+       l.name    AS location_name,
+       l.address AS location_address
      FROM live_tracking_sessions s
      JOIN employees e ON e.id = s.employee_id
+     -- The work site this employee is scheduled to mark attendance at, so the
+     -- Overview can name the place instead of only showing raw coordinates.
+     LEFT JOIN employee_schedules es
+       ON es.id = (
+         SELECT es2.id
+         FROM employee_schedules es2
+         WHERE es2.employee_id = s.employee_id
+           AND es2.effective_from <= ?
+           AND (es2.effective_to IS NULL OR es2.effective_to >= ?)
+         ORDER BY es2.effective_from DESC, es2.id DESC
+         LIMIT 1
+       )
+     LEFT JOIN locations l ON l.id = es.location_id
      LEFT JOIN live_tracking_points p
        ON p.id = (
          SELECT p2.id
@@ -146,7 +176,9 @@ export async function GET(request: NextRequest) {
        )
      WHERE ${conditions.join(' AND ')}
      ORDER BY s.last_ping_utc DESC, s.started_at_utc DESC`,
-    [MAX_ACCURACY_M, ...params],
+    // The two schedule-date params come first: that subquery appears before the
+    // accuracy-ordered point lookup in the statement.
+    [getWorkDateIST(), getWorkDateIST(), MAX_ACCURACY_M, ...params],
   );
 
   if (!rows.length) {
@@ -205,10 +237,17 @@ export async function GET(request: NextRequest) {
     else rawBySession.set(point.session_id, [normalized]);
   }
 
-  const sessionsWithPath = rows.map(row => ({
-    ...row,
-    path: cleanPath(rawBySession.get(row.session_id) ?? []),
-  }));
+  const sessionsWithPath = rows.map(row => {
+    const raw = rawBySession.get(row.session_id) ?? [];
+    return {
+      ...row,
+      path: cleanPath(raw),
+      // Keep the MOST RECENT points when capping — the tail is what an admin
+      // is looking at, and the count below still states the real total.
+      recorded_path: raw.length > MAX_RECORDED_POINTS ? raw.slice(-MAX_RECORDED_POINTS) : raw,
+      recorded_count: raw.length,
+    };
+  });
 
   return NextResponse.json<ApiResponse<{ sessions: LiveRow[] }>>({
     success: true,

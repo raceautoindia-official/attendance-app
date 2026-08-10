@@ -7,10 +7,13 @@ import { apiFetch, ApiError } from '../api/client';
 import { startBackgroundTracking, stopBackgroundTracking } from './tracking';
 import { scheduleShiftEndReminders, cancelShiftEndReminders } from '../notifications/shiftReminder';
 
-// Automatic attendance for plant (multi-session) employees:
+// Automatic attendance around the work-site fence:
 //   - the FIRST clock-in of the day is always manual;
-//   - leaving the work site  → automatic clock-out;
-//   - re-entering the site   → automatic clock-in (a new session, hours add up)
+//   - leaving the work site  → automatic clock-out, for ANY employee with a
+//     fence, so nobody stays on the clock after walking off site;
+//   - re-entering the site   → automatic clock-in (a new session, hours add up),
+//     for PLANT (multi-session) employees only — see the multi_session guard in
+//     the Enter branch below
 //     — but ONLY when the closure was the phone's own geofence clock-out. A
 //     manual clock-out (phone or web), the server watchdog, or the midnight
 //     auto-close means the day is over: re-entry must not reopen it.
@@ -39,6 +42,8 @@ interface TodayResponse {
     clock_out_utc: string | null;
   } | null;
   multi_session?: boolean;
+  /** Approved out-of-office duty covering right now, if any. */
+  on_duty_now?: { start_time: string; end_time: string; reason: string | null } | null;
 }
 
 interface Fence {
@@ -175,6 +180,15 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }) => {
   const center = fence ?? { latitude: region.latitude, longitude: region.longitude, radius: inner };
 
   if (eventType === Location.GeofencingEventType.Exit && region.identifier === OUTER_ID && onShift) {
+    // Approved out-of-office duty: the employee is meant to be away, so leaving
+    // the fence is not the end of their day. Notify instead of clocking out.
+    if (today.on_duty_now) {
+      await notify(
+        'On duty — still clocked in',
+        'You have left the work site with approved on-duty, so your attendance stays open.',
+      );
+      return;
+    }
     const coords = await currentCoords();
     if (coords) {
       const dist = haversineMeters(coords.latitude, coords.longitude, center.latitude, center.longitude);
@@ -224,7 +238,10 @@ export async function reconcileGeofenceAttendance(): Promise<void> {
   const dist = haversineMeters(coords.latitude, coords.longitude, fence.latitude, fence.longitude);
   const onShift = !today.attendance.clock_out_utc;
 
+  // Approved on-duty suppresses the repair path too, otherwise reconciliation
+  // would clock out the very employee the geofence handler just spared.
   if (onShift && dist > fence.radius + EXIT_MARGIN_M) {
+    if (today.on_duty_now) return;
     await doAutoClockOut(coords);
   } else if (!onShift && (await autoOutPending()) && today.multi_session === true && dist <= fence.radius) {
     await doAutoClockIn(coords);

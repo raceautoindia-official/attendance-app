@@ -45,6 +45,18 @@ export function workModeSelect(exists: boolean, alias = 'e'): string {
     : `'on_site' AS work_mode, FALSE AS allow_multiple_sessions`;
 }
 
+/** True once employees has the per-employee live-tracking toggle. */
+export async function hasLiveTrackingColumn(): Promise<boolean> {
+  const row = await queryOne<{ c: number }>(
+    `SELECT COUNT(*) AS c
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'employees'
+       AND COLUMN_NAME = 'live_tracking_enabled'`,
+  );
+  return Number(row?.c ?? 0) > 0;
+}
+
 /** True once attendance has the multi-session columns. */
 export async function hasSessionColumns(): Promise<boolean> {
   const row = await queryOne<{ c: number }>(

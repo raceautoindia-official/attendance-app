@@ -188,6 +188,56 @@ export async function sendLiveTrackingAlert(
 }
 
 // ---------------------------------------------------------------------------
+// A request is waiting for an admin's decision
+// ---------------------------------------------------------------------------
+
+export interface PermissionRequestData {
+  employeeName: string;
+  empId: string;
+  requestType: 'permission' | 'on_duty';
+  date: string;
+  startTime: string;
+  endTime: string;
+  minutes: number;
+  reason: string | null;
+}
+
+/**
+ * Tell an admin a request needs approving. On-duty especially matters: until it
+ * is approved the geofence will still clock the employee out when they leave.
+ * Fails silently — never throws.
+ */
+export async function sendPermissionRequestAlert(
+  adminEmail: string,
+  payload: PermissionRequestData,
+): Promise<void> {
+  const onDuty = payload.requestType === 'on_duty';
+  const label = onDuty ? 'On-Duty (work outside the office)' : 'Permission (time off)';
+  const hours = `${Math.floor(payload.minutes / 60)}h ${payload.minutes % 60}m`;
+
+  await send(
+    adminEmail,
+    `${onDuty ? 'On-Duty' : 'Permission'} request awaiting approval: ${payload.employeeName} (${payload.empId})`,
+    `
+      <p>Hi,</p>
+      <p><strong>${payload.employeeName} (${payload.empId})</strong> has requested
+      <strong>${label}</strong> and is waiting for your approval.</p>
+      <ul>
+        <li><strong>Date:</strong> ${payload.date}</li>
+        <li><strong>Time:</strong> ${payload.startTime.slice(0, 5)} – ${payload.endTime.slice(0, 5)} (${hours})</li>
+        <li><strong>Reason:</strong> ${payload.reason ?? '—'}</li>
+      </ul>
+      ${onDuty
+        ? `<p><strong>Until this is approved, leaving the work site will automatically
+           clock them out.</strong> Approving it keeps them clocked in while they are away
+           on official work.</p>`
+        : `<p>Approved permission hours top their day's total back up to the shift length.</p>`}
+      <p>Open the Permissions page to approve or reject it.</p>
+    `,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Geofence auto clock-out alert
 // ---------------------------------------------------------------------------
 

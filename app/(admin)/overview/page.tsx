@@ -25,12 +25,23 @@ type LiveTrackingLiveRow = {
   latitude: number | null;
   longitude: number | null;
   accuracy_meters: number | null;
+  /** The work site this employee marks attendance at */
+  location_name?: string | null;
+  location_address?: string | null;
   path?: Array<{
     tracked_at_utc: string;
     latitude: number;
     longitude: number;
     accuracy_meters: number | null;
   }>;
+  /** Every fix recorded, unfiltered — what the location log shows */
+  recorded_path?: Array<{
+    tracked_at_utc: string;
+    latitude: number;
+    longitude: number;
+    accuracy_meters: number | null;
+  }>;
+  recorded_count?: number;
 };
 type DailyUpdateRow = {
   id: number;
@@ -59,6 +70,35 @@ function minutesToHours(m: number | null | undefined) {
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
+/** Time with seconds — the movement log needs finer resolution than hh:mm. */
+function toISTSeconds(d: Date | string | null) {
+  if (!d) return '—';
+  return new Date(d).toLocaleTimeString(IST_LOCALE, {
+    timeZone: IST, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true,
+  });
+}
+
+/** Metres between two coordinates — used for the step distance in the log. */
+function metresBetween(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+/** "1m 20s" / "45s" — gap between consecutive tracking points. */
+function gapLabel(fromIso: string, toIso: string): string {
+  const secs = Math.round((new Date(toIso).getTime() - new Date(fromIso).getTime()) / 1000);
+  if (!Number.isFinite(secs) || secs < 0) return '';
+  if (secs < 60) return `${secs}s`;
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return s === 0 ? `${m}m` : `${m}m ${s}s`;
+}
+
 function getSignalAgeMinutes(lastPingUtc: string | null): number | null {
   if (!lastPingUtc) return null;
   const ms = new Date(lastPingUtc).getTime();
@@ -81,6 +121,9 @@ export default function OverviewPage() {
 
   const [gpsError, setGpsError] = useState<string | null>(null);
   const [selectedLiveSessionId, setSelectedLiveSessionId] = useState<number | null>(null);
+  // 'recorded' = every fix the phone sent; 'route' = the jitter-filtered path
+  // drawn on the map. Defaults to recorded so the log is a true audit trail.
+  const [logMode, setLogMode] = useState<'recorded' | 'route'>('recorded');
   const [liveEmployeeFilter, setLiveEmployeeFilter] = useState<'all' | number>('all');
   const [liveRangePreset, setLiveRangePreset] = useState<LiveRangePreset>('2h');
   const [customFromLocal, setCustomFromLocal] = useState('');
@@ -245,6 +288,14 @@ export default function OverviewPage() {
     () => selectedLiveSession?.path ?? [],
     [selectedLiveSession?.path],
   );
+  // The log defaults to EVERY recorded fix — "exactly where, and when". The
+  // map's filtered route is available as a second view for reading movement.
+  const selectedRecordedPath = useMemo(
+    () => selectedLiveSession?.recorded_path ?? [],
+    [selectedLiveSession?.recorded_path],
+  );
+  const logPoints = logMode === 'recorded' ? selectedRecordedPath : selectedPath;
+  const recordedTotal = selectedLiveSession?.recorded_count ?? selectedRecordedPath.length;
   // Stable JSON signature of the route points. Because it's a string compared
   // by value, the map iframe below only re-renders when the path actually
   // changes — not on every 5s poll — so live updates are smooth (no reload
@@ -595,6 +646,24 @@ L.circleMarker(ll[ll.length-1],{color:'#ffffff',weight:3,fillColor:'#dc2626',fil
               },
               { key: 'last_ping_utc', header: 'Last Update', render: r => toIST((r as LiveTrackingLiveRow).last_ping_utc) },
               {
+                key: 'location_name',
+                header: 'Attendance Location',
+                render: r => {
+                  const row = r as LiveTrackingLiveRow;
+                  if (!row.location_name) {
+                    return <span className="text-slate-400" title="No work site assigned in Schedules">Not set</span>;
+                  }
+                  return (
+                    <div className="min-w-0">
+                      <p className="truncate font-medium text-slate-700 dark:text-slate-300">{row.location_name}</p>
+                      {row.location_address && (
+                        <p className="truncate text-xs text-slate-400">{row.location_address}</p>
+                      )}
+                    </div>
+                  );
+                },
+              },
+              {
                 key: 'coords',
                 header: 'Coordinates',
                 render: r => {
@@ -665,6 +734,92 @@ L.circleMarker(ll[ll.length-1],{color:'#ffffff',weight:3,fillColor:'#dc2626',fil
                 <p className="text-xs text-slate-500 dark:text-slate-400">
                   Blue line is the exact path taken · green is start · red is latest location.
                 </p>
+
+                {/* Numbered movement log: every recorded location in order,
+                    with the exact IST time the employee was there. */}
+                {logPoints.length > 0 && (
+                  <div className="rounded-lg border border-slate-200 dark:border-slate-700">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-3 py-2 dark:border-slate-700">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                        Location Log — {logPoints.length} point{logPoints.length === 1 ? '' : 's'}
+                        {logMode === 'recorded' && recordedTotal > logPoints.length && (
+                          <span className="ml-1 font-normal normal-case text-amber-600 dark:text-amber-400">
+                            (latest {logPoints.length} of {recordedTotal})
+                          </span>
+                        )}
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <div className="flex gap-1 rounded-md bg-slate-100 p-0.5 dark:bg-slate-800">
+                          {([['recorded', 'Every fix'], ['route', 'Movement only']] as const).map(([key, label]) => (
+                            <button
+                              key={key}
+                              onClick={() => setLogMode(key)}
+                              className={`rounded px-2 py-0.5 text-xs font-medium transition-colors ${
+                                logMode === key
+                                  ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100'
+                                  : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                        <p className="text-xs tabular-nums text-slate-400">
+                          {toISTSeconds(logPoints[0].tracked_at_utc)}
+                          {' → '}
+                          {toISTSeconds(logPoints[logPoints.length - 1].tracked_at_utc)}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="max-h-72 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-700/50">
+                      {logPoints.map((p, i) => {
+                        const lat = Number(p.latitude);
+                        const lng = Number(p.longitude);
+                        const prev = i > 0 ? logPoints[i - 1] : null;
+                        const step = prev
+                          ? Math.round(metresBetween(Number(prev.latitude), Number(prev.longitude), lat, lng))
+                          : null;
+                        const gap = prev ? gapLabel(prev.tracked_at_utc, p.tracked_at_utc) : '';
+                        const isLast = i === logPoints.length - 1;
+                        return (
+                          <div key={`${p.tracked_at_utc}-${i}`} className="flex items-start gap-3 px-3 py-2">
+                            <span
+                              className={`mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-[11px] font-semibold ${
+                                i === 0
+                                  ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
+                                  : isLast
+                                    ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
+                                    : 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300'
+                              }`}
+                            >
+                              {i + 1}
+                            </span>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-xs font-medium tabular-nums text-slate-800 dark:text-slate-200">
+                                {toISTSeconds(p.tracked_at_utc)}
+                                {i === 0 && <span className="ml-2 font-normal text-green-600 dark:text-green-400">start</span>}
+                                {isLast && i !== 0 && <span className="ml-2 font-normal text-red-600 dark:text-red-400">latest</span>}
+                              </p>
+                              <p className="mt-0.5 truncate text-xs tabular-nums text-slate-500 dark:text-slate-400">
+                                {lat.toFixed(6)}, {lng.toFixed(6)}
+                                {p.accuracy_meters != null && ` · ±${Number(p.accuracy_meters).toFixed(0)}m`}
+                                {step != null && ` · moved ${step}m in ${gap}`}
+                              </p>
+                            </div>
+                            <a
+                              href={`https://www.google.com/maps?q=${lat},${lng}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="mt-0.5 flex-shrink-0 text-xs text-blue-600 hover:underline dark:text-blue-400"
+                            >
+                              Map ↗
+                            </a>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               <p className="text-sm text-slate-500 dark:text-slate-400">

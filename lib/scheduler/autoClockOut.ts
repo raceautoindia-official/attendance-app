@@ -1,7 +1,7 @@
 import { closeOpenSessions } from '@/lib/closeSessions';
 import { markAbsentees } from '@/lib/markAbsent';
 import { markSundayHolidays } from '@/lib/markSundayHolidays';
-import { getWorkDateIST } from '@/lib/attendance';
+import { getWorkDateIST, previousWorkDate } from '@/lib/attendance';
 import { formatInTimeZone } from 'date-fns-tz';
 import { TIMEZONE } from '@/lib/constants';
 
@@ -9,16 +9,18 @@ import { TIMEZONE } from '@/lib/constants';
 // In-app end-of-day scheduler. On a self-healing 15-minute sweep (plus a
 // startup catch-up) it does two things, both idempotent and safe to re-run:
 //
-//   1. AUTO CLOCK-OUT — anyone still clocked in from a PREVIOUS day (never
-//      clocked out by midnight) is auto clock-out with 9 hours credited
-//      (closeOpenSessions, acts only on work_date < today).
+//   1. SETTLE THE DAY — anyone still clocked in from a work day that has now
+//      ENDED (07:00 IST, not midnight) is clocked out and credited the hours
+//      actually worked up to that boundary — never a nominal shift length
+//      (closeOpenSessions, acts only on work_date < the current work date).
+//      Anyone still on site at the boundary gets a fresh session so the new day
+//      starts counting without them clocking in again.
 //
-//   2. MARK ABSENT — employees who had a scheduled working day YESTERDAY but no
-//      attendance and no leave are marked absent (markAbsentees for the
-//      previous IST day, which is now complete).
+//   2. MARK ABSENT — employees who had a scheduled working day on the work day
+//      that just finished, but no attendance and no leave, are marked absent.
 //
-// Using a periodic sweep instead of one fragile "fire at midnight" timer means
-// a server restart near midnight or a transient DB error can't make it miss —
+// Using a periodic sweep instead of one fragile "fire at 07:00" timer means a
+// server restart near the boundary or a transient DB error can't make it miss —
 // the next sweep self-heals. No external crontab is required.
 // ---------------------------------------------------------------------------
 
@@ -27,9 +29,11 @@ const STARTUP_DELAY_MS = 10_000;          // brief delay so startup isn't blocke
 
 let started = false;
 
-function previousWorkDate(): string {
-  // Yesterday's IST calendar date (the day that is now complete).
-  return formatInTimeZone(new Date(Date.now() - 24 * 60 * 60 * 1000), TIMEZONE, 'yyyy-MM-dd');
+function lastCompletedWorkDate(): string {
+  // The work day that has now finished. Work days end at WORK_DAY_START_HOUR,
+  // so this must come off the work-date helper — subtracting 24h from the wall
+  // clock would name the wrong day for the hours either side of the boundary.
+  return previousWorkDate(getWorkDateIST());
 }
 
 async function runEndOfDay(label: string): Promise<void> {
@@ -43,7 +47,7 @@ async function runEndOfDay(label: string): Promise<void> {
   }
 
   try {
-    const yesterday = previousWorkDate();
+    const yesterday = lastCompletedWorkDate();
     const absent = await markAbsentees(yesterday); // mark yesterday's no-shows absent
     if (absent > 0) {
       console.log(`[end-of-day] ${label}: marked ${absent} employee(s) absent for ${yesterday}`);
@@ -56,7 +60,7 @@ async function runEndOfDay(label: string): Promise<void> {
     // Sunday = company holiday. Cover today (so a current Sunday shows up right
     // away) and yesterday (catch-up if the server was down on Sunday).
     const holidays =
-      (await markSundayHolidays(getWorkDateIST())) + (await markSundayHolidays(previousWorkDate()));
+      (await markSundayHolidays(getWorkDateIST())) + (await markSundayHolidays(lastCompletedWorkDate()));
     if (holidays > 0) {
       console.log(`[end-of-day] ${label}: marked ${holidays} Sunday holiday row(s)`);
     }

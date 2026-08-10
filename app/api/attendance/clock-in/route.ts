@@ -10,6 +10,11 @@ import {
   getClientIp,
   toMySQLDatetime,
 } from '@/lib/attendance';
+import { formatInTimeZone } from 'date-fns-tz';
+import { TIMEZONE } from '@/lib/constants';
+import { shiftForClockIn, type DayShift } from '@/lib/shifts';
+import { assessLocation } from '@/lib/locationTrust';
+import { checkDevice } from '@/lib/deviceBinding';
 import type {
   ApiResponse,
   AttendanceRecord,
@@ -27,6 +32,10 @@ const ClockInSchema = z.object({
   // True when the phone's geofence auto-attendance performed this action
   // (re-entering the work site) rather than the employee tapping the button.
   auto: z.boolean().optional(),
+  // Android tells us when a fix came from a mock-location app — see
+  // lib/locationTrust.ts. Absent on older builds, which are simply not checked.
+  is_mocked: z.boolean().optional(),
+  accuracy_m: z.number().nullable().optional(),
 });
 
 // Clock-in is allowed within at least this distance of the work location, even
@@ -45,6 +54,7 @@ interface ActiveSchedule {
   geofencing_enabled: boolean;
   start_time: string | null;
   end_time: string | null;
+  required_hours: number | string | null;
   grace_minutes: number;
   shift_type: string;
   shift_name: string;
@@ -52,6 +62,31 @@ interface ActiveSchedule {
   loc_lng: number | null;
   loc_radius: number | null;
   loc_name: string | null;
+}
+
+/**
+ * Which of today's shifts this arrival belongs to.
+ *
+ * Only matters for an employee rostered on two shifts: shiftForClockIn() takes
+ * the shift whose window contains the arrival, else the nearest start, so the
+ * lateness check and the geofence both come from the right shift. With one
+ * shift this returns that shift, exactly as the old LIMIT 1 did.
+ */
+function pickScheduleForArrival(
+  schedules: ActiveSchedule[],
+  arrivalHHMM: string,
+): ActiveSchedule | null {
+  if (schedules.length <= 1) return schedules[0] ?? null;
+  const chosen = shiftForClockIn(
+    schedules.map(s => ({
+      shift_id: s.shift_id,
+      start_time: s.start_time,
+      end_time: s.end_time,
+      required_hours: s.required_hours,
+    })) as unknown as DayShift[],
+    arrivalHHMM,
+  );
+  return schedules.find(s => s.shift_id === chosen?.shift_id) ?? schedules[0];
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +130,28 @@ export async function POST(request: NextRequest) {
   const { latitude: lat, longitude: lng } = parsed.data;
   const workDate = getWorkDateIST();
   const ip = getClientIp(request);
+
+  // Is this the phone registered to the employee? The mobile-only check above
+  // reads a header the client chooses, so on its own it stops nothing.
+  const device = await checkDevice(auth.id, request, { action: 'clock_in', ip });
+  if (!device.ok) {
+    return NextResponse.json<ApiResponse>({ success: false, error: device.error }, { status: 403 });
+  }
+
+  // Are these coordinates believable? A fence over self-reported coordinates is
+  // only as good as this check. Refusals are written to the audit log either
+  // way, so a repeated attempt is visible even though each one is blocked.
+  const trust = await assessLocation(
+    auth.id,
+    { latitude: lat, longitude: lng, is_mocked: parsed.data.is_mocked, accuracy_m: parsed.data.accuracy_m },
+    { action: 'clock_in', ip, auto: parsed.data.auto === true },
+  );
+  if (!trust.ok) {
+    return NextResponse.json<ApiResponse>(
+      { success: false, error: trust.message ?? 'Location could not be verified' },
+      { status: 403 },
+    );
+  }
 
   // 2. Prevent duplicate clock-in — based on whether the employee currently has
   //    an OPEN session (clocked in, not yet clocked out), NOT on today's date.
@@ -157,8 +214,11 @@ export async function POST(request: NextRequest) {
   }
   const bankedMinutes = completedToday ? Number(existing?.total_minutes ?? 0) : 0;
 
-  // 3. Fetch active schedule (shift + location details via JOIN)
-  const schedule = await queryOne<ActiveSchedule>(
+  // 3. Fetch the schedules in force today (shift + location details via JOIN).
+  //    A double-shift employee holds more than one, so take them all and pick
+  //    the one this arrival belongs to — judging a 18:00 arrival against the
+  //    06:00 morning start would mark every evening clock-in late.
+  const daySchedules = await query<ActiveSchedule>(
     `SELECT
        es.id           AS schedule_id,
        es.shift_id,
@@ -166,6 +226,7 @@ export async function POST(request: NextRequest) {
        es.geofencing_enabled,
        s.start_time,
        s.end_time,
+       s.required_hours,
        s.grace_minutes,
        s.type          AS shift_type,
        s.name          AS shift_name,
@@ -179,14 +240,42 @@ export async function POST(request: NextRequest) {
      WHERE es.employee_id = ?
        AND es.effective_from <= ?
        AND (es.effective_to IS NULL OR es.effective_to >= ?)
-     ORDER BY es.effective_from DESC
-     LIMIT 1`,
+     ORDER BY COALESCE(s.start_time, '00:00:00') ASC, es.id ASC`,
     [auth.id, workDate, workDate],
   );
+
+  const nowIstHHMM = formatInTimeZone(new Date(), TIMEZONE, 'HH:mm');
+  const schedule = pickScheduleForArrival(daySchedules, nowIstHHMM);
 
   // 4. Geofence check — enforced for on-site employees only. Off-site (field)
   //    staff clock in from anywhere. The fence is at least MIN_LOGIN_RADIUS_M.
   let geofenceStatus: GeofenceStatus = 'not_required';
+
+  // A schedule that says "fenced" but carries no location has nothing to check
+  // against. That used to fall through to "no fence required", so the admin saw
+  // geofencing switched on while clock-in was accepted from anywhere. Refuse
+  // instead: a fence that cannot be evaluated must not read as a pass.
+  if (workMode === 'on_site' && schedule?.geofencing_enabled && !schedule.location_id) {
+    await insertAuditLog({
+      action: 'geofence_misconfigured',
+      entity: 'employee_schedule',
+      entity_id: schedule.schedule_id,
+      performed_by: auth.id,
+      details: {
+        employee_id: auth.id,
+        shift: schedule.shift_name,
+        reason: 'geofencing_enabled_without_location',
+      },
+      ip_address: ip,
+    });
+    return NextResponse.json<ApiResponse>(
+      {
+        success: false,
+        error: 'Your work location has not been set up, so attendance cannot be verified. Please contact your admin.',
+      },
+      { status: 409 },
+    );
+  }
 
   if (
     workMode === 'on_site' &&
@@ -295,10 +384,16 @@ export async function POST(request: NextRequest) {
     entity_id: insertId,
     performed_by: auth.id,
     details: {
+      // employee_id is carried on every attendance event so one filter can
+      // pull a person's whole trail, whoever performed the action.
+      employee_id: auth.id,
       work_date: workDate,
       status,
       geofence_status: geofenceStatus,
       auto: parsed.data.auto === true,
+      latitude: lat,
+      longitude: lng,
+      auth_method: authMethod,
     },
     ip_address: ip,
   });

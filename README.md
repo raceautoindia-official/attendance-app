@@ -26,6 +26,7 @@ A production-ready attendance management system built with **Next.js 15**, **MyS
 - **Geofence-based clock-in/out** — GPS coordinates checked against work location radius
 - **Shift management** — fixed, flexible, and rotating shift types
 - **Leave & holiday management** — per-employee or company-wide
+- **Permission hours** — employees apply for short time off inside a working day; admins approve, and approved hours top the day's worked time back up to the shift length
 - **Admin dashboard** — live overview, attendance editing, employee CRUD
 - **Report exports** — CSV and PDF with IST-formatted timestamps
 - **Dark mode** — full dark/light theme support
@@ -155,6 +156,18 @@ mysql -u attendance_user -p attendance_db < database/schema.sql
 # Insert default admin, manager, and sample employees
 mysql -u attendance_user -p attendance_db < database/seed.sql
 ```
+
+### Upgrading an existing database
+
+`schema.sql` is the full, current schema — an existing install instead applies
+the files in `database/migrations/` in date order, e.g.:
+
+```bash
+mysql -u attendance_user -p attendance_db < database/migrations/2026-08-04_add_permission_requests.sql
+```
+
+Until that migration runs, permission hours simply report as zero everywhere;
+nothing else breaks.
 
 ### Reset / re-seed
 

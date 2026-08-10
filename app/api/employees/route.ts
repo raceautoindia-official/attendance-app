@@ -138,14 +138,39 @@ export async function GET(request: NextRequest) {
 
   const total = Number(countRow?.total ?? 0);
 
+  // Active employees with NO schedule in force today. The nightly mark-absent
+  // job derives working days from the assigned shift, so an employee without a
+  // schedule is invisible to it — they can miss any number of days and never be
+  // flagged. Reported across the whole scope, not just this page, so the count
+  // doesn't change as the admin pages through.
+  const unscheduled = await query<{ id: number; emp_id: string; name: string }>(
+    `SELECT e.id, e.emp_id, e.name
+     FROM employees e
+     WHERE e.is_active = TRUE
+       ${auth.role === 'manager' ? 'AND e.manager_id = ?' : ''}
+       AND NOT EXISTS (
+         SELECT 1 FROM employee_schedules es
+         WHERE es.employee_id = e.id
+           AND es.effective_from <= ?
+           AND (es.effective_to IS NULL OR es.effective_to >= ?)
+       )
+     ORDER BY e.emp_id ASC`,
+    auth.role === 'manager'
+      ? [auth.id, getWorkDateIST(), getWorkDateIST()]
+      : [getWorkDateIST(), getWorkDateIST()],
+  );
+
   return NextResponse.json<ApiResponse<{
     employees: Employee[];
     pagination: { page: number; limit: number; total: number; totalPages: number };
+    /** Active employees with no schedule today — excluded from absent marking */
+    unscheduled: { id: number; emp_id: string; name: string }[];
   }>>({
     success: true,
     data: {
       employees: rows,
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+      unscheduled,
     },
   });
 }

@@ -8,20 +8,26 @@ import { apiFetch, ApiError } from '../api/client';
 import { stopBackgroundTracking } from './tracking';
 import { reconcileGeofenceAttendance } from './geofenceAuto';
 import { cancelShiftEndReminders } from '../notifications/shiftReminder';
+import { decideLocationAction, MAX_WARNINGS } from './locationWatchPolicy';
 
 // Location-off enforcement: while an employee is clocked in, the phone checks
 // that location services and permissions are still on — every ~15 minutes in
 // the background (survives the app being closed) and every minute while the
-// app is open. Each failed check raises a warning notification, spaced at
-// least STRIKE_SPACING_MIN apart; on the 4th strike the employee is clocked
-// out automatically. Location coming back at any point resets the count.
+// app is open.
+//
+// Each failed check raises ONE warning notification, spaced at least
+// STRIKE_SPACING_MIN apart. After all MAX_WARNINGS warnings have been sent —
+// and the same grace period has passed since the last of them — the employee
+// is clocked out automatically and told why. So the sequence is:
+//
+//   warning 1 of 4 → 2 of 4 → 3 of 4 → 4 of 4 (final) → automatic clock-out
+//
+// Location coming back at any point resets the count to zero.
 
 export const LOCATION_WATCH_TASK = 'attendance-location-watch';
 
 const STRIKE_COUNT_KEY = 'loc_off_strikes';
 const STRIKE_TS_KEY = 'loc_off_last_strike_ms';
-const MAX_STRIKES = 4;
-const STRIKE_SPACING_MIN = 10;
 const CHANNEL_ID = 'location-warnings';
 
 interface TodayResponse {
@@ -100,31 +106,29 @@ export async function checkLocationAndWarn(): Promise<void> {
     return;
   }
 
-  const strikes = Number(await SecureStore.getItemAsync(STRIKE_COUNT_KEY).catch(() => '0')) || 0;
+  const warnings = Number(await SecureStore.getItemAsync(STRIKE_COUNT_KEY).catch(() => '0')) || 0;
+  const lastMs = Number(await SecureStore.getItemAsync(STRIKE_TS_KEY).catch(() => '0')) || 0;
 
-  if (strikes >= MAX_STRIKES) {
-    // Final strike already reached but the clock-out failed (e.g. no network
-    // at that moment) — keep retrying on every check until it lands.
+  const decision = decideLocationAction(warnings, lastMs, Date.now());
+
+  if (decision.action === 'wait') return;
+
+  if (decision.action === 'clock_out') {
+    // A failed clock-out leaves the counter and timestamp untouched, so the
+    // next check retries immediately rather than restarting the warnings.
     await autoClockOut();
     return;
   }
 
-  // Space warnings out no matter how often callers poll.
-  const lastMs = Number(await SecureStore.getItemAsync(STRIKE_TS_KEY).catch(() => '0')) || 0;
-  if (Date.now() - lastMs < STRIKE_SPACING_MIN * 60_000) return;
-
-  const next = strikes + 1;
-  await SecureStore.setItemAsync(STRIKE_COUNT_KEY, String(next)).catch(() => {});
+  await SecureStore.setItemAsync(STRIKE_COUNT_KEY, String(decision.warningNumber)).catch(() => {});
   await SecureStore.setItemAsync(STRIKE_TS_KEY, String(Date.now())).catch(() => {});
 
-  if (next >= MAX_STRIKES) {
-    await autoClockOut();
-  } else {
-    await notify(
-      `Turn location on — warning ${next} of ${MAX_STRIKES}`,
-      'Location is off during your shift. Turn it back on now, or you will be clocked out automatically.',
-    );
-  }
+  await notify(
+    `Turn location on — warning ${decision.warningNumber} of ${MAX_WARNINGS}${decision.isFinal ? ' (final)' : ''}`,
+    decision.isFinal
+      ? 'Final warning. Location is still off — turn it back on now or you will be clocked out automatically.'
+      : 'Location is off during your shift. Turn it back on now, or you will be clocked out automatically.',
+  );
 }
 
 async function autoClockOut(): Promise<void> {

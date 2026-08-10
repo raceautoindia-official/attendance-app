@@ -1,4 +1,4 @@
-import { query } from '@/lib/db';
+import { query, insertAuditLog } from '@/lib/db';
 import { formatInTimeZone } from 'date-fns-tz';
 import { TIMEZONE } from '@/lib/constants';
 
@@ -27,5 +27,19 @@ export async function markSundayHolidays(workDate: string): Promise<number> {
     [workDate, workDate],
   );
 
-  return (result as unknown as { affectedRows: number }).affectedRows ?? 0;
+  const created = (result as unknown as { affectedRows: number }).affectedRows ?? 0;
+
+  // This writes attendance rows, so it has to leave a trail like every other
+  // path that does — previously it wrote silently.
+  if (created > 0) {
+    await insertAuditLog({
+      action: 'sunday_holidays_marked',
+      entity: 'attendance',
+      performed_by: null,
+      details: { work_date: workDate, rows_created: created, reason: 'sunday_company_holiday' },
+      ip_address: null,
+    });
+  }
+
+  return created;
 }

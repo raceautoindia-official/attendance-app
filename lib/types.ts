@@ -20,6 +20,16 @@ export type AttendanceStatus =
 
 export type LeaveType = 'casual' | 'sick' | 'earned' | 'holiday' | 'other';
 
+export type PermissionStatus = 'pending' | 'approved' | 'rejected' | 'cancelled';
+
+/**
+ * 'permission' — paid time OFF inside a working day; consumes the monthly
+ *                quota and tops the day's hours up to the shift length.
+ * 'on_duty'    — official work AWAY from the site; no quota, no credited
+ *                hours, and the geofence must not clock them out.
+ */
+export type PermissionRequestType = 'permission' | 'on_duty';
+
 export type DocumentType =
   | 'pan_card'
   | 'aadhaar_card'
@@ -198,6 +208,53 @@ export interface AttendanceRecord {
   emp_id?: string;
   location_name?: string | null;
   location_address?: string | null;
+  /** Approved permission minutes for this work_date */
+  permission_minutes?: number;
+  /** Minutes the day's shift requires (used to cap the permission credit) */
+  required_minutes?: number;
+  /** total_minutes topped up by approved permission, capped at required_minutes */
+  credited_minutes?: number | null;
+  /** Hours actually worked on the day (banked sessions included) */
+  worked_minutes?: number | null;
+  /** Worked beyond the rostered day — the part credited_minutes caps off */
+  overtime_minutes?: number;
+}
+
+/** A short paid absence inside a working day, approved by an admin. */
+export interface PermissionRequest {
+  id: number;
+  employee_id: number;
+  request_type: PermissionRequestType;
+  permission_date: string; // "YYYY-MM-DD"
+  start_time: string;      // "HH:MM:SS" (IST wall clock)
+  end_time: string;        // "HH:MM:SS"
+  minutes: number;
+  reason: string | null;
+  status: PermissionStatus;
+  requested_by: number | null;
+  reviewed_by: number | null;
+  reviewed_at: Date | null;
+  review_notes: string | null;
+  created_at: Date;
+  updated_at: Date;
+  /** Filed after the date it covers — shown to the approver. */
+  is_backdated?: boolean | number;
+  days_late?: number | null;
+  // Populated via JOIN
+  employee_name?: string | null;
+  employee_emp_id?: string | null;
+  reviewed_by_name?: string | null;
+}
+
+/** Monthly permission entitlement for one employee. */
+export interface PermissionBalance {
+  month: string;          // "YYYY-MM"
+  monthly_limit_minutes: number;
+  used_minutes: number;   // approved
+  pending_minutes: number;
+  remaining_minutes: number;
+  max_minutes_per_request: number;
+  min_minutes_per_request: number;
 }
 
 export interface LeaveRecord {

@@ -4,6 +4,7 @@ import { query, queryOne, insertAuditLog } from '@/lib/db';
 import {
   comparePin,
   signAccessToken,
+  currentTokenVersion,
   signRefreshToken,
   generateRefreshTokenHash,
   getExpirySecondsFromEnv,
@@ -119,6 +120,7 @@ export async function POST(request: NextRequest) {
     id: employee.id,
     emp_id: employee.emp_id,
     role: employee.role,
+    tv: await currentTokenVersion(employee.id),
   });
   const refreshToken = signRefreshToken({ id: employee.id });
   await storeRefreshToken(employee.id, refreshToken);

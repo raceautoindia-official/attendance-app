@@ -3,7 +3,23 @@ import { queryOne } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import { getWorkDateIST } from '@/lib/attendance';
 import { hasWorkModeColumns } from '@/lib/employeeDetails';
-import type { ApiResponse, AttendanceRecord, EmployeeSchedule } from '@/lib/types';
+import {
+  activeOnDuty,
+  creditedMinutes,
+  emptyBalance,
+  getMonthlyBalance,
+  hasPermissionTable,
+  requiredMinutesForShift,
+} from '@/lib/permissions';
+import { formatInTimeZone } from 'date-fns-tz';
+import { TIMEZONE } from '@/lib/constants';
+import type {
+  ApiResponse,
+  AttendanceRecord,
+  EmployeeSchedule,
+  PermissionBalance,
+  Shift,
+} from '@/lib/types';
 
 // ---------------------------------------------------------------------------
 // GET /api/attendance/today
@@ -16,6 +32,13 @@ interface TodayResponse {
   schedule: EmployeeSchedule | null;
   /** Plant staff: may clock in again after completing a session today */
   multi_session: boolean;
+  /** Approved permission minutes for today */
+  permission_minutes: number;
+  /** The employee's permission entitlement for the current month */
+  permission_balance: PermissionBalance;
+  /** Approved out-of-office duty covering RIGHT NOW. While this is set the
+   *  phone must not auto clock-out on leaving the work-site geofence. */
+  on_duty_now: { start_time: string; end_time: string; reason: string | null } | null;
 }
 
 export async function GET(request: NextRequest) {
@@ -95,6 +118,45 @@ export async function GET(request: NextRequest) {
       )
     : false;
 
+  // Approved permission hours top today's worked time back up to the shift
+  // length — see creditedMinutes() for the exact rule.
+  const permissionsAvailable = await hasPermissionTable();
+  let permissionMinutes = 0;
+  if (permissionsAvailable && attendance) {
+    const row = await queryOne<{ minutes: number | null }>(
+      `SELECT COALESCE(SUM(minutes), 0) AS minutes
+       FROM permission_requests
+       WHERE employee_id = ? AND permission_date = ? AND status = 'approved'`,
+      [auth.id, attendance.work_date],
+    );
+    permissionMinutes = Number(row?.minutes ?? 0);
+  }
+
+  const requiredMinutes = requiredMinutesForShift(
+    (schedule as unknown as { shift?: Shift | null })?.shift ?? null,
+  );
+
+  if (attendance) {
+    attendance.permission_minutes = permissionMinutes;
+    attendance.required_minutes = requiredMinutes;
+    attendance.credited_minutes = creditedMinutes(
+      attendance.total_minutes,
+      permissionMinutes,
+      requiredMinutes,
+    );
+    // Hours on the day so far — banked sessions plus the open one — and how
+    // much of that is beyond the rostered day. The phone shows both so someone
+    // working late can see the extra time accruing rather than a figure pinned
+    // at the shift length.
+    const banked = Number(attendance.banked_minutes ?? 0);
+    const worked = attendance.total_minutes ?? (banked > 0 ? banked : null);
+    attendance.worked_minutes = worked;
+    attendance.overtime_minutes =
+      worked != null && requiredMinutes != null && worked > requiredMinutes
+        ? worked - requiredMinutes
+        : 0;
+  }
+
   return NextResponse.json<ApiResponse<TodayResponse>>(
     {
       success: true,
@@ -102,6 +164,17 @@ export async function GET(request: NextRequest) {
         attendance: attendance ?? null,
         schedule: schedule ?? null,
         multi_session: multiSession,
+        permission_minutes: permissionMinutes,
+        permission_balance: permissionsAvailable
+          ? await getMonthlyBalance(auth.id, workDate)
+          : emptyBalance(workDate),
+        on_duty_now: permissionsAvailable
+          ? await activeOnDuty(
+              auth.id,
+              workDate,
+              formatInTimeZone(new Date(), TIMEZONE, 'HH:mm:ss'),
+            )
+          : null,
       },
     },
     { headers: { 'Cache-Control': 'no-store' } },

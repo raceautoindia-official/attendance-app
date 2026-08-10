@@ -4,6 +4,7 @@ import { query, queryOne } from '@/lib/db';
 import {
   verifyRefreshToken,
   signAccessToken,
+  currentTokenVersion,
   signRefreshToken,
   generateRefreshTokenHash,
   getExpirySecondsFromEnv,
@@ -76,7 +77,7 @@ export async function POST(request: NextRequest) {
   // 3. Rotate: delete the old token, issue a fresh pair
   await query('DELETE FROM refresh_tokens WHERE id = ?', [row.token_id]);
 
-  const newAccessToken = signAccessToken({ id: row.id, emp_id: row.emp_id, role: row.role });
+  const newAccessToken = signAccessToken({ id: row.id, emp_id: row.emp_id, role: row.role, tv: await currentTokenVersion(row.id) });
   const newRefreshToken = signRefreshToken({ id: row.id });
   const newHash = generateRefreshTokenHash(newRefreshToken);
   const refreshTtlSeconds = getExpirySecondsFromEnv(

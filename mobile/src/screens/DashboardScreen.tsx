@@ -53,6 +53,8 @@ interface HistoryRow {
   clock_in_utc: string | null;
   clock_out_utc: string | null;
   total_minutes: number | null;
+  permission_minutes?: number | null;
+  credited_minutes?: number | null;
   status: string | null;
 }
 
@@ -62,6 +64,27 @@ interface Shift {
   start_time?: string;
   end_time?: string;
   required_hours?: number;
+}
+
+interface PermissionRow {
+  id: number;
+  permission_date: string;
+  start_time: string;
+  end_time: string;
+  minutes: number;
+  reason: string | null;
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled';
+  review_notes: string | null;
+}
+
+interface PermissionBalance {
+  month: string;
+  monthly_limit_minutes: number;
+  used_minutes: number;
+  pending_minutes: number;
+  remaining_minutes: number;
+  max_minutes_per_request: number;
+  min_minutes_per_request: number;
 }
 
 interface FenceLocation {
@@ -86,7 +109,25 @@ function timeOnly(iso: string | null): string {
 }
 
 // IST calendar date (YYYY-MM-DD) — matches the server's getWorkDateIST().
+/**
+ * The WORK date an instant belongs to.
+ *
+ * The work day turns over at WORK_DAY_START_HOUR (07:00 IST), not midnight, so
+ * a night that runs past 00:00 still belongs to the day it started on. This has
+ * to match lib/attendance.getWorkDateIST() on the server exactly — if the phone
+ * called it a new day at midnight it would cache the wrong day's attendance and
+ * show a blank card to someone who is still on shift.
+ */
+const WORK_DAY_START_HOUR = 7;
+
 function istYmd(date: Date): string {
+  const shifted = new Date(date.getTime() - WORK_DAY_START_HOUR * 60 * 60 * 1000);
+  return shifted.toLocaleDateString('en-CA', { timeZone: TZ });
+}
+
+/** The plain IST calendar date, for things that are about the wall clock
+ *  rather than the work day (e.g. the default date on a permission form). */
+function istCalendarYmd(date: Date): string {
   return date.toLocaleDateString('en-CA', { timeZone: TZ });
 }
 
@@ -108,6 +149,55 @@ function initials(name?: string | null): string {
   return ((parts[0]?.[0] ?? '') + (parts[1]?.[0] ?? '')).toUpperCase() || '--';
 }
 
+// "09:30" → "9:30 am", for displaying permission windows.
+function clock12(t: string): string {
+  const [h, m] = t.split(':').map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return t;
+  const suffix = h < 12 ? 'am' : 'pm';
+  const hour12 = h % 12 === 0 ? 12 : h % 12;
+  return `${hour12}:${String(m).padStart(2, '0')} ${suffix}`;
+}
+
+/** "HH:MM" -> minutes since midnight, or null when malformed. */
+function clockMinutes(value: string): number | null {
+  const m = value.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h > 23 || min > 59) return null;
+  return h * 60 + min;
+}
+
+/** Minutes between two "HH:MM" wall-clock times, or null when not a forward
+ *  span. Used for the permission form, where a backwards window is invalid. */
+function spanMinutes(start: string, end: string): number | null {
+  const s = clockMinutes(start);
+  const e = clockMinutes(end);
+  if (s === null || e === null) return null;
+  const diff = e - s;
+  return diff > 0 ? diff : null;
+}
+
+/** Minutes the shift asks for — mirrors lib/permissions.requiredMinutesForShift,
+ *  including a shift that runs past midnight (22:00-06:00 is 8h, not a fallback
+ *  9h). Keeping the two in step matters because this drives the live credited
+ *  figure on screen while the server computes the stored one. */
+function requiredMinutes(shift: Shift | null): number {
+  if (shift?.required_hours != null && Number(shift.required_hours) > 0) {
+    return Math.round(Number(shift.required_hours) * 60);
+  }
+  if (shift?.start_time && shift?.end_time) {
+    const s = clockMinutes(shift.start_time.slice(0, 5));
+    const e = clockMinutes(shift.end_time.slice(0, 5));
+    if (s !== null && e !== null) {
+      const span = ((e - s) % 1440 + 1440) % 1440;
+      if (span > 0) return span;
+    }
+  }
+  // No schedule at all — standard 9-hour day.
+  return 9 * 60;
+}
+
 // Matches the web: flexible shifts show "<name> - N hours required",
 // fixed shifts show "<name> - HH:MM to HH:MM".
 function scheduleLine(shift: Shift | null): string | null {
@@ -124,15 +214,29 @@ function toast(msg: string): void {
   if (Platform.OS === 'android') ToastAndroid.show(msg, ToastAndroid.SHORT);
 }
 
-async function getCoords(): Promise<{ latitude: number; longitude: number }> {
+export interface FixPayload {
+  latitude: number;
+  longitude: number;
+  /** Android reports when a fix came from a mock-location provider. */
+  is_mocked?: boolean;
+  accuracy_m?: number | null;
+}
+
+async function getCoords(): Promise<FixPayload> {
   const perm = await Location.requestForegroundPermissionsAsync();
   if (perm.status !== 'granted') throw new Error('Location permission is required.');
   // Use a recent cached fix first — instant, so clock-in doesn't hang on a
   // fresh GPS lock (during which the connection could drop).
   const last = await Location.getLastKnownPositionAsync({ maxAge: 60_000, requiredAccuracy: 200 });
-  if (last) return { latitude: last.coords.latitude, longitude: last.coords.longitude };
-  const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-  return { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+  const pos = last ?? await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+  // `mocked` is set by Android when the fix came from a fake-GPS app. Pass it
+  // through rather than deciding here — the server records the attempt.
+  return {
+    latitude: pos.coords.latitude,
+    longitude: pos.coords.longitude,
+    is_mocked: (pos as { mocked?: boolean }).mocked === true,
+    accuracy_m: pos.coords.accuracy ?? null,
+  };
 }
 
 export default function DashboardScreen({ onLogout }: { onLogout: () => void }) {
@@ -160,6 +264,18 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   const [dailyUpdate, setDailyUpdate] = useState('');
   const [savingUpdate, setSavingUpdate] = useState(false);
 
+  // Permission hours — short paid time off inside the working day.
+  const [permissions, setPermissions] = useState<PermissionRow[]>([]);
+  const [permissionBalance, setPermissionBalance] = useState<PermissionBalance | null>(null);
+  const [todayPermissionMinutes, setTodayPermissionMinutes] = useState(0);
+  const [permFormOpen, setPermFormOpen] = useState(false);
+  const [permDate, setPermDate] = useState(istCalendarYmd(new Date()));
+  const [permStart, setPermStart] = useState('');
+  const [permEnd, setPermEnd] = useState('');
+  const [permReason, setPermReason] = useState('');
+  const [permError, setPermError] = useState<string | null>(null);
+  const [permBusy, setPermBusy] = useState(false);
+
   const clockedIn = !!attendance?.clock_in_utc;
   const clockedOut = !!attendance?.clock_out_utc;
   const today = istYmd(now);
@@ -174,6 +290,18 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     return Number(attendance?.banked_minutes ?? 0) + Math.max(0, Math.floor((now.getTime() - ms) / 60_000));
   }, [attendance, now]);
 
+  // Approved permission tops the day back up to the shift length — never past
+  // it, so hours are not double-counted when the employee stayed clocked in
+  // through the permission window. Mirrors lib/permissions.creditedMinutes.
+  const liveCreditedMinutes = useMemo(() => {
+    if (liveWorkedMinutes == null) return null;
+    if (todayPermissionMinutes <= 0) return liveWorkedMinutes;
+    return Math.min(
+      liveWorkedMinutes + todayPermissionMinutes,
+      Math.max(liveWorkedMinutes, requiredMinutes(shift)),
+    );
+  }, [liveWorkedMinutes, todayPermissionMinutes, shift]);
+
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
@@ -185,10 +313,14 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         attendance: TodayAttendance | null;
         schedule: { shift?: Shift; location?: { latitude: number | string; longitude: number | string; radius_meters: number | string } | null } | null;
         multi_session?: boolean;
+        permission_minutes?: number;
+        permission_balance?: PermissionBalance;
       }>('/api/attendance/today');
       setAttendance(data.attendance);
       setShift(data.schedule?.shift ?? null);
       setMultiSession(data.multi_session === true);
+      setTodayPermissionMinutes(Number(data.permission_minutes ?? 0));
+      if (data.permission_balance) setPermissionBalance(data.permission_balance);
       const loc = data.schedule?.location;
       setFenceLocation(
         loc
@@ -242,6 +374,23 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     }
   }, []);
 
+  // This month's permission requests plus the remaining entitlement.
+  const loadPermissions = useCallback(async () => {
+    const monthStart = `${istYmd(new Date()).slice(0, 7)}-01`;
+    try {
+      const [list, balance] = await Promise.all([
+        apiFetch<{ permissions: PermissionRow[] }>(
+          `/api/permissions?from_date=${monthStart}&limit=5&page=1`,
+        ),
+        apiFetch<PermissionBalance>('/api/permissions/balance'),
+      ]);
+      setPermissions(list.permissions ?? []);
+      setPermissionBalance(balance);
+    } catch {
+      /* non-fatal — the card just shows what it has */
+    }
+  }, []);
+
   useEffect(() => {
     let active = true;
     (async () => {
@@ -270,11 +419,12 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       loadHistory();
       loadDailyUpdate();
       loadTrackingEnabled();
+      loadPermissions();
     })();
     return () => {
       active = false;
     };
-  }, [loadToday, loadHistory, loadDailyUpdate, loadTrackingEnabled]);
+  }, [loadToday, loadHistory, loadDailyUpdate, loadTrackingEnabled, loadPermissions]);
 
   // Keep the live map updated while clocked in. Also auto-resume background
   // tracking — when the app is reopened mid-shift, the OS may have stopped the
@@ -363,7 +513,8 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     loadHistory();
     loadDailyUpdate();
     loadTrackingEnabled();
-  }, [loadToday, loadHistory, loadDailyUpdate, loadTrackingEnabled]);
+    loadPermissions();
+  }, [loadToday, loadHistory, loadDailyUpdate, loadTrackingEnabled, loadPermissions]);
 
   // OS-level "shift over, please clock out" notifications — they fire on the
   // lock screen even with the app closed, exactly 9 hours after clock-in.
@@ -378,15 +529,20 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     }
   }, [attendance?.clock_in_utc, clockedIn, clockedOut, loading]);
 
-  // Auto attendance (plant staff): after the day's first MANUAL clock-in the
-  // phone watches the work-site geofence — leaving clocks out, returning
-  // clocks in again. Gated on todayLoaded: acting on the initial empty state
-  // would stop monitoring on every app open, permanently killing re-entry
-  // auto clock-in during a break. While auto-clocked-out (our own pending
-  // flag), monitoring is re-ensured and missed events are reconciled.
+  // Auto attendance: after the day's first MANUAL clock-in the phone watches
+  // the work-site geofence. LEAVING clocks out — for everyone with a fence, so
+  // nobody stays on the clock after walking off site. RETURNING clocks back in
+  // only for plant staff, whose day may legitimately have several sessions;
+  // that rule lives in the geofence task itself, so it is safe to run the
+  // watch for single-session employees too.
+  //
+  // Gated on todayLoaded: acting on the initial empty state would stop
+  // monitoring on every app open, permanently killing re-entry auto clock-in
+  // during a break. While auto-clocked-out (our own pending flag), monitoring
+  // is re-ensured and missed events are reconciled.
   useEffect(() => {
     if (loading || hasConsent !== true || !todayLoaded) return;
-    if (!multiSession || !fenceLocation || !trackingEnabled) {
+    if (!fenceLocation || !trackingEnabled) {
       void stopGeofenceAutoMode();
       return;
     }
@@ -518,6 +674,91 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     }
   };
 
+  // --- Permission hours ------------------------------------------------------
+
+  const handleApplyPermission = async () => {
+    setPermError(null);
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(permDate.trim())) {
+      setPermError('Date must be YYYY-MM-DD');
+      return;
+    }
+    const minutes = spanMinutes(permStart, permEnd);
+    if (minutes === null) {
+      setPermError('Enter times as HH:MM (24-hour), with the end after the start');
+      return;
+    }
+    if (permissionBalance) {
+      if (minutes < permissionBalance.min_minutes_per_request) {
+        setPermError(`Permission must be at least ${minutesToHours(permissionBalance.min_minutes_per_request)}`);
+        return;
+      }
+      if (minutes > permissionBalance.max_minutes_per_request) {
+        setPermError(`A single permission cannot exceed ${minutesToHours(permissionBalance.max_minutes_per_request)}`);
+        return;
+      }
+      if (minutes > permissionBalance.remaining_minutes) {
+        setPermError(
+          permissionBalance.remaining_minutes <= 0
+            ? "This month's permission hours are used up"
+            : `Only ${minutesToHours(permissionBalance.remaining_minutes)} left this month`,
+        );
+        return;
+      }
+    }
+
+    setPermBusy(true);
+    try {
+      await apiFetch('/api/permissions', {
+        method: 'POST',
+        body: {
+          permission_date: permDate.trim(),
+          start_time: permStart.trim(),
+          end_time: permEnd.trim(),
+          reason: permReason.trim() || null,
+        },
+      });
+      setPermFormOpen(false);
+      setPermStart('');
+      setPermEnd('');
+      setPermReason('');
+      toast('Permission sent for approval ✓');
+      await loadPermissions();
+    } catch (e) {
+      setPermError(e instanceof Error ? e.message : 'Failed to apply');
+    } finally {
+      setPermBusy(false);
+    }
+  };
+
+  const handleCancelPermission = (row: PermissionRow) => {
+    Alert.alert(
+      'Withdraw request',
+      `Cancel the permission on ${dateDMY(row.permission_date)} (${clock12(row.start_time.slice(0, 5))} – ${clock12(row.end_time.slice(0, 5))})?`,
+      [
+        { text: 'Keep', style: 'cancel' },
+        {
+          text: 'Withdraw',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              try {
+                await apiFetch(`/api/permissions/${row.id}`, {
+                  method: 'PATCH',
+                  body: { action: 'cancel' },
+                });
+                toast('Request withdrawn');
+                await loadPermissions();
+              } catch (e) {
+                toast(e instanceof Error ? e.message : 'Failed to cancel');
+              }
+            })();
+          },
+        },
+      ],
+    );
+  };
+
   const handleLogout = async () => {
     await stopBackgroundTracking().catch(() => {});
     await stopGeofenceAutoMode().catch(() => {});
@@ -610,9 +851,16 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
             </View>
             <View style={styles.statCol}>
               <Text style={styles.statLabel}>Hours</Text>
-              <Text style={styles.statValue}>{minutesToHours(liveWorkedMinutes)}</Text>
+              <Text style={styles.statValue}>{minutesToHours(liveCreditedMinutes)}</Text>
             </View>
           </View>
+
+          {todayPermissionMinutes > 0 && (
+            <Text style={styles.permissionNote}>
+              Includes approved permission: {minutesToHours(liveWorkedMinutes)} worked +{' '}
+              {minutesToHours(todayPermissionMinutes)} permission
+            </Text>
+          )}
 
           {scheduleLine(shift) && <Text style={styles.schedule}>{scheduleLine(shift)}</Text>}
 
@@ -661,6 +909,147 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
             <Text style={styles.warnText}>⚠️ You clocked in outside the designated work location.</Text>
           </View>
         )}
+
+        {/* Permission hours — apply here, an admin approves */}
+        <View style={[styles.card, { marginTop: 20 }]}>
+          <View style={styles.permHeader}>
+            <View style={styles.permHeaderText}>
+              <Text style={styles.cardTitle}>Permission Hours</Text>
+              <Text style={styles.permSubtitle}>
+                Short time off inside a working day. Approved hours count towards your day&apos;s hours.
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.permApplyBtn}
+              onPress={() => { setPermError(null); setPermDate(today); setPermFormOpen(o => !o); }}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.permApplyText}>{permFormOpen ? 'Close' : 'Apply'}</Text>
+            </TouchableOpacity>
+          </View>
+
+          {permissionBalance && (
+            <View style={styles.statsRow}>
+              <View style={styles.statCol}>
+                <Text style={styles.statLabel}>Left this month</Text>
+                <Text style={styles.statValue}>{minutesToHours(permissionBalance.remaining_minutes)}</Text>
+              </View>
+              <View style={styles.statCol}>
+                <Text style={styles.statLabel}>Approved</Text>
+                <Text style={styles.statValue}>{minutesToHours(permissionBalance.used_minutes)}</Text>
+              </View>
+              <View style={styles.statCol}>
+                <Text style={styles.statLabel}>Awaiting</Text>
+                <Text style={styles.statValue}>{minutesToHours(permissionBalance.pending_minutes)}</Text>
+              </View>
+            </View>
+          )}
+
+          {permFormOpen && (
+            <View style={styles.permForm}>
+              <Text style={styles.permFieldLabel}>Date (YYYY-MM-DD)</Text>
+              <TextInput
+                style={styles.permInput}
+                value={permDate}
+                onChangeText={setPermDate}
+                placeholder="2026-08-04"
+                placeholderTextColor={colors.textFaint}
+                autoCapitalize="none"
+              />
+              <View style={styles.permTimeRow}>
+                <View style={styles.permTimeCol}>
+                  <Text style={styles.permFieldLabel}>From (24h)</Text>
+                  <TextInput
+                    style={styles.permInput}
+                    value={permStart}
+                    onChangeText={setPermStart}
+                    placeholder="10:00"
+                    placeholderTextColor={colors.textFaint}
+                    keyboardType="numbers-and-punctuation"
+                  />
+                </View>
+                <View style={styles.permTimeCol}>
+                  <Text style={styles.permFieldLabel}>To (24h)</Text>
+                  <TextInput
+                    style={styles.permInput}
+                    value={permEnd}
+                    onChangeText={setPermEnd}
+                    placeholder="12:00"
+                    placeholderTextColor={colors.textFaint}
+                    keyboardType="numbers-and-punctuation"
+                  />
+                </View>
+              </View>
+              {spanMinutes(permStart, permEnd) !== null && (
+                <Text style={styles.permDuration}>
+                  Duration: {minutesToHours(spanMinutes(permStart, permEnd))}
+                </Text>
+              )}
+              <Text style={styles.permFieldLabel}>Reason</Text>
+              <TextInput
+                style={[styles.permInput, styles.permReasonInput]}
+                value={permReason}
+                onChangeText={setPermReason}
+                placeholder="Bank work, doctor visit…"
+                placeholderTextColor={colors.textFaint}
+                multiline
+                maxLength={500}
+                textAlignVertical="top"
+              />
+              {permError && (
+                <View style={styles.errorBox}>
+                  <Text style={styles.errorText}>{permError}</Text>
+                </View>
+              )}
+              <TouchableOpacity
+                style={[styles.saveBtn, permBusy && { opacity: 0.6 }]}
+                onPress={handleApplyPermission}
+                disabled={permBusy}
+                activeOpacity={0.85}
+              >
+                {permBusy
+                  ? <ActivityIndicator color="#fff" />
+                  : <Text style={styles.saveBtnText}>Submit for Approval</Text>}
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {permissions.length === 0 ? (
+            <Text style={styles.empty}>No permission requests this month.</Text>
+          ) : (
+            permissions.map(p => (
+              <View key={p.id} style={styles.permRow}>
+                <View style={styles.permRowMain}>
+                  <Text style={styles.permRowTitle}>
+                    {dateDMY(p.permission_date)} · {clock12(p.start_time.slice(0, 5))} – {clock12(p.end_time.slice(0, 5))}
+                  </Text>
+                  <Text style={styles.permRowSub}>
+                    {minutesToHours(Number(p.minutes))}
+                    {p.reason ? ` · ${p.reason}` : ''}
+                    {p.status === 'rejected' && p.review_notes ? ` · ${p.review_notes}` : ''}
+                  </Text>
+                </View>
+                <View style={styles.permRowRight}>
+                  <Text
+                    style={[
+                      styles.permStatus,
+                      p.status === 'approved' && { color: colors.greenText },
+                      p.status === 'pending' && { color: '#fbbf24' },
+                      p.status === 'rejected' && { color: colors.redText },
+                    ]}
+                  >
+                    {p.status}
+                  </Text>
+                  {p.status === 'pending' && (
+                    <TouchableOpacity onPress={() => handleCancelPermission(p)}>
+                      <Text style={styles.permCancel}>Withdraw</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              </View>
+            ))
+          )}
+        </View>
 
         {/* Daily Work Update */}
         <View style={[styles.card, { marginTop: 20 }]}>
@@ -755,7 +1144,16 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
                 </View>
                 <Text style={[styles.histCell, styles.colTime]}>{timeOnly(r.clock_in_utc)}</Text>
                 <Text style={[styles.histCell, styles.colTime]}>{timeOnly(r.clock_out_utc)}</Text>
-                <Text style={[styles.histCell, styles.colHrs, styles.histHrs]}>{minutesToHours(r.total_minutes)}</Text>
+                <View style={styles.colHrsWrap}>
+                  <Text style={[styles.histCell, styles.histHrs]}>
+                    {minutesToHours(r.credited_minutes ?? r.total_minutes)}
+                  </Text>
+                  {!!r.permission_minutes && (
+                    <Text style={styles.histPermission}>
+                      +{minutesToHours(Number(r.permission_minutes))} P
+                    </Text>
+                  )}
+                </View>
               </View>
             ))
           )}
@@ -835,9 +1233,51 @@ const styles = StyleSheet.create({
   colDate: { flex: 1.4 },
   colTime: { flex: 1, textAlign: 'left' },
   colHrs: { flex: 1, textAlign: 'right' },
+  colHrsWrap: { flex: 1, alignItems: 'flex-end' },
   histDate: { color: colors.text, fontSize: 13, fontWeight: '600' },
   histStatus: { fontSize: 12, marginTop: 2, textTransform: 'lowercase' },
   histCell: { color: colors.textLabel, fontSize: 13 },
   histHrs: { color: colors.text, fontWeight: '700' },
+  histPermission: { color: colors.accent, fontSize: 11, marginTop: 2 },
   empty: { color: colors.textMuted, fontSize: 14, paddingVertical: 12 },
+
+  // --- Permission hours ------------------------------------------------------
+  permissionNote: { color: colors.accent, fontSize: 12, marginTop: 10 },
+  permHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 },
+  permHeaderText: { flex: 1 },
+  permSubtitle: { color: colors.textMuted, fontSize: 12, marginTop: -8, marginBottom: 14, lineHeight: 17 },
+  permApplyBtn: { backgroundColor: colors.brand, borderRadius: 10, paddingVertical: 8, paddingHorizontal: 16 },
+  permApplyText: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  permForm: { marginTop: 16, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 14 },
+  permFieldLabel: { color: colors.textLabel, fontSize: 13, fontWeight: '600', marginBottom: 6 },
+  permInput: {
+    borderWidth: 1,
+    borderColor: colors.borderInput,
+    backgroundColor: colors.bg,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    color: colors.text,
+    fontSize: 15,
+    marginBottom: 12,
+  },
+  permReasonInput: { minHeight: 64 },
+  permTimeRow: { flexDirection: 'row', gap: 12 },
+  permTimeCol: { flex: 1 },
+  permDuration: { color: colors.textLabel, fontSize: 13, marginBottom: 12 },
+  permRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  permRowMain: { flex: 1 },
+  permRowTitle: { color: colors.text, fontSize: 13, fontWeight: '600' },
+  permRowSub: { color: colors.textMuted, fontSize: 12, marginTop: 3, lineHeight: 16 },
+  permRowRight: { alignItems: 'flex-end' },
+  permStatus: { fontSize: 12, fontWeight: '700', textTransform: 'lowercase', color: colors.textMuted },
+  permCancel: { color: colors.redText, fontSize: 12, marginTop: 4 },
 });

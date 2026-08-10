@@ -1,12 +1,41 @@
 import { formatInTimeZone, fromZonedTime } from 'date-fns-tz';
-import { TIMEZONE } from './constants';
+import { TIMEZONE, WORK_DAY_START_HOUR } from './constants';
+
+const hh = (h: number) => String(h).padStart(2, '0');
 
 /**
- * Returns today's calendar date in the app timezone (IST by default) as a
- * YYYY-MM-DD string. Used as the `work_date` value for attendance records.
+ * The work date (YYYY-MM-DD, app timezone) an instant belongs to.
+ *
+ * The day turns over at WORK_DAY_START_HOUR, not midnight. Anything before that
+ * hour still counts towards the PREVIOUS day, so a night that runs 22:00 → 05:00
+ * is one work day rather than two half-days split at midnight.
+ *
+ * Implemented by sliding the instant back by the boundary hour and then reading
+ * off the calendar date, which keeps it correct across DST-free IST without any
+ * special cases.
  */
-export function getWorkDateIST(): string {
-  return formatInTimeZone(new Date(), TIMEZONE, 'yyyy-MM-dd');
+export function getWorkDateIST(at: Date = new Date()): string {
+  const shifted = new Date(at.getTime() - WORK_DAY_START_HOUR * 60 * 60 * 1000);
+  return formatInTimeZone(shifted, TIMEZONE, 'yyyy-MM-dd');
+}
+
+/** UTC instant at which a work day begins (WORK_DAY_START_HOUR on that date). */
+export function workDayStartUtc(workDate: string): Date {
+  return fromZonedTime(`${workDate}T${hh(WORK_DAY_START_HOUR)}:00:00`, TIMEZONE);
+}
+
+/** UTC instant at which a work day ends — the next day's boundary. */
+export function workDayEndUtc(workDate: string): Date {
+  const next = new Date(`${workDate}T00:00:00Z`);
+  next.setUTCDate(next.getUTCDate() + 1);
+  return workDayStartUtc(next.toISOString().slice(0, 10));
+}
+
+/** The work date immediately before the given one. */
+export function previousWorkDate(workDate: string = getWorkDateIST()): string {
+  const d = new Date(`${workDate}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
 }
 
 /**

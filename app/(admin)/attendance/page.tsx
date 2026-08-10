@@ -78,9 +78,14 @@ export default function AttendancePage() {
 
   const editMutation = useMutation({
     mutationFn: async ({ id, values }: { id: number; values: EditForm }) => {
-      const body: Record<string, unknown> = { status: values.status, notes: values.notes };
-      if (values.clock_in_utc) body.clock_in_utc = istInputToUtcISO(values.clock_in_utc);
-      if (values.clock_out_utc) body.clock_out_utc = istInputToUtcISO(values.clock_out_utc);
+      // Send the time fields even when blanked, as an explicit null — otherwise
+      // clearing a wrongly-recorded clock-out silently kept the old value.
+      const body: Record<string, unknown> = {
+        status: values.status,
+        notes: values.notes,
+        clock_in_utc: values.clock_in_utc ? istInputToUtcISO(values.clock_in_utc) : null,
+        clock_out_utc: values.clock_out_utc ? istInputToUtcISO(values.clock_out_utc) : null,
+      };
       const res = await fetch(`/api/attendance/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -146,8 +151,34 @@ export default function AttendancePage() {
                 key: 'total_minutes',
                 header: 'Hours',
                 render: r => {
-                  const m = (r as AttRow).total_minutes;
-                  return m != null ? `${Math.floor(m / 60)}h ${m % 60}m` : '—';
+                  const row = r as AttRow;
+                  // Approved permission hours top the worked time back up to
+                  // the shift length; show what was actually clocked beneath.
+                  // On a multi-session day still in progress, total_minutes is
+                  // NULL — banked_minutes holds the finished sessions.
+                  const banked = Number(row.banked_minutes ?? 0);
+                  const worked = row.total_minutes ?? (banked > 0 ? banked : null);
+                  const credited = row.credited_minutes ?? worked;
+                  if (credited == null) return '—';
+                  const permission = Number(row.permission_minutes ?? 0);
+                  const sessions = Number(row.session_count ?? 1);
+                  const inProgress = row.total_minutes == null && banked > 0;
+                  return (
+                    <div>
+                      <p className="text-slate-800 dark:text-slate-200">
+                        {`${Math.floor(credited / 60)}h ${credited % 60}m`}
+                        {inProgress && <span className="text-xs text-slate-400"> so far</span>}
+                      </p>
+                      {permission > 0 && (
+                        <p className="text-xs text-blue-600 dark:text-blue-400">
+                          {`${Math.floor((worked ?? 0) / 60)}h ${(worked ?? 0) % 60}m worked + ${Math.floor(permission / 60)}h ${permission % 60}m permission`}
+                        </p>
+                      )}
+                      {sessions > 1 && (
+                        <p className="text-xs text-slate-400">{sessions} sessions</p>
+                      )}
+                    </div>
+                  );
                 },
               },
               {
@@ -196,7 +227,9 @@ export default function AttendancePage() {
             </div>
 
             <Input label="Clock In (IST)" type="datetime-local" {...editForm.register('clock_in_utc')} />
-            <Input label="Clock Out (IST)" type="datetime-local" {...editForm.register('clock_out_utc')} />
+            <Input label="Clock Out (IST)" type="datetime-local"
+              helper="Clearing this reopens the day — the employee shows as still clocked in"
+              {...editForm.register('clock_out_utc')} />
 
             <div className="flex flex-col gap-1">
               <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Status</label>

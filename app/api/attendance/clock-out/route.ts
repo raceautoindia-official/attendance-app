@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
+import { assessLocation } from '@/lib/locationTrust';
+import { checkDevice } from '@/lib/deviceBinding';
 import { requireAuth } from '@/lib/auth';
 import {
   getWorkDateIST,
@@ -21,6 +23,8 @@ const ClockOutSchema = z.object({
   // location kept off through all warnings) rather than a button tap.
   auto: z.boolean().optional(),
   reason: z.enum(['geofence_exit', 'location_off']).optional(),
+  is_mocked: z.boolean().optional(),
+  accuracy_m: z.number().nullable().optional(),
 }).refine(
   // Coordinates are mandatory for manual clock-outs; only the automatic
   // location-off path may omit them (location is off — no fix exists).
@@ -87,6 +91,29 @@ export async function POST(request: NextRequest) {
   const lng = parsed.data.longitude ?? null;
   const workDate = getWorkDateIST();
   const ip = getClientIp(request);
+
+  // An unrecognised device is RECORDED on clock-out, not refused.
+  //
+  // Refusing looked right at first, but the reasoning does not hold: reaching
+  // this endpoint at all requires that employee's own access token, so a
+  // "wrong device" here is not someone impersonating them — it is almost always
+  // their own reinstalled or replaced phone. Blocking it strands the open
+  // session until an admin intervenes. And clocking OUT early only shortens
+  // their own day; the fraud worth stopping is clocking IN from somewhere they
+  // are not, which is refused.
+  await checkDevice(auth.id, request, { action: 'clock_out', ip });
+
+  // Doubtful coordinates are RECORDED here but do not block the clock-out.
+  // Refusing would leave the session open until the midnight sweep closed it,
+  // which costs the employee real hours — a worse outcome than the fake
+  // location it would prevent. The audit entry is what the admin acts on.
+  if (lat != null && lng != null) {
+    await assessLocation(
+      auth.id,
+      { latitude: lat, longitude: lng, is_mocked: parsed.data.is_mocked, accuracy_m: parsed.data.accuracy_m },
+      { action: 'clock_out', ip },
+    );
+  }
 
   // 2. Find the employee's open (clocked-in but not yet clocked-out) session.
   //    We deliberately do NOT filter by a.work_date = today: if the server's
@@ -204,11 +231,14 @@ export async function POST(request: NextRequest) {
     entity_id: record.id,
     performed_by: auth.id,
     details: {
+      employee_id: auth.id,
       work_date: workDate,
       total_minutes: updated?.total_minutes ?? totalMinutes,
       status: newStatus,
       auto: parsed.data.auto === true,
       reason: parsed.data.reason ?? null,
+      latitude: lat,
+      longitude: lng,
     },
     ip_address: ip,
   });

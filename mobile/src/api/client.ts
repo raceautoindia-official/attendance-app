@@ -1,3 +1,5 @@
+import { Platform } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
 import { API_BASE_URL } from '../config';
 import {
   getAccessToken,
@@ -10,6 +12,31 @@ export class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Per-install device identifier.
+//
+// Generated once and kept in secure storage, so it survives app restarts but
+// not a reinstall (after which an admin re-registers the device). The server
+// binds an employee to the first device it sees — see lib/deviceBinding.ts.
+// ---------------------------------------------------------------------------
+const DEVICE_ID_KEY = 'device_id';
+let cachedDeviceId: string | null = null;
+
+/** An identifier, not a secret — it names the install, it does not authorise it. */
+function newDeviceId(): string {
+  const rand = () => Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
+  return `${Date.now().toString(16)}-${rand()}-${rand()}-${rand()}`;
+}
+
+export async function getDeviceId(): Promise<string> {
+  if (cachedDeviceId) return cachedDeviceId;
+  const stored = await SecureStore.getItemAsync(DEVICE_ID_KEY).catch(() => null);
+  const id = stored ?? newDeviceId();
+  if (!stored) await SecureStore.setItemAsync(DEVICE_ID_KEY, id).catch(() => {});
+  cachedDeviceId = id;
+  return id;
 }
 
 // Deduplicate concurrent refreshes (foreground + background task may overlap).
@@ -56,6 +83,7 @@ export async function apiFetch<T = unknown>(
 ): Promise<T> {
   const send = async () => {
     const token = await getAccessToken();
+    const deviceId = await getDeviceId();
     return fetch(`${API_BASE_URL}${path}`, {
       method,
       headers: {
@@ -63,6 +91,11 @@ export async function apiFetch<T = unknown>(
         // Declares this client as mobile so the attendance routes (which are
         // mobile-only for employees) accept clock-in / clock-out.
         'sec-ch-ua-mobile': '?1',
+        // Identifies THIS install. The server binds an employee to the first
+        // device it sees and refuses others, so a desktop copying the header
+        // above still cannot mark attendance. See lib/deviceBinding.ts.
+        'x-device-id': deviceId,
+        'x-device-platform': Platform.OS,
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: body != null ? JSON.stringify(body) : undefined,

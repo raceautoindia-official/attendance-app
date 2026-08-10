@@ -1,9 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { sendLiveTrackingAlert, sendGeofenceAutoClockoutAlert } from '@/lib/mailer';
-import { haversineDistance } from '@/lib/geo';
-import { hasWorkModeColumns, hasSessionColumns } from '@/lib/employeeDetails';
+import {
+  hasWorkModeColumns,
+  hasSessionColumns,
+  hasLiveTrackingColumn,
+} from '@/lib/employeeDetails';
 import { toMySQLDatetime } from '@/lib/attendance';
+import { activeOnDuty, hasOnDutyColumn } from '@/lib/permissions';
+import { formatInTimeZone } from 'date-fns-tz';
+import { TIMEZONE } from '@/lib/constants';
 
 interface StaleSessionRow {
   session_id: number;
@@ -13,37 +19,71 @@ interface StaleSessionRow {
   last_ping_utc: Date | null;
 }
 
-// On-site employees who stay outside their geofence this long while clocked in
-// are automatically clocked out and admins are alerted.
-const OUTSIDE_LIMIT_MIN = 30;
+// An on-site employee must keep PROVING they are inside their fence. Once this
+// long has passed without a single fix placing them inside, the session is
+// closed and credited only up to the last moment their presence was confirmed.
+//
+// This deliberately covers the silent case as well as the obvious one: a phone
+// that stops reporting (app force-stopped, battery pulled, tracking switched
+// off) proves nothing, and used to mean the session simply stayed open until
+// midnight credited a whole shift. Absence of evidence is now treated as
+// absence, not as attendance.
+const OUTSIDE_LIMIT_MIN = Number(process.env.GEOFENCE_PRESENCE_GRACE_MIN) || 30;
 // Fences are enforced with at least this radius (matches clock-in).
 const MIN_FENCE_RADIUS_M = 200;
-// GPS fixes worse than this cannot prove someone is outside.
-const MAX_FIX_ACCURACY_M = 200;
+// A fuzzy fix should not be able to "prove" presence from an arbitrary
+// distance, so the benefit of the doubt given to its accuracy is capped here.
+const MAX_ACCURACY_ALLOWANCE_M = 500;
 
 interface GeofenceCandidateRow {
   attendance_id: number;
   employee_id: number;
   employee_name: string;
   emp_id: string;
+  clock_in_utc: Date;
   loc_name: string | null;
   loc_lat: number;
   loc_lng: number;
   loc_radius: number;
 }
 
-interface RecentPointRow {
-  latitude: number;
-  longitude: number;
-  accuracy_meters: number | null;
-  tracked_at_utc: Date;
+/** Last moment a fix placed this employee inside their fence, or null. */
+async function lastConfirmedInside(
+  c: GeofenceCandidateRow,
+  fence: number,
+): Promise<{ tracked_at_utc: Date; latitude: number; longitude: number } | null> {
+  // Haversine in SQL so only the single most recent qualifying fix comes back —
+  // a full shift can hold thousands of points. A fix counts as inside when it
+  // lands within the fence once its own accuracy is allowed for (capped, so a
+  // wildly imprecise fix cannot vouch for someone from far away).
+  return queryOne<{ tracked_at_utc: Date; latitude: number; longitude: number }>(
+    `SELECT tracked_at_utc, latitude, longitude
+     FROM live_tracking_points
+     WHERE employee_id = ?
+       AND tracked_at_utc >= ?
+       AND (6371000 * 2 * ASIN(SQRT(
+             POWER(SIN(RADIANS(latitude - ?) / 2), 2) +
+             COS(RADIANS(?)) * COS(RADIANS(latitude)) *
+             POWER(SIN(RADIANS(longitude - ?) / 2), 2)
+           ))) <= ? + LEAST(COALESCE(accuracy_meters, 0), ?)
+     ORDER BY tracked_at_utc DESC
+     LIMIT 1`,
+    [
+      c.employee_id,
+      toMySQLDatetime(new Date(c.clock_in_utc)),
+      c.loc_lat, c.loc_lat, c.loc_lng,
+      fence, MAX_ACCURACY_ALLOWANCE_M,
+    ],
+  );
 }
 
-// Auto clock-out employees who have provably been outside their fence for the
-// whole OUTSIDE_LIMIT_MIN window. Returns how many were clocked out.
+// Close any on-site session whose presence inside the fence has not been
+// confirmed for OUTSIDE_LIMIT_MIN, crediting only up to the last confirmed
+// moment. Returns how many were clocked out.
 async function runGeofenceWatchdog(adminEmails: string[]): Promise<number> {
   if (!(await hasWorkModeColumns())) return 0;
   const sessionCols = await hasSessionColumns();
+  const trackingCol = await hasLiveTrackingColumn();
 
   const candidates = await query<GeofenceCandidateRow>(
     `SELECT
@@ -51,6 +91,7 @@ async function runGeofenceWatchdog(adminEmails: string[]): Promise<number> {
        a.employee_id,
        e.name AS employee_name,
        e.emp_id,
+       a.clock_in_utc,
        l.name AS loc_name,
        l.latitude  AS loc_lat,
        l.longitude AS loc_lng,
@@ -70,37 +111,40 @@ async function runGeofenceWatchdog(adminEmails: string[]): Promise<number> {
      JOIN locations l ON l.id = es.location_id AND l.is_active = TRUE
      WHERE a.clock_in_utc IS NOT NULL
        AND a.clock_out_utc IS NULL
+       -- Never judge an employee whose tracking the ADMIN switched off: their
+       -- phone is not meant to report, so silence is not their doing.
+       ${trackingCol ? 'AND e.live_tracking_enabled = TRUE' : ''}
        AND a.clock_in_utc <= DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? MINUTE)`,
     [OUTSIDE_LIMIT_MIN],
   );
 
+  const onDutyAvailable = await hasOnDutyColumn();
+
   let clockedOut = 0;
   for (const c of candidates) {
-    // Points from a bit more than the limit window, reliable fixes only.
-    const points = await query<RecentPointRow>(
-      `SELECT latitude, longitude, accuracy_meters, tracked_at_utc
-       FROM live_tracking_points
-       WHERE employee_id = ?
-         AND tracked_at_utc >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? MINUTE)
-         AND (accuracy_meters IS NULL OR accuracy_meters <= ?)
-       ORDER BY tracked_at_utc ASC`,
-      [c.employee_id, OUTSIDE_LIMIT_MIN + 5, MAX_FIX_ACCURACY_M],
-    );
-    if (points.length < 2) continue; // not enough signal to judge
+    // Approved OUT-OF-OFFICE DUTY: the employee is working away from the site
+    // with an admin's blessing, so being outside the fence is expected and must
+    // NOT end their day.
+    if (onDutyAvailable) {
+      const workDate = formatInTimeZone(new Date(), TIMEZONE, 'yyyy-MM-dd');
+      const nowTime = formatInTimeZone(new Date(), TIMEZONE, 'HH:mm:ss');
+      if (await activeOnDuty(c.employee_id, workDate, nowTime)) continue;
+    }
 
     const fence = Math.max(Number(c.loc_radius ?? 100), MIN_FENCE_RADIUS_M);
-    const isOutside = (p: RecentPointRow) =>
-      haversineDistance(Number(p.latitude), Number(p.longitude), Number(c.loc_lat), Number(c.loc_lng)) >
-      fence + Math.min(Number(p.accuracy_meters ?? 0), 100);
+    const inside = await lastConfirmedInside(c, fence);
 
-    const anyInside = points.some(p => !isOutside(p));
-    if (anyInside) continue; // they were (or came back) inside within the window
-    const earliestMs = new Date(points[0].tracked_at_utc).getTime();
-    if (Date.now() - earliestMs < OUTSIDE_LIMIT_MIN * 60_000) continue; // streak too short
+    // Clock-in itself verified the fence, so that instant is the earliest
+    // presence we can stand behind when no fix has done so since.
+    const confirmedAt = inside ? new Date(inside.tracked_at_utc) : new Date(c.clock_in_utc);
+    const silentMs = Date.now() - confirmedAt.getTime();
+    if (silentMs < OUTSIDE_LIMIT_MIN * 60_000) continue; // still vouched for
 
-    const last = points[points.length - 1];
-    const nowSql = toMySQLDatetime(new Date());
+    const reason = inside ? 'left_the_fence' : 'presence_never_confirmed';
+    const closeAt = toMySQLDatetime(confirmedAt);
     const bankedExpr = sessionCols ? 'banked_minutes + ' : '';
+    // Credit stops at the last confirmed presence — NOT at "now", which would
+    // pay for the whole unverified stretch, and not a flat shift.
     await query(
       `UPDATE attendance
        SET clock_out_utc = ?,
@@ -108,7 +152,7 @@ async function runGeofenceWatchdog(adminEmails: string[]): Promise<number> {
            clock_out_lng = ?,
            total_minutes = ${bankedExpr}GREATEST(0, TIMESTAMPDIFF(MINUTE, clock_in_utc, ?))
        WHERE id = ? AND clock_out_utc IS NULL`,
-      [nowSql, last.latitude, last.longitude, nowSql, c.attendance_id],
+      [closeAt, inside?.latitude ?? null, inside?.longitude ?? null, closeAt, c.attendance_id],
     );
     await query(
       `UPDATE live_tracking_sessions
@@ -125,8 +169,11 @@ async function runGeofenceWatchdog(adminEmails: string[]): Promise<number> {
         employee_id: c.employee_id,
         emp_id: c.emp_id,
         location: c.loc_name,
-        minutes_outside_threshold: OUTSIDE_LIMIT_MIN,
+        reason,
+        presence_grace_min: OUTSIDE_LIMIT_MIN,
         fence_radius_m: fence,
+        last_confirmed_inside: confirmedAt.toISOString(),
+        minutes_unconfirmed: Math.round(silentMs / 60_000),
       },
       ip_address: null,
     });
@@ -136,7 +183,7 @@ async function runGeofenceWatchdog(adminEmails: string[]): Promise<number> {
           employeeName: c.employee_name,
           empId: c.emp_id,
           locationName: c.loc_name,
-          minutesOutside: OUTSIDE_LIMIT_MIN,
+          minutesOutside: Math.round(silentMs / 60_000),
           detectedAt: new Date(),
         }),
       ),

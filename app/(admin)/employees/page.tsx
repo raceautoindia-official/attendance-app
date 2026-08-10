@@ -44,7 +44,9 @@ const empSchema = z.object({
   role: z.enum(['employee', 'manager', 'super_admin']),
   department: z.string().optional(),
   manager_id: z.preprocess(v => (v === '' || v === null || v === undefined) ? null : Number(v), z.number().int().positive().nullable().optional()),
-  pin: z.string().length(6, 'PIN must be 6 digits').regex(/^\d+$/, 'Numbers only'),
+  // The API (create, update and both login routes) accepts 4–6 digits — keep
+  // the form in step, otherwise a 4-digit PIN is rejected here for no reason.
+  pin: z.string().regex(/^\d{4,6}$/, 'PIN must be 4–6 digits'),
   shift_id: z.preprocess(v => (v === '' || v === null || v === undefined) ? null : Number(v), z.number().int().positive().nullable().optional()),
   location_id: z.preprocess(v => (v === '' || v === null || v === undefined) ? null : Number(v), z.number().int().positive().nullable().optional()),
   geofencing_enabled: z.boolean().optional(),
@@ -53,7 +55,8 @@ const empSchema = z.object({
 });
 
 const editSchema = empSchema.omit({ pin: true }).extend({
-  new_pin: z.string().length(6).regex(/^\d+$/).or(z.literal('')).optional(),
+  // Blank = keep the current PIN; otherwise 4–6 digits, matching the API.
+  new_pin: z.string().regex(/^\d{4,6}$/, 'PIN must be 4–6 digits').or(z.literal('')).optional(),
   work_mode: z.enum(['on_site', 'off_site']).optional(),
   allow_multiple_sessions: z.boolean().optional(),
   bank_account_name: z.string().max(100).optional(),
@@ -68,6 +71,14 @@ type EmpForm = z.infer<typeof empSchema>;
 type EditForm = z.infer<typeof editSchema>;
 
 const selectClass = 'block w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500';
+
+interface BoundDevice {
+  id: number;
+  device_id: string;
+  platform: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+}
 
 export default function EmployeesPage() {
   const qc = useQueryClient();
@@ -85,12 +96,17 @@ export default function EmployeesPage() {
       const params = new URLSearchParams({ page: String(page), limit: '25' });
       if (search) params.set('search', search);
       const res = await fetch(`/api/employees?${params}`);
-      return res.json() as Promise<ApiResponse<{ employees: EmpRow[]; pagination: { total: number; totalPages: number } }>>;
+      return res.json() as Promise<ApiResponse<{
+        employees: EmpRow[];
+        pagination: { total: number; totalPages: number };
+        unscheduled: { id: number; emp_id: string; name: string }[];
+      }>>;
     },
   });
 
   const employees = data?.data?.employees ?? [];
   const pagination = data?.data?.pagination;
+  const unscheduled = data?.data?.unscheduled ?? [];
 
   const { data: mgrData } = useQuery({
     queryKey: ['employees', 'managers'],
@@ -141,6 +157,26 @@ export default function EmployeesPage() {
       return json;
     },
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['employees'] }); setAddOpen(false); addForm.reset(); },
+  });
+
+  // Phone bound to the employee being edited — see lib/deviceBinding.ts.
+  const { data: deviceData, isLoading: devicesLoading } = useQuery({
+    queryKey: ['employee-devices', editTarget?.id],
+    enabled: !!editTarget,
+    queryFn: async () => {
+      const res = await fetch(`/api/employees/${editTarget!.id}/devices`);
+      return res.json() as Promise<ApiResponse<{ devices: BoundDevice[] }>>;
+    },
+  });
+  const devices = deviceData?.data?.devices ?? [];
+
+  const releaseDeviceMutation = useMutation({
+    mutationFn: async (employeeId: number) => {
+      const res = await fetch(`/api/employees/${employeeId}/devices`, { method: 'DELETE' });
+      const json = await res.json() as ApiResponse;
+      if (!json.success) throw new Error(json.error ?? 'Failed');
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['employee-devices'] }),
   });
 
   // Edit form
@@ -233,6 +269,31 @@ export default function EmployeesPage() {
 
   return (
     <div className="space-y-4">
+      {/* Absent marking derives working days from the assigned shift, so anyone
+          without a schedule is silently skipped by the nightly job. */}
+      {unscheduled.length > 0 && (
+        <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-900/20">
+          <svg className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-amber-800 dark:text-amber-300">
+              {unscheduled.length} active {unscheduled.length === 1 ? 'employee has' : 'employees have'} no shift assigned
+            </p>
+            <p className="mt-0.5 text-xs text-amber-700 dark:text-amber-400">
+              They will never be marked absent — the nightly job works out which days are working
+              days from the assigned shift, so it skips them entirely. Assign a shift under
+              Schedules, or from Edit on their row.
+            </p>
+            <p className="mt-1.5 text-xs text-amber-700 dark:text-amber-400">
+              {unscheduled.slice(0, 12).map(u => `${u.name} (${u.emp_id})`).join(', ')}
+              {unscheduled.length > 12 ? ` +${unscheduled.length - 12} more` : ''}
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Toolbar */}
       <div className="flex flex-col sm:flex-row gap-3">
         <Input
@@ -484,7 +545,7 @@ export default function EmployeesPage() {
             <input type="checkbox" {...addForm.register('live_tracking_enabled')} />
             Enable live tracking for this employee
           </label>
-          <Input label="Initial PIN (6 digits)" type="password" maxLength={6} inputMode="numeric"
+          <Input label="Initial PIN (4–6 digits)" type="password" maxLength={6} inputMode="numeric"
             autoComplete="new-password" {...addForm.register('pin')} error={addForm.formState.errors.pin?.message} />
 
           {addMutation.isError && (
@@ -568,7 +629,43 @@ export default function EmployeesPage() {
             </div>
 
             <Input label="New PIN (leave blank to keep)" type="password" maxLength={6} inputMode="numeric"
-              autoComplete="new-password" helper="Leave empty to keep current PIN" {...editForm.register('new_pin')} />
+              autoComplete="new-password" helper="Leave empty to keep the current PIN, or enter 4–6 digits to change it"
+              error={editForm.formState.errors.new_pin?.message}
+              {...editForm.register('new_pin')} />
+
+            {/* Attendance is tied to the first phone this employee used. A new
+                handset or a reinstall needs the old binding released, or they
+                cannot clock in at all. */}
+            <div className="rounded-lg border border-slate-200 dark:border-slate-700 p-3">
+              <p className="text-sm font-medium text-slate-700 dark:text-slate-300">Registered phone</p>
+              {devicesLoading ? (
+                <p className="text-xs text-slate-400 mt-1">Checking…</p>
+              ) : devices.length === 0 ? (
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                  None yet — the next phone used to clock in will be registered.
+                </p>
+              ) : (
+                <>
+                  <ul className="mt-1 space-y-0.5">
+                    {devices.map(d => (
+                      <li key={d.id} className="text-xs text-slate-500 dark:text-slate-400">
+                        {d.platform ?? 'device'} · last used {d.last_seen_at}
+                      </li>
+                    ))}
+                  </ul>
+                  <Button type="button" variant="secondary" className="mt-2"
+                    loading={releaseDeviceMutation.isPending}
+                    onClick={() => releaseDeviceMutation.mutate(editTarget.id)}>
+                    Release for a new phone
+                  </Button>
+                </>
+              )}
+              {releaseDeviceMutation.isSuccess && (
+                <p className="mt-1 text-xs text-green-600 dark:text-green-400">
+                  Released — the next phone they use will be registered.
+                </p>
+              )}
+            </div>
 
             {editMutation.isError && (
               <p className="text-sm text-red-500">{(editMutation.error as Error).message}</p>
