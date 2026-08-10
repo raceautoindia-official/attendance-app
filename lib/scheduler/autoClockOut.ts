@@ -3,8 +3,6 @@ import { markAbsentees } from '@/lib/markAbsent';
 import { markSundayHolidays } from '@/lib/markSundayHolidays';
 import { runLiveTrackingMonitor } from '@/lib/liveTrackingMonitor';
 import { getWorkDateIST, previousWorkDate } from '@/lib/attendance';
-import { formatInTimeZone } from 'date-fns-tz';
-import { TIMEZONE } from '@/lib/constants';
 
 // ---------------------------------------------------------------------------
 // In-app end-of-day scheduler. On a self-healing 15-minute sweep (plus a
@@ -58,11 +56,18 @@ let started = false;
 async function runMonitor(label: string): Promise<void> {
   try {
     const r = await runLiveTrackingMonitor();
+    // A sweep that finds nothing used to print nothing, which makes "running
+    // and idle" indistinguishable from "not running at all" — the exact doubt
+    // this job has already caused once. LIVE_MONITOR_VERBOSE logs every sweep
+    // so it can be watched during setup; off by default, because a line every
+    // couple of minutes would bury everything else.
     if (r.geofenceClockouts > 0 || r.count > 0) {
       console.log(
         `[live-monitor] ${label}: ${r.geofenceClockouts} away-from-site clock-out(s), ` +
         `${r.count} stale session(s), ${r.alertsSent} alert(s)`,
       );
+    } else if (process.env.LIVE_MONITOR_VERBOSE === 'true') {
+      console.log(`[live-monitor] ${label}: ran, nothing to do`);
     }
   } catch (err) {
     console.error(`[live-monitor] ${label}: failed (will retry next sweep)`, err);
