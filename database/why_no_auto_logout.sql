@@ -65,6 +65,14 @@ presence AS (
        FROM live_tracking_points p
       WHERE p.employee_id = os.employee_id
         AND p.tracked_at_utc >= os.clock_in_utc
+        -- Cheap box first. The allowance can never exceed the fence, so a point
+        -- more than two fences away in either direction cannot possibly qualify
+        -- — throwing those out with subtraction saves running the trigonometry
+        -- on a whole shift's worth of points.
+        AND p.latitude  BETWEEN os.loc_lat - (2 * os.fence / 111320)
+                            AND os.loc_lat + (2 * os.fence / 111320)
+        AND p.longitude BETWEEN os.loc_lng - (2 * os.fence / (111320 * COS(RADIANS(os.loc_lat))))
+                            AND os.loc_lng + (2 * os.fence / (111320 * COS(RADIANS(os.loc_lat))))
         AND (6371000 * 2 * ASIN(SQRT(
               POWER(SIN(RADIANS(p.latitude  - os.loc_lat) / 2), 2) +
               COS(RADIANS(os.loc_lat)) * COS(RADIANS(p.latitude)) *
@@ -184,5 +192,7 @@ SELECT created_at AS at_utc,
        JSON_EXTRACT(details, '$.minutes_unconfirmed')               AS min_unconfirmed
 FROM audit_log
 WHERE action = 'geofence_auto_clockout'
+  -- Bounded so this cannot walk the whole audit log on a busy database.
+  AND created_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 DAY)
 ORDER BY created_at DESC
 LIMIT 10;
