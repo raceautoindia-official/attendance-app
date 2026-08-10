@@ -81,6 +81,7 @@ ship.
 | `locationwarnings.js` | location off → exactly 4 warnings, spaced, then an automatic clock-out; and the paths that actually deliver them |
 | `deadlocation.js` | a deactivated work location fences nobody — clock-in refuses as a misconfiguration rather than measuring against stale coordinates |
 | `whynologout.js` | the `why_no_auto_logout.sql` diagnostic agrees with the watchdog, gate by gate |
+| `enablerollout.js` | `enable_auto_logout.sql` is a dry run until told otherwise, and never arms a phone that is not reporting — the mistake that would have cost six people about seven hours each |
 
 ## Writing another one
 
