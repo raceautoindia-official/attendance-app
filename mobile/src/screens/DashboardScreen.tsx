@@ -498,6 +498,11 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         loadToday();
         ensureTracking();
         fetchPos();
+        // Check location health straight away rather than waiting up to a
+        // minute for the interval. Android throttles the background task hard,
+        // so opening the app is often the first reliable chance to notice that
+        // location has been off — and to deliver the warning for it.
+        void checkLocationAndWarn();
       }
     });
     return () => {
