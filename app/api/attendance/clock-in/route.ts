@@ -344,7 +344,22 @@ export async function POST(request: NextRequest) {
       ? ', banked_minutes = ?, session_count = session_count + ?'
       : '';
     const sessionParams = sessionCols ? [bankedMinutes, completedToday ? 1 : 0] : [];
-    await query(
+    // The duplicate-clock-in check earlier is a SEPARATE statement, so two
+    // requests can both pass it before either one writes — a phone retrying a
+    // slow request is enough to arrange that. Unguarded, the second UPDATE
+    // re-opens a session that is already open: two clock-ins with no clock-out
+    // between them, session_count counting one more session than happened, and
+    // the minutes between the two lost, because banked_minutes is overwritten
+    // with the same stale figure both times. Production has a day shaped
+    // exactly like that.
+    //
+    // Re-stating the precondition in the WHERE makes the write itself the
+    // arbiter: whichever request lands second matches no rows and is told it is
+    // already clocked in, which is true by then.
+    const raceGuard = completedToday
+      ? 'AND clock_out_utc IS NOT NULL' // re-opening a finished day
+      : 'AND clock_in_utc IS NULL';     // converting an absent/leave/holiday row
+    const updated = await query(
       `UPDATE attendance
        SET clock_in_utc    = ?,
            clock_in_lat    = ?,
@@ -356,9 +371,15 @@ export async function POST(request: NextRequest) {
            clock_out_utc   = NULL,
            total_minutes   = NULL
            ${sessionSet}
-       WHERE id = ?`,
+       WHERE id = ? ${raceGuard}`,
       [toMySQLDatetime(nowUtc), lat, lng, ip, geofenceStatus, authMethod, effectiveStatus, ...sessionParams, existing.id],
     );
+    if ((updated as unknown as { affectedRows: number }).affectedRows === 0) {
+      return NextResponse.json<ApiResponse>(
+        { success: false, error: 'Already clocked in' },
+        { status: 409 },
+      );
+    }
     insertId = existing.id;
   } else {
     const result = await query<{ insertId: number }>(
