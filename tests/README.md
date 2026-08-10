@@ -58,10 +58,15 @@ sets that up too. Nothing about the day itself is.
 Plants a situation the server must act on, then **touches nothing**:
 
 ```bash
-node tests/wiringcheck.js seed     # before starting the server
-# start the server, call no endpoints
-node tests/wiringcheck.js verify   # ~25s later
+TEST_EMPLOYEE_ID=<id> node tests/wiringcheck.js seed
+# start the server, wait ~60s, call no endpoints
+TEST_EMPLOYEE_ID=<id> node tests/wiringcheck.js verify
 ```
+
+It writes **real attendance** for that employee, so there is no default id —
+name a test account explicitly. It refuses to run against someone who is
+clocked in right now, snapshots their schedule before touching anything, and
+restores it during `verify` whatever the verdict.
 
 If the row changed, a scheduler really runs the work. This fails loudly when
 logic is correct but wired to nothing — the exact gap that let a dead feature
