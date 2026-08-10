@@ -28,8 +28,14 @@ export default function RegisterPasskeyPage() {
     mounted &&
     !window.PublicKeyCredential;
 
+  // Arrived straight from the login screen with a verified PIN but no passkey
+  // yet, rather than from inside an existing session. Read it off the URL
+  // rather than useSearchParams so the page needs no Suspense boundary.
+  const [setupMode, setSetupMode] = useState(false);
+
   useEffect(() => {
     setStoredUser(getStoredUser());
+    setSetupMode(new URLSearchParams(window.location.search).get('setup') === '1');
     setMounted(true);
   }, []);
 
@@ -75,8 +81,15 @@ export default function RegisterPasskeyPage() {
       if (!verJson.success) throw new Error(verJson.error ?? 'Registration failed');
 
       setState('success');
-      setMessage('Passkey registered successfully! You can now sign in with your passkey.');
-      setTimeout(() => router.push(skipDest), 2000);
+      if (setupMode) {
+        // There is no session yet — the PIN got them this far. Send them back
+        // to sign in properly, now that they have a passkey to do it with.
+        setMessage('Passkey registered. Sign in with your PIN and passkey to continue.');
+        setTimeout(() => router.push('/login'), 2000);
+      } else {
+        setMessage('Passkey registered successfully! You can now sign in with your passkey.');
+        setTimeout(() => router.push(skipDest), 2000);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Registration failed';
       const host = typeof window !== 'undefined' ? window.location.hostname : '';

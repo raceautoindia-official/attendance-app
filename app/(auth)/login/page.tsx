@@ -103,8 +103,12 @@ export default function LoginPage() {
 
       const data = json.data;
 
+      // The PIN was accepted but this account has no passkey yet. The server
+      // has issued a short-lived pending-auth cookie, so send them straight to
+      // enrolment rather than telling them to contact an administrator — which
+      // is a dead end when the person locked out is the administrator.
       if (data?.requiresPasskeySetup) {
-        setError('Passkey setup required. Please contact your administrator to grant initial access.');
+        router.push('/register-passkey?setup=1');
         return;
       }
 

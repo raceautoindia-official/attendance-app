@@ -212,8 +212,26 @@ export async function POST(request: NextRequest) {
     return res;
   }
 
-  // Case C — no passkeys, no exemption: must enroll first
-  return NextResponse.json<ApiResponse<{ requiresPasskeySetup: true }>>(
-    { success: true, data: { requiresPasskeySetup: true } },
+  // Case C — no passkeys, no exemption: enrol one now.
+  //
+  // The PIN has just been verified, so hand out the same pending-auth cookie
+  // Case A uses. It is the only way an account in this state can ever obtain a
+  // passkey: enrolling needs a token, a token needs a passkey. Previously this
+  // answered with a bare flag and the login screen dead-ended on "contact your
+  // administrator" — which is unhelpful when the person locked out IS the
+  // administrator.
+  const res = NextResponse.json<ApiResponse<{ requiresPasskeySetup: true; emp_id: string }>>(
+    { success: true, data: { requiresPasskeySetup: true, emp_id: employee.emp_id } },
   );
+  setPendingAuthCookie(res, employee.emp_id);
+
+  await insertAuditLog({
+    action: 'login_pin_ok_awaiting_passkey_enrolment',
+    entity: 'auth',
+    entity_id: employee.id,
+    performed_by: employee.id,
+    ip_address: ip,
+  });
+
+  return res;
 }

@@ -300,6 +300,45 @@ export async function currentTokenVersion(employeeId: number): Promise<number> {
   return Number(row?.token_version ?? 0);
 }
 
+/**
+ * Authorise a passkey ENROLMENT request.
+ *
+ * Normally this needs a full access token, like everything else. It ALSO
+ * accepts the pending-auth cookie — proof that the PIN was verified moments
+ * ago — but only for an employee who has no passkey yet.
+ *
+ * Without that exception the first passkey can never be obtained: enrolling
+ * requires a token, and getting a token requires either a passkey or an
+ * exemption. An account with neither is simply bricked, and if it is the only
+ * administrator nobody can grant the exemption either.
+ *
+ * The "no passkey yet" restriction is what keeps this safe. Once an employee
+ * HAS a passkey it is a genuine second factor, and somebody holding only the
+ * PIN must not be able to add another one alongside it.
+ */
+export async function requireEnrolmentAuth(
+  request: NextRequest,
+): Promise<{ id: number; emp_id: string; role: Role } | NextResponse> {
+  const full = await requireAuth(request);
+  if (!(full instanceof NextResponse)) return full;
+
+  const pendingEmpId = getPendingAuthFromRequest(request);
+  if (pendingEmpId) {
+    const row = await queryOne<{ id: number; emp_id: string; role: Role; passkeys: number }>(
+      `SELECT e.id, e.emp_id, e.role,
+              (SELECT COUNT(*) FROM passkeys p WHERE p.employee_id = e.id) AS passkeys
+       FROM employees e
+       WHERE e.emp_id = ? AND e.is_active = TRUE`,
+      [pendingEmpId],
+    );
+    if (row && Number(row.passkeys) === 0) {
+      return { id: row.id, emp_id: row.emp_id, role: row.role };
+    }
+  }
+
+  return full;   // the 401/403 requireAuth already built
+}
+
 /** Invalidate every access token already issued to this employee. */
 export async function revokeTokens(employeeId: number): Promise<void> {
   if (!(await hasTokenVersionColumn())) return;
