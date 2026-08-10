@@ -1,6 +1,7 @@
 import { closeOpenSessions } from '@/lib/closeSessions';
 import { markAbsentees } from '@/lib/markAbsent';
 import { markSundayHolidays } from '@/lib/markSundayHolidays';
+import { runLiveTrackingMonitor } from '@/lib/liveTrackingMonitor';
 import { getWorkDateIST, previousWorkDate } from '@/lib/attendance';
 import { formatInTimeZone } from 'date-fns-tz';
 import { TIMEZONE } from '@/lib/constants';
@@ -19,15 +20,54 @@ import { TIMEZONE } from '@/lib/constants';
 //   2. MARK ABSENT — employees who had a scheduled working day on the work day
 //      that just finished, but no attendance and no leave, are marked absent.
 //
+//   3. LIVE MONITOR — on its own faster timer: auto clock-out for anyone whose
+//      presence inside their fence has not been confirmed for the grace period,
+//      and admin alerts for a phone that has gone silent (runMonitor).
+//
 // Using a periodic sweep instead of one fragile "fire at 07:00" timer means a
 // server restart near the boundary or a transient DB error can't make it miss —
 // the next sweep self-heals. No external crontab is required.
 // ---------------------------------------------------------------------------
 
-const SWEEP_INTERVAL_MS = 15 * 60 * 1000; // every 15 minutes
+const SWEEP_INTERVAL_MS = 15 * 60 * 1000; // end-of-day work: every 15 minutes
 const STARTUP_DELAY_MS = 10_000;          // brief delay so startup isn't blocked
 
+/**
+ * The live-tracking sweep runs on its OWN, faster timer.
+ *
+ * Its job is timely detection — someone who left the site, or a phone that
+ * stopped reporting — so tying it to the 15-minute end-of-day cadence would add
+ * up to a quarter of an hour of avoidable delay on top of the grace period it
+ * already applies. The queries are small and indexed, so a short interval is
+ * cheap. Override with LIVE_MONITOR_INTERVAL_MIN.
+ */
+const MONITOR_INTERVAL_MS =
+  Math.max(1, Number(process.env.LIVE_MONITOR_INTERVAL_MIN) || 3) * 60 * 1000;
+
 let started = false;
+
+/**
+ * Auto clock-out for being away from the work site, plus alerts for a phone
+ * that has gone silent.
+ *
+ * This used to run ONLY from /api/cron/live-tracking-monitor, so on a server
+ * with no external crontab — or with CRON_SECRET unset, where that endpoint
+ * rejects every request — it never ran at all, and nobody was ever clocked out
+ * for leaving the fence. It runs in-process now, like the end-of-day jobs.
+ */
+async function runMonitor(label: string): Promise<void> {
+  try {
+    const r = await runLiveTrackingMonitor();
+    if (r.geofenceClockouts > 0 || r.count > 0) {
+      console.log(
+        `[live-monitor] ${label}: ${r.geofenceClockouts} away-from-site clock-out(s), ` +
+        `${r.count} stale session(s), ${r.alertsSent} alert(s)`,
+      );
+    }
+  } catch (err) {
+    console.error(`[live-monitor] ${label}: failed (will retry next sweep)`, err);
+  }
+}
 
 function lastCompletedWorkDate(): string {
   // The work day that has now finished. Work days end at WORK_DAY_START_HOUR,
@@ -75,7 +115,10 @@ export function startAutoClockOutScheduler(): void {
 
   // Catch-up shortly after startup (covers a server that was down at midnight).
   setTimeout(() => { void runEndOfDay('startup catch-up'); }, STARTUP_DELAY_MS);
+  setTimeout(() => { void runMonitor('startup'); }, STARTUP_DELAY_MS);
 
-  // Self-healing periodic sweep.
+  // Self-healing periodic sweeps. Two timers, because the two jobs answer very
+  // different questions: "has a day finished?" and "is someone still on site?"
   setInterval(() => { void runEndOfDay('sweep'); }, SWEEP_INTERVAL_MS);
+  setInterval(() => { void runMonitor('sweep'); }, MONITOR_INTERVAL_MS);
 }
