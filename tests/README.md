@@ -79,6 +79,7 @@ ship.
 | `fencecycle.js` | leave the fence → clocked out; return → clocked back in, first stretch banked; and the single-session refusal being reported rather than silent |
 | `tightfence.js` | a small radius is enforced exactly — clock-in refused just outside it, and someone who walks out mid-shift is clocked out |
 | `locationwarnings.js` | location off → exactly 4 warnings, spaced, then an automatic clock-out; and the paths that actually deliver them |
+| `deadlocation.js` | a deactivated work location fences nobody — clock-in refuses as a misconfiguration rather than measuring against stale coordinates |
 | `whynologout.js` | the `why_no_auto_logout.sql` diagnostic agrees with the watchdog, gate by gate |
 
 ## Writing another one

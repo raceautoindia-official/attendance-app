@@ -231,7 +231,7 @@ export async function POST(request: NextRequest) {
        l.name          AS loc_name
      FROM employee_schedules es
      JOIN shifts s ON es.shift_id = s.id
-     LEFT JOIN locations l ON es.location_id = l.id
+     LEFT JOIN locations l ON es.location_id = l.id AND l.is_active = TRUE
      WHERE es.employee_id = ?
        AND es.effective_from <= ?
        AND (es.effective_to IS NULL OR es.effective_to >= ?)
@@ -250,7 +250,14 @@ export async function POST(request: NextRequest) {
   // against. That used to fall through to "no fence required", so the admin saw
   // geofencing switched on while clock-in was accepted from anywhere. Refuse
   // instead: a fence that cannot be evaluated must not read as a pass.
-  if (workMode === 'on_site' && schedule?.geofencing_enabled && !schedule.location_id) {
+  // Test for USABLE COORDINATES, not merely for a location_id. A schedule can
+  // point at a location that has since been deactivated — production had one
+  // sitting at 0,0 — and then location_id is set while the join returns
+  // nothing. Checking the id alone let that fall through to "no fence
+  // required", which is the same hole in a new disguise: geofencing switched
+  // on, and clock-in accepted from anywhere.
+  const fenceUnusable = schedule?.loc_lat == null || schedule?.loc_lng == null;
+  if (workMode === 'on_site' && schedule?.geofencing_enabled && fenceUnusable) {
     await insertAuditLog({
       action: 'geofence_misconfigured',
       entity: 'employee_schedule',
@@ -259,7 +266,10 @@ export async function POST(request: NextRequest) {
       details: {
         employee_id: auth.id,
         shift: schedule.shift_name,
-        reason: 'geofencing_enabled_without_location',
+        reason: schedule.location_id
+          ? 'location_missing_or_deactivated'
+          : 'geofencing_enabled_without_location',
+        location_id: schedule.location_id,
       },
       ip_address: ip,
     });

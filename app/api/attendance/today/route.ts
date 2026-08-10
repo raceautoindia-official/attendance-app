@@ -92,7 +92,7 @@ export async function GET(request: NextRequest) {
        ) AS location
      FROM employee_schedules es
      JOIN shifts s ON es.shift_id = s.id
-     LEFT JOIN locations l ON es.location_id = l.id
+     LEFT JOIN locations l ON es.location_id = l.id AND l.is_active = TRUE
      WHERE es.employee_id = ?
        AND es.effective_from <= ?
        AND (es.effective_to IS NULL OR es.effective_to >= ?)
