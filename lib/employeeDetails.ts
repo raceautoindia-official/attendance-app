@@ -69,6 +69,18 @@ export async function hasSessionColumns(): Promise<boolean> {
   return Number(row?.c ?? 0) > 0;
 }
 
+/** True once the 2026-08-11 first-clock-in migration has run. */
+export async function hasFirstClockInColumn(): Promise<boolean> {
+  const row = await queryOne<{ c: number }>(
+    `SELECT COUNT(*) AS c
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'attendance'
+       AND COLUMN_NAME = 'first_clock_in_utc'`,
+  );
+  return Number(row?.c ?? 0) > 0;
+}
+
 /** True once the 2026-08-11 out-of-fence REVIEW migration has run. */
 export async function hasOutOfFenceReviewColumns(): Promise<boolean> {
   const row = await queryOne<{ c: number }>(

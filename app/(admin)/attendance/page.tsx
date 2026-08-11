@@ -187,7 +187,32 @@ export default function AttendancePage() {
                 ),
               },
               { key: 'work_date', header: 'Date', render: r => formatDateOnly((r as AttRow).work_date) },
-              { key: 'clock_in_utc', header: 'In (IST)', render: r => toIST((r as AttRow).clock_in_utc) },
+              {
+                key: 'clock_in_utc',
+                header: 'In (IST)',
+                render: r => {
+                  const row = r as AttRow;
+                  // The day's FIRST login is "the" login. On a multi-session
+                  // day the row's clock_in_utc moves with each re-open, and
+                  // showing that here was the complaint: "I logged in at 9:09
+                  // but it shows the in-between login everywhere".
+                  const first = row.first_clock_in_utc ?? row.clock_in_utc;
+                  const sessionDiffers =
+                    row.first_clock_in_utc != null &&
+                    row.clock_in_utc != null &&
+                    String(row.first_clock_in_utc) !== String(row.clock_in_utc);
+                  return (
+                    <div>
+                      <p>{toIST(first)}</p>
+                      {sessionDiffers && (
+                        <p className="text-xs text-slate-400" title="Start of the currently open session">
+                          session {toIST(row.clock_in_utc)}
+                        </p>
+                      )}
+                    </div>
+                  );
+                },
+              },
               { key: 'clock_out_utc', header: 'Out (IST)', render: r => toIST((r as AttRow).clock_out_utc) },
               {
                 key: 'total_minutes',

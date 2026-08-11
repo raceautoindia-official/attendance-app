@@ -44,6 +44,8 @@ const STATUS_BAR_PAD = Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 
 const TZ = 'Asia/Kolkata'; // all dates/times shown in IST, matching the web app
 
 interface TodayAttendance {
+  /** The day's first login — never moves; clock_in_utc is the current session. */
+  first_clock_in_utc?: string | null;
   clock_in_utc: string | null;
   clock_out_utc: string | null;
   total_minutes: number | null;
@@ -999,7 +1001,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
           <View style={styles.statsRow}>
             <View style={styles.statCol}>
               <Text style={styles.statLabel}>Clock In</Text>
-              <Text style={styles.statValue}>{timeOnly(attendance?.clock_in_utc ?? null)}</Text>
+              <Text style={styles.statValue}>{timeOnly(attendance?.first_clock_in_utc ?? attendance?.clock_in_utc ?? null)}</Text>
             </View>
             <View style={styles.statCol}>
               <Text style={styles.statLabel}>Clock Out</Text>

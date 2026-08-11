@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from '@/lib/constants';
-import { hasSessionColumns, hasOutOfFenceReasonColumn } from '@/lib/employeeDetails';
+import { hasSessionColumns, hasOutOfFenceReasonColumn, hasFirstClockInColumn } from '@/lib/employeeDetails';
 import {
   creditedMinutes,
   hasPermissionTable,
@@ -100,10 +100,11 @@ export async function GET(request: NextRequest) {
 
   // Approved permission hours for the row's date, plus what the day's shift
   // requires — together they give the credited hours (see creditedMinutes()).
-  const [permissionsAvailable, sessionCols, reasonCol] = await Promise.all([
+  const [permissionsAvailable, sessionCols, reasonCol, firstInCol] = await Promise.all([
     hasPermissionTable(),
     hasSessionColumns(),
     hasOutOfFenceReasonColumn(),
+    hasFirstClockInColumn(),
   ]);
   const permissionExpr = permissionMinutesSelect(
     permissionsAvailable,
@@ -125,6 +126,7 @@ export async function GET(request: NextRequest) {
               a.clock_out_lat, a.clock_out_lng, a.ip_address, a.geofence_status,
               a.auth_method, a.total_minutes, a.status, a.notes, a.edited_by, a.edited_at,
               ${reasonCol ? 'a.out_of_fence_reason,' : 'NULL AS out_of_fence_reason,'}
+              ${firstInCol ? 'a.first_clock_in_utc,' : 'NULL AS first_clock_in_utc,'}
               ${sessionCols ? 'a.banked_minutes, a.session_count,' : '0 AS banked_minutes, 1 AS session_count,'}
               e.name AS employee_name, e.emp_id,
               l.name AS location_name, l.address AS location_address,

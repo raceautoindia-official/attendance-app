@@ -186,6 +186,9 @@ export interface AttendanceRecord {
   id: number;
   employee_id: number;
   work_date: string; // "YYYY-MM-DD" — IST date
+  /** The day's FIRST login. Never overwritten by later sessions — clock_in_utc
+   *  is the CURRENT session's start and legitimately moves on re-open. */
+  first_clock_in_utc?: Date | null;
   clock_in_utc: Date | null;
   clock_out_utc: Date | null;
   clock_in_lat: number | null;

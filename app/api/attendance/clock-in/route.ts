@@ -8,6 +8,7 @@ import {
   hasSessionColumns,
   hasOutOfFenceReasonColumn,
   hasOutOfFenceReviewColumns,
+  hasFirstClockInColumn,
 } from '@/lib/employeeDetails';
 import {
   getWorkDateIST,
@@ -177,11 +178,12 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const [workModeCols, sessionCols, reasonCol, reviewCols] = await Promise.all([
+  const [workModeCols, sessionCols, reasonCol, reviewCols, firstInCol] = await Promise.all([
     hasWorkModeColumns(),
     hasSessionColumns(),
     hasOutOfFenceReasonColumn(),
     hasOutOfFenceReviewColumns(),
+    hasFirstClockInColumn(),
   ]);
   const flags = workModeCols
     ? await queryOne<{ work_mode: string; allow_multiple_sessions: number | boolean }>(
@@ -389,6 +391,12 @@ export async function POST(request: NextRequest) {
       ? ', out_of_fence_status = ?, out_of_fence_reviewed_by = NULL, out_of_fence_reviewed_at = NULL, out_of_fence_review_notes = NULL'
       : '';
     const reviewParams = reviewCols ? [outOfFenceReason ? 'pending' : null] : [];
+    // The day's FIRST login survives every later session. clock_in_utc is
+    // legitimately overwritten on re-open (it means "current session start",
+    // and the session maths depends on that) — but the morning belongs to the
+    // record, and this row used to lose it. COALESCE: set once, never touched.
+    const firstInSet = firstInCol ? ', first_clock_in_utc = COALESCE(first_clock_in_utc, ?)' : '';
+    const firstInParams = firstInCol ? [toMySQLDatetime(nowUtc)] : [];
     // The duplicate-clock-in check earlier is a SEPARATE statement, so two
     // requests can both pass it before either one writes — a phone retrying a
     // slow request is enough to arrange that. Unguarded, the second UPDATE
@@ -415,10 +423,10 @@ export async function POST(request: NextRequest) {
            status          = ?,
            clock_out_utc   = NULL,
            total_minutes   = NULL
-           ${sessionSet}${reasonSet}${reviewSet}
+           ${sessionSet}${reasonSet}${reviewSet}${firstInSet}
        WHERE id = ? ${raceGuard}`,
       [toMySQLDatetime(nowUtc), lat, lng, ip, geofenceStatus, authMethod, effectiveStatus,
-       ...sessionParams, ...reasonParams, ...reviewParams, existing.id],
+       ...sessionParams, ...reasonParams, ...reviewParams, ...firstInParams, existing.id],
     );
     if ((updated as unknown as { affectedRows: number }).affectedRows === 0) {
       return NextResponse.json<ApiResponse>(
@@ -431,8 +439,8 @@ export async function POST(request: NextRequest) {
     const result = await query<{ insertId: number }>(
       `INSERT INTO attendance
          (employee_id, work_date, clock_in_utc, clock_in_lat, clock_in_lng,
-          ip_address, geofence_status, auth_method, status${reasonCol ? ', out_of_fence_reason' : ''}${reviewCols ? ', out_of_fence_status' : ''})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?${reasonCol ? ', ?' : ''}${reviewCols ? ', ?' : ''})`,
+          ip_address, geofence_status, auth_method, status${reasonCol ? ', out_of_fence_reason' : ''}${reviewCols ? ', out_of_fence_status' : ''}${firstInCol ? ', first_clock_in_utc' : ''})
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?${reasonCol ? ', ?' : ''}${reviewCols ? ', ?' : ''}${firstInCol ? ', ?' : ''})`,
       [
         auth.id,
         workDate,
@@ -445,6 +453,7 @@ export async function POST(request: NextRequest) {
         status,
         ...(reasonCol ? [outOfFenceReason] : []),
         ...(reviewCols ? [outOfFenceReason ? 'pending' : null] : []),
+        ...(firstInCol ? [toMySQLDatetime(nowUtc)] : []),
       ],
     );
     // mysql2 returns OkPacket-shaped result with insertId
