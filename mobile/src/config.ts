@@ -19,6 +19,11 @@ export const LOCATION_INTERVAL_MS = 15_000;
 export const LOCATION_DISTANCE_M = 0;
 
 // Points that fail to upload (offline, server hiccup) are kept in memory and
-// retried with the next fix. Cap the queue so a long outage can't grow it
-// unbounded — oldest points are dropped first.
-export const LOCATION_MAX_QUEUE = 500;
+// retried with the next fix, each keeping its ORIGINAL fix time — so a trail
+// through a dead zone uploads complete and correctly timestamped when signal
+// returns. Capped so an outage can't grow it unbounded; oldest drop first.
+//
+// 2000 fixes at one per 15 seconds is over eight hours — a full shift spent
+// offline arrives intact. (~200 KB of memory at worst; the queue lives as long
+// as the tracking service does, which is the same lifetime as the trail.)
+export const LOCATION_MAX_QUEUE = 2000;
