@@ -15,6 +15,14 @@ const pool = mysql.createPool({
   queueLimit: 0,
   // Return JS Date objects for DATETIME/DATE columns
   dateStrings: false,
+  // Every DATETIME in this schema is UTC (the _utc suffix is a promise), and
+  // every write formats UTC components (toMySQLDatetime). Without this, mysql2
+  // interprets those values in the MACHINE's timezone on read — harmless on
+  // the UTC production host, but on an IST dev box every Date came back 5½
+  // hours early, and the first route to round-trip one through toISOString()
+  // shipped shifted timestamps. 'Z' makes reads keep the promise writes make,
+  // on every machine.
+  timezone: 'Z',
   // Always read/write as UTC — the app layer handles IST conversion
   timezone: '+00:00',
 });
