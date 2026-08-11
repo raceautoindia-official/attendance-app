@@ -6,8 +6,14 @@
 // they really worked. Running the old unfiltered script would have taken about
 // seven hours each off six people.
 //
+// And "has reported" must mean a RATE, not a single ping. The app sends a fix
+// every 15 seconds as a keep-alive, so a healthy phone produces about 1440 in
+// six hours. A gate that asked only "heard from in the last 48 hours" let
+// through a phone that had sent ONE, and that employee's day was closed back at
+// the moment she clocked in, credited zero minutes.
+//
 // So: the script runs as a dry run by default and changes nothing, and when it
-// does run it arms only staff whose phone has been heard from recently.
+// does run it arms only staff whose phone reports continuously.
 //
 //   node tests/enablerollout.js
 //
@@ -72,15 +78,26 @@ function loadScript({ apply }) {
   // they cannot collide with the one-active-session-per-employee unique key,
   // and deleting the session cascades the points away.
   const sessions = [];
-  const addPoint = async (employeeId, agoSql) => {
+  /**
+   * n fixes, one every 15 seconds working backwards from `endsMinAgo`.
+   *
+   * The gate is about RATE, not recency: the app sends a fix every 15 seconds
+   * as a keep-alive, so a healthy phone produces ~1440 in 6 hours. A single
+   * ping used to be enough to arm someone, and that is exactly how a real
+   * morning got zeroed.
+   */
+  const addPoints = async (employeeId, n, endsMinAgo = 0) => {
     const [s] = await c.query(
       `INSERT INTO live_tracking_sessions (employee_id, started_at_utc, ended_at_utc, is_active)
        VALUES (?, UTC_TIMESTAMP(), UTC_TIMESTAMP(), FALSE)`, [employeeId]);
     sessions.push(s.insertId);
+    if (n <= 0) return;
+    const rows = [];
+    for (let i = 0; i < n; i++) rows.push(`(?, ?, DATE_SUB(UTC_TIMESTAMP(), INTERVAL ${endsMinAgo * 60 + i * 15} SECOND), 13.0080078, 80.1970224, 8)`);
     await c.query(
       `INSERT INTO live_tracking_points (session_id, employee_id, tracked_at_utc, latitude, longitude, accuracy_meters)
-       VALUES (?, ?, ${agoSql}, 13.0080078, 80.1970224, 8)`,
-      [s.insertId, employeeId]);
+       VALUES ${rows.join(',')}`,
+      rows.flatMap(() => [s.insertId, employeeId]));
   };
   const clearPoints = async () => {
     if (sessions.length) await c.query('DELETE FROM live_tracking_sessions WHERE id IN (?)', [sessions]);
@@ -139,9 +156,9 @@ function loadScript({ apply }) {
     // Only ONE phone has reported. The field employee also reports, to prove it
     // is the off-site flag and not silence that keeps them out.
     await clearPoints();
-    for (const id of [REPORTING.id, FIELD.id]) {
-      await addPoint(id, 'DATE_SUB(UTC_TIMESTAMP(), INTERVAL 5 MINUTE)');
-    }
+    // A rate a real, correctly configured handset produces. 400 fixes at 15s
+    // intervals is well past the gate and nowhere near the ~1440 of a full day.
+    for (const id of [REPORTING.id, FIELD.id]) await addPoints(id, 400);
 
     const armed = async id => {
       const [[r]] = await c.query(
@@ -174,12 +191,27 @@ function loadScript({ apply }) {
 
     console.log('\n4. A phone that went quiet days ago does not count as reporting');
     await clearPoints();
-    await addPoint(SILENT.id, 'DATE_SUB(UTC_TIMESTAMP(), INTERVAL 5 DAY)');
+    await addPoints(SILENT.id, 400, 60 * 24 * 5); // healthy rate, but five days ago
     await c.query('UPDATE employee_schedules SET geofencing_enabled = FALSE WHERE employee_id IN (?)', [ids]);
     await c.query('UPDATE employees SET live_tracking_enabled = FALSE WHERE id IN (?)', [ids]);
     await c.query(loadScript({ apply: true }));
     check('a fix from 5 days ago does not arm anyone (window is 48h)',
       !(await armed(SILENT.id)));
+
+    console.log('\n4b. A handful of fixes is NOT a reporting phone');
+    // This is the exact shape of the morning that was destroyed. One employee
+    // had sent a SINGLE fix. A gate that only asked "heard from in the last 48
+    // hours" passed her, she was armed, and the watchdog closed her day back at
+    // the moment she clocked in — zero minutes for a full morning's work.
+    await clearPoints();
+    await addPoints(SILENT.id, 5);        // five fixes, all within the hour
+    await addPoints(REPORTING.id, 400);
+    await c.query('UPDATE employee_schedules SET geofencing_enabled = FALSE WHERE employee_id IN (?)', [ids]);
+    await c.query('UPDATE employees SET live_tracking_enabled = FALSE WHERE id IN (?)', [ids]);
+    await c.query(loadScript({ apply: true }));
+    check('5 recent fixes do NOT arm anyone — the fault that zeroed a real day',
+      !(await armed(SILENT.id)));
+    check('a properly reporting phone still arms', await armed(REPORTING.id));
 
     console.log('\n5. Re-running is safe');
     await c.query(loadScript({ apply: true }));
@@ -191,6 +223,7 @@ function loadScript({ apply }) {
     // and keeps losing hours, and the readiness table used to show them as
     // "SKIP: phone silent", which reads as though they were left alone.
     await clearPoints();
+    await addPoints(REPORTING.id, 400); // keep the healthy phone healthy, or it is disarmed too
     await c.query('UPDATE employee_schedules SET geofencing_enabled = TRUE WHERE employee_id = ?', [SILENT.id]);
     await c.query('UPDATE employees SET live_tracking_enabled = TRUE, work_mode = ? WHERE id = ?',
       ['on_site', SILENT.id]);
