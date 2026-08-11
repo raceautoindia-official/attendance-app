@@ -110,7 +110,7 @@ function phoneState(row: LiveTrackingLiveRow): { label: string; tone: string; ti
   }
   const mins = Math.max(0, Math.floor((Date.now() - new Date(row.last_ping_utc).getTime()) / 60_000));
   if (mins <= 2) return { label: 'Live', tone: 'text-green-600 dark:text-green-400', title: `Last fix ${mins} min ago` };
-  if (mins <= 15) return { label: `${mins} min ago`, tone: 'text-amber-600 dark:text-amber-400', title: 'Reporting, but slower than the 15-second interval — battery optimisation is likely on.' };
+  if (mins <= 15) return { label: `${mins} min ago`, tone: 'text-amber-600 dark:text-amber-400', title: 'Reporting, but slower than the 30-second interval — battery optimisation is likely on.' };
   return { label: `${mins} min ago`, tone: 'text-red-600 dark:text-red-400', title: 'The phone has gone quiet. Check location permission and battery optimisation.' };
 }
 

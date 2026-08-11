@@ -184,7 +184,7 @@ async function doAutoClockIn(coords: { latitude: number; longitude: number }): P
 //   final warning as after every earlier one.
 //
 // Coming back inside the fence at ANY point wipes the count and the day never
-// closes at all. The warnings advance from the 15-second tracking fixes (via
+// closes at all. The warnings advance from the 30-second tracking fixes (via
 // setFixListener below), so the cadence holds with the app swiped away; the
 // server watchdog, ten minutes behind, stays the backstop for a phone that
 // stops reporting and so cannot be warned by anything.
@@ -249,7 +249,7 @@ async function progressFenceExit(coords: { latitude: number; longitude: number }
 }
 
 /**
- * Fence check on every tracking fix — the 15-second heartbeat that keeps the
+ * Fence check on every tracking fix — the 30-second heartbeat that keeps the
  * one-minute warning cadence honest while the app is swiped away.
  *
  * This path only ever ADVANCES an escalation or wipes it; it never starts one.

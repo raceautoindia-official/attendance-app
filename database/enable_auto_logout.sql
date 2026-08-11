@@ -28,12 +28,13 @@
 -- phone that reports intermittently does not fail safe; it converts a full
 -- working day into nothing.
 --
--- The app sends a fix every 15 seconds with distanceInterval 0, as a keep-alive
+-- The app sends a fix every 30 seconds with distanceInterval 0, as a keep-alive
 -- that continues even when the employee is sitting still (LOCATION_INTERVAL_MS
--- in mobile/src/config.ts). A healthy phone therefore produces about 1440
--- points in 6 hours. The gate below asks for a fraction of that, which is
--- generous about Android doze but still tells a configured handset apart from
--- one that sent a single ping and went to sleep.
+-- in mobile/src/config.ts; halved from 15s when the whole fleet reported
+-- battery drain). A healthy phone therefore produces about 720 points in 6
+-- hours. The gate below asks for a fraction of that, which is generous about
+-- Android doze but still tells a configured handset apart from one that sent a
+-- single ping and went to sleep.
 -- =============================================================================
 
 -- The tables are utf8mb4_unicode_ci, but the mysql CLI on MySQL 8 connects as
@@ -52,11 +53,11 @@ SET @dry_run := 1;   -- <<< 1 = show me what would happen; 0 = actually do it
 SET @who := '';      -- <<< e.g. 'RACE016' or 'balamurugan', or '' for everybody
 
 -- WHAT COUNTS AS A PHONE THAT REPORTS.
--- Healthy is ~1440 points per 6 hours. 300 is roughly one fix a minute — a
--- quarter of the expected rate, so doze and a patchy signal are forgiven, while
--- a phone that managed 1, 3 or 5 points is not.
+-- Healthy is ~720 points per 6 hours. 150 is roughly one fix every 2.4 minutes
+-- — a fifth of the expected rate, so doze and a patchy signal are forgiven,
+-- while a phone that managed 1, 3 or 5 points is not.
 SET @density_window_h      := 6;
-SET @min_points_in_window  := 300;
+SET @min_points_in_window  := 150;
 SET @max_ping_age_min      := 15;
 
 -- Convert people currently marked off-site into on_site staff? Leave at 0.
@@ -96,7 +97,7 @@ HAVING COUNT(*) >= @min_points_in_window
 
 -- 1. READINESS ----------------------------------------------------------------
 -- Read this table BEFORE you set @dry_run := 0. It is the whole decision.
--- points_in_window is the number that matters: compare it against 1440.
+-- points_in_window is the number that matters: compare it against ~720.
 SELECT
   e.emp_id,
   e.name,
@@ -244,12 +245,12 @@ WHERE e.is_active = TRUE
 -- Everyone with a work site whose handset is not reporting well enough to be
 -- fenced. Each needs, ON THE PHONE: the current APK, location permission set to
 -- "Allow all the time" (NOT "While using the app"), and battery optimisation
--- turned OFF for the app. Compare points_in_window against 1440 — that is what
+-- turned OFF for the app. Compare points_in_window against ~720 — that is what
 -- a correctly configured phone produces in 6 hours.
 SELECT e.emp_id, e.name,
        COALESCE(l.name, '— no site —')                          AS site,
        COALESCE(pts.n, 0)                                       AS points_in_window,
-       CONCAT(@min_points_in_window, ' needed, ~1440 is healthy') AS target,
+       CONCAT(@min_points_in_window, ' needed, ~720 is healthy') AS target,
        COALESCE(CONCAT(TIMESTAMPDIFF(MINUTE, pts.last_ping, UTC_TIMESTAMP()), ' min ago'),
                 'NEVER')                                        AS last_ping
 FROM employees e

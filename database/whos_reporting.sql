@@ -8,7 +8,7 @@
 -- looks wrong: it separates "phone not sending" (a handset problem no server
 -- change can fix) from "sending badly" from "all fine, the page is wrong".
 --
--- A healthy phone sends a fix every 15 seconds: ~40 in 10 minutes.
+-- A healthy phone sends a fix every 30 seconds: ~20 in 10 minutes.
 -- =============================================================================
 
 SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -26,7 +26,7 @@ SELECT
       THEN 'PHONE: never sent — install APK, Allow all the time, battery Unrestricted, mobile data'
     WHEN COALESCE(pts.n_10min, 0) = 0
       THEN 'PHONE: stopped — open the app once; if still dead, check battery/data settings'
-    WHEN COALESCE(pts.n_10min, 0) < 20
+    WHEN COALESCE(pts.n_10min, 0) < 8
       THEN 'PHONE: throttled — sending, but Android is suspending it (battery optimisation)'
     WHEN pts.avg_acc_30min > 100
       THEN 'SIGNAL: sending fine but fixes are imprecise (indoors/vehicle) — map may hide them'

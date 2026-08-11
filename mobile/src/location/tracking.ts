@@ -82,7 +82,7 @@ async function sendPoints(fresh: TrackedPoint[]): Promise<void> {
 // Every fresh fix is also offered to one listener, registered by geofenceAuto
 // at module load. This is how the away-from-site warnings keep their one-minute
 // cadence with the app swiped away: this task is the only JS that reliably runs
-// every 15 seconds in the background (the foreground service keeps it alive),
+// every 30 seconds in the background (the foreground service keeps it alive),
 // and it cannot import geofenceAuto itself — geofenceAuto already imports this
 // module, and completing that circle would make module init order a coin toss.
 type FixListener = (coords: { latitude: number; longitude: number }) => void;

@@ -7,8 +7,19 @@
 // 'http://192.168.1.6:3000'.
 export const API_BASE_URL = 'https://attendance.raceinnovations.in';
 
-// How often the background task sends a location point, in milliseconds.
-export const LOCATION_INTERVAL_MS = 15_000;
+// How often the background task samples a location fix, in milliseconds.
+//
+// This number IS the battery bill. Continuous GPS is among the hungriest
+// things a phone does, and it runs for the whole shift — at 15 seconds the
+// fleet's universal complaint was drain. 30 seconds halves the GPS duty cycle
+// while every consumer keeps its guarantee with room to spare:
+//   - fence-exit warnings space at 1/minute → still checked twice a minute;
+//   - the 10-minute presence grace → still ~20 chances to confirm;
+//   - the map's numbered trail buckets by minute → unchanged;
+//   - the "Live" indicator allows 2 minutes → unchanged.
+// Do not "optimise" this back down without pricing the battery again, and do
+// not raise it past 60s — the warning cadence needs at least one fix a minute.
+export const LOCATION_INTERVAL_MS = 30_000;
 
 // Minimum distance (meters) the device must move before a new point fires.
 // MUST stay 0: on Android this maps to "smallest displacement" on the fused
