@@ -81,6 +81,7 @@ ship.
 | `locationwarnings.js` | location off → exactly 4 warnings, spaced, then an automatic clock-out; and the paths that actually deliver them |
 | `deadlocation.js` | a deactivated work location fences nobody — clock-in refuses as a misconfiguration rather than measuring against stale coordinates |
 | `whynologout.js` | the `why_no_auto_logout.sql` diagnostic agrees with the watchdog, gate by gate |
+| `fencetoggle.js` | the per-person geofence checkbox — unticking leaves live tracking running, and a fence is refused without usable coordinates |
 | `livelist.js` | Live Tracking lists everyone who is clocked in, reporting or not — a quiet phone shows as a row with no coordinates instead of disappearing |
 | `autologin.js` | coming back to the site clocks you in again after the SERVER clocked you out — the case that never worked in production — while a manual clock-out still ends the day |
 | `doubleclockin.js` | two clock-ins fired at once — only one may win, or the race erases the hours already banked that day |

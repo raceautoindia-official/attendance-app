@@ -45,6 +45,7 @@ interface AssignedShift {
   shift_name: string;
   start_time: string | null;
   end_time: string | null;
+  location_id: number | null;
   location_name: string | null;
   geofencing_enabled: boolean;
   effective_from: string;
@@ -100,7 +101,7 @@ export default function SchedulesPage() {
 
   // Who is currently rostered on what — needed to show an employee's existing
   // shift before adding a second, and to flag misconfigured schedules.
-  const { data: assignData } = useQuery({
+  const { data: assignData, isLoading: assignLoading } = useQuery({
     queryKey: ['schedule-assignments'],
     queryFn: async () => {
       const res = await fetch('/api/schedules/assignments');
@@ -239,6 +240,32 @@ export default function SchedulesPage() {
     a.shifts.filter(s => s.fence_without_location).map(s => ({ ...a, shift: s })));
   const clashing = assignments.filter(a => a.overlapping_shifts);
 
+  // One row per assigned schedule, so the fence can be switched per person
+  // without reassigning them. Geofencing used to be settable only at assignment
+  // time, which meant it was changed with SQL instead — and a fence left on for
+  // someone whose phone had stopped reporting costs them real hours.
+  const fenceRows = assignments.flatMap(a =>
+    a.shifts.map(s => ({
+      key: s.schedule_id,
+      employee_name: a.employee_name,
+      emp_id: a.emp_id,
+      shift: s,
+    })));
+
+  const fenceMutation = useMutation({
+    mutationFn: async ({ scheduleId, enabled }: { scheduleId: number; enabled: boolean }) => {
+      const res = await fetch(`/api/schedules/assignments/${scheduleId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ geofencing_enabled: enabled }),
+      });
+      const json = (await res.json()) as ApiResponse;
+      if (!res.ok || !json.success) throw new Error(json.error ?? 'Could not change geofencing');
+      return json;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['schedule-assignments'] }),
+  });
+
   return (
     <div className="space-y-4">
       {unfenced.length > 0 && (
@@ -275,6 +302,87 @@ export default function SchedulesPage() {
             </svg>
             New Shift
           </Button>
+        )}
+      </div>
+
+      {/* Who is fenced. Tick to enforce the work site for that person; untick to
+          leave them tracked but unjudged. */}
+      <div className="rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-700">
+          <h2 className="font-semibold text-slate-800 dark:text-slate-200">Geofencing</h2>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+            Tick to enforce the work site: clock-in is refused away from it, and leaving it ends the day.
+            Unticking does <strong>not</strong> stop live tracking — their movements are still recorded,
+            they are simply not judged by a radius. Leave it off for anyone whose phone does not report
+            continuously, or their day is closed at their last known position.
+          </p>
+        </div>
+        {fenceMutation.isError && (
+          <p className="px-5 py-2 text-sm text-red-500">{(fenceMutation.error as Error).message}</p>
+        )}
+        {assignLoading ? (
+          <div className="flex justify-center py-8"><Spinner /></div>
+        ) : (
+          <Table
+            columns={[
+              {
+                key: 'employee',
+                header: 'Employee',
+                render: r => {
+                  const row = r as (typeof fenceRows)[number];
+                  return (
+                    <div>
+                      <p className="font-medium text-slate-800 dark:text-slate-200">{row.employee_name}</p>
+                      <p className="text-xs text-slate-400">{row.emp_id}</p>
+                    </div>
+                  );
+                },
+              },
+              {
+                key: 'shift',
+                header: 'Shift',
+                render: r => (r as (typeof fenceRows)[number]).shift.shift_name,
+              },
+              {
+                key: 'site',
+                header: 'Work Site',
+                render: r => {
+                  const s = (r as (typeof fenceRows)[number]).shift;
+                  return s.location_name
+                    ? <span className="text-slate-700 dark:text-slate-300">{s.location_name}</span>
+                    : <span className="text-slate-400 text-xs">No location — assign one to fence them</span>;
+                },
+              },
+              {
+                key: 'geofence',
+                header: 'Geofence',
+                render: r => {
+                  const row = r as (typeof fenceRows)[number];
+                  const s = row.shift;
+                  const canFence = s.location_id != null;
+                  return (
+                    <label className={`flex items-center gap-2 ${canFence ? 'cursor-pointer' : 'cursor-not-allowed'}`}>
+                      <input
+                        type="checkbox"
+                        checked={s.geofencing_enabled}
+                        disabled={!canFence || fenceMutation.isPending}
+                        onChange={e =>
+                          fenceMutation.mutate({ scheduleId: s.schedule_id, enabled: e.target.checked })}
+                        className="w-4 h-4 rounded border-slate-300 text-blue-600 disabled:opacity-50"
+                      />
+                      <span className={`text-xs ${s.geofencing_enabled
+                        ? 'text-slate-700 dark:text-slate-300'
+                        : 'text-slate-400'}`}>
+                        {s.geofencing_enabled ? 'Fenced' : 'Tracking only'}
+                      </span>
+                    </label>
+                  );
+                },
+              },
+            ]}
+            data={fenceRows as object[]}
+            emptyMessage="No schedules assigned yet."
+          />
         )}
       </div>
 
