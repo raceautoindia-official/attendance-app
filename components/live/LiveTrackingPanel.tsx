@@ -206,6 +206,46 @@ export default function LiveTrackingPanel() {
   // by value, the map iframe below only re-renders when the path actually
   // changes — not on every 5s poll — so live updates are smooth (no reload
   // flicker) and feel real-time.
+  // One numbered mark per MINUTE of the employee's trail — 1 where the window
+  // starts, counting up to the latest position. The raw fixes arrive every 15
+  // seconds, which as anonymous dots is unreadable: you can see WHERE somebody
+  // was but not in what order. Numbered minute-marks make the route read like
+  // a story — 1, 2, 3 … — which is what an admin actually follows.
+  //
+  // The LAST fix inside each minute wins its bucket (where the minute ended),
+  // and long windows are thinned to at most 120 marks, renumbered so the
+  // sequence stays 1..N; every mark's popup still carries its exact time.
+  const minuteMarksJson = useMemo(() => {
+    const fmt = (iso: string | null | undefined) =>
+      iso
+        ? new Date(iso).toLocaleTimeString(IST_LOCALE, {
+            timeZone: IST, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true,
+          })
+        : '';
+    const buckets = new Map<number, { lat: number; lng: number; t: string }>();
+    for (const p of selectedRecordedPath) {
+      const ms = new Date(p.tracked_at_utc).getTime();
+      const lat = Number(p.latitude);
+      const lng = Number(p.longitude);
+      if (!Number.isFinite(ms) || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+      buckets.set(Math.floor(ms / 60_000), { lat, lng, t: fmt(p.tracked_at_utc) });
+    }
+    let marks = [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([, m]) => m);
+    if (!marks.length && selectedHasCoords) {
+      marks = [{ lat: Number(selectedLat), lng: Number(selectedLng), t: '' }];
+    }
+    const MAX_MARKS = 120;
+    if (marks.length > MAX_MARKS) {
+      const step = Math.ceil(marks.length / MAX_MARKS);
+      const last = marks[marks.length - 1];
+      marks = marks.filter((_, i) => i % step === 0);
+      if (marks[marks.length - 1] !== last) marks.push(last);
+    }
+    return marks.length
+      ? JSON.stringify(marks.map((m, i) => ({ ...m, n: i + 1 })))
+      : null;
+  }, [selectedRecordedPath, selectedHasCoords, selectedLat, selectedLng]);
+
   const routePointsJson = useMemo(() => {
     const fmt = (iso: string | null | undefined) =>
       iso
@@ -227,7 +267,7 @@ export default function LiveTrackingPanel() {
   // recorded point that shows the IST time the employee was there, green start
   // + red latest markers. Keyless (no Google Cloud).
   const routeMapSrc = useMemo(() => {
-    if (!routePointsJson) return null;
+    if (!routePointsJson && !minuteMarksJson) return null;
     return `<!DOCTYPE html><html><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
@@ -235,23 +275,34 @@ export default function LiveTrackingPanel() {
 <body><div id="map"></div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-var pts=${routePointsJson};
-var ll=pts.map(function(p){return [p.lat,p.lng];});
+var pts=${routePointsJson ?? '[]'};
+var marks=${minuteMarksJson ?? '[]'};
 var map=L.map('map',{zoomControl:true});
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(map);
-function popup(prefix,p){return '<b>'+prefix+'</b><br/>🕐 '+(p.t||'-');}
+// The line follows the jitter-filtered route so it hugs real streets…
+var ll=pts.map(function(p){return [p.lat,p.lng];});
 if(ll.length>1){
   L.polyline(ll,{color:'#ffffff',weight:9,opacity:0.95,lineJoin:'round',lineCap:'round'}).addTo(map);
-  var line=L.polyline(ll,{color:'#2563eb',weight:5,opacity:1,lineJoin:'round',lineCap:'round'}).addTo(map);
-  for(var i=1;i<pts.length-1;i++){
-    L.circleMarker(ll[i],{radius:5,color:'#2563eb',fillColor:'#ffffff',fillOpacity:1,weight:2}).addTo(map).bindPopup(popup('Was here at',pts[i]));
-  }
-  map.fitBounds(line.getBounds(),{padding:[35,35]});
-}else{map.setView(ll[0],17);}
-L.circleMarker(ll[0],{color:'#ffffff',weight:3,fillColor:'#16a34a',fillOpacity:1,radius:8}).addTo(map).bindPopup(popup('Start',pts[0]));
-L.circleMarker(ll[ll.length-1],{color:'#ffffff',weight:3,fillColor:'#dc2626',fillOpacity:1,radius:8}).addTo(map).bindPopup(popup('Latest',pts[pts.length-1]));
+  L.polyline(ll,{color:'#2563eb',weight:5,opacity:1,lineJoin:'round',lineCap:'round'}).addTo(map);
+}
+// …while the numbered marks are one per MINUTE: 1 is where the window starts,
+// the highest number is where they are now. Click any number for its time.
+function badge(n,bg){return L.divIcon({className:'',iconSize:[24,24],iconAnchor:[12,12],
+  html:'<div style="width:24px;height:24px;border-radius:50%;background:'+bg+';color:#fff;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.45);font:700 11px system-ui;display:flex;align-items:center;justify-content:center">'+n+'</div>'});}
+var group=[];
+marks.forEach(function(m,i){
+  var bg = i===0 ? '#16a34a' : (i===marks.length-1 ? '#dc2626' : '#2563eb');
+  var label = (i===0?'Start':(i===marks.length-1?'Latest':'Minute mark'))+' #'+m.n+(m.t?'<br/>🕐 '+m.t:'');
+  group.push(L.marker([m.lat,m.lng],{icon:badge(m.n,bg),zIndexOffset:i===marks.length-1?1000:i===0?900:0})
+    .addTo(map).bindPopup(label));
+});
+var bounds = ll.length>1 ? L.polyline(ll).getBounds() : null;
+if(marks.length>1){var mb=L.latLngBounds(marks.map(function(m){return [m.lat,m.lng];}));bounds=bounds?bounds.extend(mb):mb;}
+if(bounds && (ll.length>1||marks.length>1)){map.fitBounds(bounds,{padding:[35,35]});}
+else if(marks.length===1){map.setView([marks[0].lat,marks[0].lng],17);}
+else if(ll.length===1){map.setView(ll[0],17);}
 </script></body></html>`;
-  }, [routePointsJson]);
+  }, [routePointsJson, minuteMarksJson]);
 
   useEffect(() => {
     if (!filteredLiveSessions.length) {
@@ -431,7 +482,7 @@ L.circleMarker(ll[ll.length-1],{color:'#ffffff',weight:3,fillColor:'#dc2626',fil
                 />
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Blue line is the exact path taken · green is start · red is latest location.
+                Numbers are minute-by-minute: 1 (green) is where the window starts, the highest number (red) is where they are now. Tap a number for its exact time. The blue line is the path taken.
               </p>
 
               {/* Numbered movement log: every recorded location in order,
