@@ -54,6 +54,12 @@ SET @include_field_staff := 0;
 -- their desk.
 SET @tight_fence_m := 30;
 
+-- Switch the fence back OFF for anyone already armed whose phone has gone
+-- quiet. Refusing to arm a dead phone is not enough on its own: someone armed
+-- before this check existed, or whose phone died afterwards, stays armed and
+-- keeps losing hours. Set to 0 only if you would rather decide those by hand.
+SET @disarm_silent := 1;
+
 
 -- 0. READINESS ----------------------------------------------------------------
 -- Read this table BEFORE you set @dry_run := 0. It is the whole decision.
@@ -71,6 +77,18 @@ SELECT
     WHEN l.is_active <> 1         THEN 'skip: location is deactivated'
     WHEN e.work_mode <> 'on_site' AND @include_field_staff = 0
                                   THEN 'skip: off-site staff, left alone'
+    -- ARMED ALREADY, AND SILENT. This must be tested before the plain "phone
+    -- silent" branches below, or it hides inside them: the row reads
+    -- "SKIP: phone silent", which sounds like we left them alone, when in fact
+    -- the fence is live on a phone that proves nothing and the watchdog is
+    -- closing their day at their last confirmed presence. Two people were in
+    -- exactly this state and the report showed no sign of it.
+    WHEN es.geofencing_enabled = 1 AND e.live_tracking_enabled = 1
+     AND (lp.last_ping IS NULL
+          OR lp.last_ping < DATE_SUB(UTC_TIMESTAMP(), INTERVAL @min_ping_hours HOUR))
+                                  THEN IF(@disarm_silent = 1,
+                                          '<<< ARMED ON A DEAD PHONE — will be DISARMED',
+                                          '!!! ARMED ON A DEAD PHONE — losing hours now')
     WHEN lp.last_ping IS NULL     THEN 'SKIP: phone has NEVER reported'
     WHEN lp.last_ping < DATE_SUB(UTC_TIMESTAMP(), INTERVAL @min_ping_hours HOUR)
                                   THEN 'SKIP: phone silent too long'
@@ -156,6 +174,27 @@ WHERE @dry_run = 0
   AND EXISTS (SELECT 1 FROM live_tracking_points p
                WHERE p.employee_id = e.id
                  AND p.tracked_at_utc >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL @min_ping_hours HOUR));
+
+
+-- 3b. DISARM A FENCE ON A DEAD PHONE ------------------------------------------
+-- The mirror of section 3. A fence only works on a phone that reports; on one
+-- that does not, it does not fail safe — it closes the day at the last
+-- confirmed presence and the employee loses hours they actually worked. Turn it
+-- off until the handset is sorted, then re-run this script to arm them again.
+UPDATE employee_schedules es
+JOIN employees e ON e.id = es.employee_id
+SET es.geofencing_enabled = FALSE
+WHERE @dry_run = 0
+  AND @disarm_silent = 1
+  AND es.geofencing_enabled = TRUE
+  AND e.is_active = TRUE
+  AND e.role = 'employee'
+  AND es.effective_from <= CURDATE()
+  AND (es.effective_to IS NULL OR es.effective_to >= CURDATE())
+  AND (@who = '' OR e.name LIKE CONCAT('%', @who, '%') OR e.emp_id LIKE CONCAT('%', @who, '%'))
+  AND NOT EXISTS (SELECT 1 FROM live_tracking_points p
+                   WHERE p.employee_id = e.id
+                     AND p.tracked_at_utc >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL @min_ping_hours HOUR));
 
 
 -- 4. AFTER --------------------------------------------------------------------

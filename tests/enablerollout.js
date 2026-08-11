@@ -184,6 +184,24 @@ function loadScript({ apply }) {
     console.log('\n5. Re-running is safe');
     await c.query(loadScript({ apply: true }));
     check('still armed, nothing broken', await armed(REPORTING.id));
+
+    console.log('\n6. A fence already live on a DEAD phone is switched back off');
+    // Refusing to arm a dead phone is not enough on its own. Someone armed
+    // before that check existed — or whose phone died afterwards — stays armed
+    // and keeps losing hours, and the readiness table used to show them as
+    // "SKIP: phone silent", which reads as though they were left alone.
+    await clearPoints();
+    await c.query('UPDATE employee_schedules SET geofencing_enabled = TRUE WHERE employee_id = ?', [SILENT.id]);
+    await c.query('UPDATE employees SET live_tracking_enabled = TRUE, work_mode = ? WHERE id = ?',
+      ['on_site', SILENT.id]);
+    check('set up: the silent phone is armed', await armed(SILENT.id));
+
+    await c.query(loadScript({ apply: false }));
+    check('a dry run does NOT disarm', await armed(SILENT.id));
+
+    await c.query(loadScript({ apply: true }));
+    check('applying disarms the dead phone', !(await armed(SILENT.id)));
+    check('and leaves the reporting phone armed', await armed(REPORTING.id));
   } finally {
     await restore();
     await c.end();
