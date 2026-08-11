@@ -44,6 +44,13 @@ interface TodayResponse {
   attendance: {
     clock_in_utc: string | null;
     clock_out_utc: string | null;
+    /**
+     * The session was closed by the server's away-from-site watchdog rather
+     * than by a person. Re-entry may re-open it; a manual or end-of-day
+     * closure may not. Absent on an older server, where it reads as false and
+     * behaviour falls back to "only a closure this phone performed".
+     */
+    auto_clocked_out?: boolean;
   } | null;
   multi_session?: boolean;
   /** Approved out-of-office duty covering right now, if any. */
@@ -220,9 +227,21 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }) => {
   }
 
   if (eventType === Location.GeofencingEventType.Enter && region.identifier === INNER_ID && !onShift) {
-    // Only reopen a day WE closed. Any other closure (manual, web, watchdog,
-    // midnight) means the day is over — and monitoring can stand down.
-    if (!(await autoOutPending())) {
+    // Re-open a day that was closed FOR LEAVING THE SITE — by this phone, or by
+    // the server's away-from-site watchdog.
+    //
+    // This used to accept only a closure this phone had performed, and treated
+    // the watchdog's as deliberate: it refused to clock back in AND tore the
+    // geofence down. But the watchdog is the half that works when the app has
+    // been swiped away, so in practice it closes almost all of these days. The
+    // effect was that the first time someone was clocked out for stepping away,
+    // they were never clocked back in, and their phone quietly stopped watching
+    // for the rest of the day. Every re-entry in production was manual.
+    //
+    // A manual clock-out, an admin edit or the 07:00 settle still mean the day
+    // is genuinely over, and those correctly stand monitoring down.
+    const closedForLeaving = (await autoOutPending()) || today.attendance.auto_clocked_out === true;
+    if (!closedForLeaving) {
       await stopGeofenceAutoMode();
       return;
     }
@@ -268,7 +287,15 @@ export async function reconcileGeofenceAttendance(): Promise<void> {
   if (onShift && dist > fence.radius + EXIT_MARGIN_M) {
     if (today.on_duty_now) return;
     await doAutoClockOut(coords);
-  } else if (!onShift && (await autoOutPending()) && dist <= fence.radius) {
+  } else if (
+    !onShift &&
+    // Closed for leaving the site — by this phone, or by the server's watchdog.
+    // Accepting only our own closure made this repair path useless in exactly
+    // the case it exists for: the OS geofence missing the re-entry after the
+    // WATCHDOG ended the day, which is how nearly every one of these days ends.
+    ((await autoOutPending()) || today.attendance.auto_clocked_out === true) &&
+    dist <= fence.radius
+  ) {
     // Same as the live handler: no multi_session pre-check, so a refusal is
     // reported to the employee instead of vanishing.
     await doAutoClockIn(coords);

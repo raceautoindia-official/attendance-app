@@ -218,6 +218,14 @@ export interface AttendanceRecord {
   worked_minutes?: number | null;
   /** Worked beyond the rostered day — the part credited_minutes caps off */
   overtime_minutes?: number;
+  /**
+   * This session was closed by the away-from-site watchdog, not by a person.
+   *
+   * The phone re-opens the day on re-entry only for a closure of this kind or
+   * one it performed itself; a manual or end-of-day closure means the day is
+   * genuinely over and should stay closed.
+   */
+  auto_clocked_out?: boolean;
 }
 
 /** A short paid absence inside a working day, approved by an admin. */

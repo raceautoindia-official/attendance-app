@@ -158,6 +158,31 @@ export async function GET(request: NextRequest) {
       worked != null && requiredMinutes != null && worked > requiredMinutes
         ? worked - requiredMinutes
         : 0;
+
+    // Did the away-from-site watchdog close this session?
+    //
+    // The phone needs to know, because auto clock-in on re-entry used to happen
+    // only for a day the PHONE itself had closed. In practice the server's
+    // watchdog is what closes these days — it is the half that works with the
+    // app swiped away — and the phone treated that as "someone ended the day
+    // deliberately", refused to re-open it, and tore its own geofence down. The
+    // result was an employee clocked out for stepping away and never clocked
+    // back in, on a phone that had also stopped watching.
+    if (attendance.clock_out_utc) {
+      const auto = await queryOne<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM audit_log
+          WHERE action = 'geofence_auto_clockout'
+            AND entity = 'attendance'
+            AND entity_id = ?
+            -- Tied to THIS closure, not an earlier session on the same row: a
+            -- multi-session day reuses one attendance row all day.
+            AND created_at >= DATE_SUB(?, INTERVAL 2 MINUTE)`,
+        [attendance.id, attendance.clock_out_utc],
+      );
+      attendance.auto_clocked_out = Number(auto?.n ?? 0) > 0;
+    } else {
+      attendance.auto_clocked_out = false;
+    }
   }
 
   return NextResponse.json<ApiResponse<TodayResponse>>(
