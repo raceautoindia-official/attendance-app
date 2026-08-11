@@ -267,5 +267,21 @@ export async function closeOpenSessions(
     });
   }
 
+  // Garbage-collect tracking sessions whose owner is no longer clocked in
+  // ANYWHERE. Staleness no longer ends a session (a quiet phone is a condition
+  // to report, not a session to execute), so this sweep is what reaps the
+  // leftovers: a day settled above, an admin edit, a repair by hand. Guarded on
+  // open attendance rather than on the day being settled, so someone reopened
+  // at the boundary — or already clocked in on the new day — keeps tracking
+  // uninterrupted.
+  await query(
+    `UPDATE live_tracking_sessions s
+     LEFT JOIN attendance a ON a.employee_id = s.employee_id
+       AND a.clock_in_utc IS NOT NULL
+       AND a.clock_out_utc IS NULL
+     SET s.is_active = FALSE, s.ended_at_utc = UTC_TIMESTAMP()
+     WHERE s.is_active = TRUE AND a.id IS NULL`,
+  ).catch(() => {}); // tracking tables absent in a legacy DB — nothing to reap
+
   return closed;
 }

@@ -236,6 +236,12 @@ export async function runLiveTrackingMonitor(): Promise<MonitorResult> {
        s.last_ping_utc
      FROM live_tracking_sessions s
      JOIN employees e ON e.id = s.employee_id
+     -- Only somebody ON SHIFT can meaningfully go silent. Sessions are no
+     -- longer executed for staleness, so without this join a session lingering
+     -- after clock-out would raise a fresh alert every cooldown, forever.
+     JOIN attendance a ON a.employee_id = s.employee_id
+       AND a.clock_in_utc IS NOT NULL
+       AND a.clock_out_utc IS NULL
      WHERE s.is_active = TRUE
        AND e.is_active = TRUE
        AND s.last_ping_utc IS NOT NULL
@@ -276,13 +282,16 @@ export async function runLiveTrackingMonitor(): Promise<MonitorResult> {
       ip_address: null,
     });
 
-    await query(
-      `UPDATE live_tracking_sessions
-       SET is_active = FALSE, ended_at_utc = UTC_TIMESTAMP()
-       WHERE id = ? AND is_active = TRUE`,
-      [session.session_id],
-    );
-
+    // The session is NOT ended here — deliberately, and it used to be, which
+    // took the whole fleet dark at once. A phone that pauses for three minutes
+    // (doze, a lift, a network blip) is a condition to REPORT, not a session to
+    // execute: once ended, every later fix from that phone bounced off "no
+    // active session" for the rest of the day, so a 3-minute gap became
+    // permanent silence. The session lives as long as the shift does; what
+    // ends it is clock-out, an admin disabling tracking, or the geofence
+    // watchdog ending the day itself. Prolonged silence while fenced is
+    // already handled by the watchdog — as absence of the employee, which it
+    // is, rather than as a bookkeeping state.
     await Promise.all(
       adminEmails.map(email => sendLiveTrackingAlert(email, {
         employeeName: session.employee_name,
