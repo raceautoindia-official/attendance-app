@@ -1,6 +1,6 @@
 import { query, insertAuditLog } from '@/lib/db';
 import { formatInTimeZone } from 'date-fns-tz';
-import { TIMEZONE, WEEKLY_OFF_DAYS } from '@/lib/constants';
+import { WEEKLY_OFF_DAYS } from '@/lib/constants';
 
 // ---------------------------------------------------------------------------
 // Marks employees ABSENT for a given IST work date (YYYY-MM-DD) when they:
@@ -14,9 +14,13 @@ import { TIMEZONE, WEEKLY_OFF_DAYS } from '@/lib/constants';
 // absent. Shared by the cron endpoint and the in-app scheduler.
 // ---------------------------------------------------------------------------
 export async function markAbsentees(workDate: string): Promise<number> {
-  // Weekday abbreviation ("Mon".."Sun") for the IST work date (noon IST avoids
-  // any midnight edge), matching the values stored in shifts.working_days.
-  const weekdayAbbr = formatInTimeZone(new Date(`${workDate}T12:00:00+05:30`), TIMEZONE, 'EEE');
+  // Weekday abbreviation ("Mon".."Sun") for the work date, matching the values
+  // stored in shifts.working_days. The weekday of a CALENDAR DATE is a property
+  // of the date string itself, so it is read in UTC with a UTC anchor — no
+  // timezone in the maths at all. The old anchor was pinned to +05:30, which
+  // for a deployment west of about UTC-6 would have named the previous day's
+  // weekday and marked people absent against the wrong roster column.
+  const weekdayAbbr = formatInTimeZone(new Date(`${workDate}T00:00:00Z`), 'UTC', 'EEE');
 
   // An employee counts for this day when their SHIFT lists the weekday as a
   // working day. Employees with no schedule have no shift to consult, and used

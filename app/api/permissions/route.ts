@@ -4,6 +4,8 @@ import { pool, query, queryOne, insertAuditLog } from '@/lib/db';
 import { sendPermissionRequestAlert } from '@/lib/mailer';
 import { requireAuth } from '@/lib/auth';
 import { getClientIp, getWorkDateIST } from '@/lib/attendance';
+import { formatInTimeZone } from 'date-fns-tz';
+import { TIMEZONE } from '@/lib/constants';
 import {
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE,
@@ -132,11 +134,20 @@ export async function GET(request: NextRequest) {
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
+  // The deployment timezone as a CONVERT_TZ offset string, e.g. "+05:30".
+  const tzOffset = formatInTimeZone(new Date(), TIMEZONE, 'xxx');
+
   const [countRow, rows, pendingRow] = await Promise.all([
     queryOne<{ total: number }>(
       `SELECT COUNT(*) AS total FROM permission_requests pr ${where}`,
       [...params],
     ),
+    // The deployment timezone as a CONVERT_TZ offset (e.g. "+05:30").
+    // Hard-coding the offset was the one place this file assumed India; the
+    // named-zone form of CONVERT_TZ needs tz tables MySQL often lacks, so the
+    // offset is computed here instead. Taken at request time, which is exact
+    // except for rows filed within an hour of a DST change - day-granularity
+    // backdating flags can carry that.
     query<PermissionRequest>(
       `SELECT pr.id, pr.employee_id,
               ${await hasOnDutyColumn() ? 'pr.request_type' : "'permission' AS request_type"},
@@ -150,8 +161,8 @@ export async function GET(request: NextRequest) {
               -- so convert first: between midnight and 05:30 IST the raw UTC
               -- date is still the previous day, and a late filing in that
               -- window would not have been flagged.
-              (DATE(CONVERT_TZ(pr.created_at, '+00:00', '+05:30')) > pr.permission_date) AS is_backdated,
-              DATEDIFF(DATE(CONVERT_TZ(pr.created_at, '+00:00', '+05:30')), pr.permission_date) AS days_late,
+              (DATE(CONVERT_TZ(pr.created_at, '+00:00', ?)) > pr.permission_date) AS is_backdated,
+              DATEDIFF(DATE(CONVERT_TZ(pr.created_at, '+00:00', ?)), pr.permission_date) AS days_late,
               e.name   AS employee_name,
               e.emp_id AS employee_emp_id,
               r.name   AS reviewed_by_name
@@ -161,7 +172,7 @@ export async function GET(request: NextRequest) {
        ${where}
        ORDER BY pr.permission_date DESC, pr.start_time DESC, pr.id DESC
        LIMIT ? OFFSET ?`,
-      [...params, limit, offset],
+      [tzOffset, tzOffset, ...params, limit, offset],
     ),
     // Badge count for the admin queue — same scope, ignoring the other filters.
     auth.role === 'employee'

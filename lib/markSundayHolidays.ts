@@ -1,6 +1,6 @@
 import { query, insertAuditLog } from '@/lib/db';
 import { formatInTimeZone } from 'date-fns-tz';
-import { TIMEZONE } from '@/lib/constants';
+
 
 // ---------------------------------------------------------------------------
 // Sunday = company-wide holiday. For the given IST date, IF it is a Sunday,
@@ -11,7 +11,9 @@ import { TIMEZONE } from '@/lib/constants';
 // Returns the number of holiday rows created.
 // ---------------------------------------------------------------------------
 export async function markSundayHolidays(workDate: string): Promise<number> {
-  const weekday = formatInTimeZone(new Date(`${workDate}T12:00:00+05:30`), TIMEZONE, 'EEE');
+  // Weekday of the calendar date itself, timezone-free (see markAbsent.ts for
+  // why the old +05:30 anchor was wrong for deployments west of UTC-6).
+  const weekday = formatInTimeZone(new Date(`${workDate}T00:00:00Z`), 'UTC', 'EEE');
   if (weekday !== 'Sun') return 0;
 
   const result = await query<{ affectedRows?: number }>(
