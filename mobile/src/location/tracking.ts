@@ -79,6 +79,18 @@ async function sendPoints(fresh: TrackedPoint[]): Promise<void> {
   }
 }
 
+// Every fresh fix is also offered to one listener, registered by geofenceAuto
+// at module load. This is how the away-from-site warnings keep their one-minute
+// cadence with the app swiped away: this task is the only JS that reliably runs
+// every 15 seconds in the background (the foreground service keeps it alive),
+// and it cannot import geofenceAuto itself — geofenceAuto already imports this
+// module, and completing that circle would make module init order a coin toss.
+type FixListener = (coords: { latitude: number; longitude: number }) => void;
+let fixListener: FixListener | null = null;
+export function setFixListener(fn: FixListener): void {
+  fixListener = fn;
+}
+
 // Defined at module load so the OS can invoke it even after the app is killed
 // and relaunched in the background. Import this file once from App.tsx.
 TaskManager.defineTask(LOCATION_TASK, async ({ data, error }) => {
@@ -93,6 +105,13 @@ TaskManager.defineTask(LOCATION_TASK, async ({ data, error }) => {
     accuracy_meters: loc.coords.accuracy ?? null,
     tracked_at_utc: new Date(loc.timestamp).toISOString(),
   }));
+  // The newest fix drives fence-exit enforcement; a listener failure must
+  // never cost the batch its upload.
+  try {
+    fixListener?.(points[points.length - 1]);
+  } catch {
+    // enforcement is retried on the next fix
+  }
   await sendPoints(points);
 });
 

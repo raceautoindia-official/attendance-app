@@ -2,7 +2,7 @@
   "expo": {
     "name": "Attendance",
     "slug": "attendance-mobile",
-    "version": "1.4.3",
+    "version": "1.4.4",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#0f172a",
@@ -20,7 +20,7 @@
         "POST_NOTIFICATIONS",
         "USE_BIOMETRIC"
       ],
-      "versionCode": 10
+      "versionCode": 11
     },
     "plugins": [
       [

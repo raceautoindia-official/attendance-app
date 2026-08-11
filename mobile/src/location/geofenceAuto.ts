@@ -4,8 +4,9 @@ import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 import { apiFetch, ApiError } from '../api/client';
-import { startBackgroundTracking, stopBackgroundTracking } from './tracking';
+import { startBackgroundTracking, stopBackgroundTracking, setFixListener } from './tracking';
 import { scheduleShiftEndReminders, cancelShiftEndReminders } from '../notifications/shiftReminder';
+import { decideFenceExitAction, EXIT_MAX_WARNINGS } from './fenceExitPolicy';
 
 // Automatic attendance around the work-site fence:
 //   - the FIRST clock-in of the day is always manual;
@@ -134,6 +135,9 @@ async function doAutoClockIn(coords: { latitude: number; longitude: number }): P
       body: { ...coords, auto: true },
     });
     await SecureStore.deleteItemAsync(AUTO_OUT_KEY).catch(() => {});
+    // A new session starts with a clean slate — no warning count carried over
+    // from the excursion that ended the previous one.
+    await resetFenceExitStrikes();
     await notify('Auto clocked in', 'Welcome back — you re-entered the work site and a new session was started.');
     // Reminders re-anchor to this new session; tracking restart is permitted
     // from a geofence event, and self-heals on next app open if the OS refuses.
@@ -166,6 +170,109 @@ async function doAutoClockIn(coords: { latitude: number; longitude: number }): P
     return false; // 403 stale fix / network — reconciliation retries
   }
 }
+
+// ---------------------------------------------------------------------------
+// Leaving the fence: four warnings, one minute apart, then the clock-out.
+//
+// The Exit event used to clock out on the spot. That is the harshest possible
+// reading of a boundary crossing — someone walking to the gate for a parcel
+// was off the clock before they reached it, and (for a single-session account)
+// locked out for the rest of the day. Now the crossing starts an escalation:
+//
+//   warning 1 (at the boundary) → 2 → 3 → 4 (final), one minute apart,
+//   then the automatic clock-out — with the same one-minute grace after the
+//   final warning as after every earlier one.
+//
+// Coming back inside the fence at ANY point wipes the count and the day never
+// closes at all. The warnings advance from the 15-second tracking fixes (via
+// setFixListener below), so the cadence holds with the app swiped away; the
+// server watchdog, ten minutes behind, stays the backstop for a phone that
+// stops reporting and so cannot be warned by anything.
+// ---------------------------------------------------------------------------
+
+const EXIT_STRIKE_COUNT_KEY = 'fence_exit_strikes';
+const EXIT_STRIKE_TS_KEY = 'fence_exit_last_strike_ms';
+
+async function exitStrikes(): Promise<{ warnings: number; lastMs: number }> {
+  const warnings = Number(await SecureStore.getItemAsync(EXIT_STRIKE_COUNT_KEY).catch(() => '0')) || 0;
+  const lastMs = Number(await SecureStore.getItemAsync(EXIT_STRIKE_TS_KEY).catch(() => '0')) || 0;
+  return { warnings, lastMs };
+}
+
+/** Wipe the escalation. With `announce`, tell the employee they made it back —
+ *  but only when there was an escalation to survive, so an ordinary day inside
+ *  the fence never produces a notification (or a storage write) from this. */
+async function resetFenceExitStrikes(announce = false): Promise<void> {
+  const { warnings } = await exitStrikes();
+  if (warnings === 0) return;
+  await SecureStore.setItemAsync(EXIT_STRIKE_COUNT_KEY, '0').catch(() => {});
+  await SecureStore.setItemAsync(EXIT_STRIKE_TS_KEY, '0').catch(() => {});
+  if (announce) {
+    await notify('Back on site', 'You returned in time — you are still clocked in.');
+  }
+}
+
+/** One escalation step: the next warning if a minute has passed, or the
+ *  clock-out once all four have been ignored for a minute more. */
+async function progressFenceExit(coords: { latitude: number; longitude: number }): Promise<void> {
+  const { warnings, lastMs } = await exitStrikes();
+  const decision = decideFenceExitAction(warnings, lastMs, Date.now());
+  if (decision.action === 'wait') return;
+
+  if (decision.action === 'clock_out') {
+    // One last look at the server before acting. Approved on-duty granted
+    // mid-escalation, or a day already closed from elsewhere, means standing
+    // down — this is the single moment where firing wrongly costs someone
+    // their session, so it is worth one API call.
+    const today = await fetchToday();
+    if (!today) return; // offline — retry on the next fix
+    if (
+      !today.attendance?.clock_in_utc ||
+      today.attendance.clock_out_utc ||
+      today.on_duty_now
+    ) {
+      await resetFenceExitStrikes();
+      return;
+    }
+    if (await doAutoClockOut(coords)) await resetFenceExitStrikes();
+    return;
+  }
+
+  await SecureStore.setItemAsync(EXIT_STRIKE_COUNT_KEY, String(decision.warningNumber)).catch(() => {});
+  await SecureStore.setItemAsync(EXIT_STRIKE_TS_KEY, String(Date.now())).catch(() => {});
+  await notify(
+    `Return to your work site — warning ${decision.warningNumber} of ${EXIT_MAX_WARNINGS}${decision.isFinal ? ' (final)' : ''}`,
+    decision.isFinal
+      ? 'Final warning. You are still away from your work site — go back now or you will be clocked out automatically.'
+      : 'You have left your work site while clocked in. Go back, or you will be clocked out automatically after the remaining warnings.',
+  );
+}
+
+/**
+ * Fence check on every tracking fix — the 15-second heartbeat that keeps the
+ * one-minute warning cadence honest while the app is swiped away.
+ *
+ * This path only ever ADVANCES an escalation or wipes it; it never starts one.
+ * Starting is reserved for the geofence Exit event and reconciliation, which
+ * both check approved on-duty first — a bare fix knows nothing about
+ * permissions, and warning someone who is away with an admin's blessing is
+ * exactly the mistake the on-duty feature exists to prevent.
+ */
+async function onTrackedFix(coords: { latitude: number; longitude: number }): Promise<void> {
+  const fence = await storedFence();
+  if (!fence) return;
+  const dist = haversineMeters(coords.latitude, coords.longitude, fence.latitude, fence.longitude);
+  if (dist <= fence.radius) {
+    await resetFenceExitStrikes(true);
+    return;
+  }
+  // Inside the hysteresis band: not home, not gone — leave the count alone.
+  if (dist <= fence.radius + EXIT_MARGIN_M) return;
+  const { warnings } = await exitStrikes();
+  if (warnings > 0) await progressFenceExit(coords);
+}
+
+setFixListener(coords => { void onTrackedFix(coords); });
 
 async function fetchToday(): Promise<TodayResponse | null> {
   try {
@@ -211,6 +318,8 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }) => {
     // Approved out-of-office duty: the employee is meant to be away, so leaving
     // the fence is not the end of their day. Notify instead of clocking out.
     if (today.on_duty_now) {
+      // Any escalation in flight is void too — they are away with permission.
+      await resetFenceExitStrikes();
       await notify(
         'On duty — still clocked in',
         'You have left the work site with approved on-duty, so your attendance stays open.',
@@ -222,7 +331,10 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }) => {
       const dist = haversineMeters(coords.latitude, coords.longitude, center.latitude, center.longitude);
       if (dist <= inner) return; // jitter — still at the site
     }
-    await doAutoClockOut(coords ?? { latitude: center.latitude, longitude: center.longitude });
+    // Not an instant clock-out any more: this starts the warning escalation
+    // (warning 1 of 4 fires here, at the boundary), and the tracking fixes
+    // carry it forward from there.
+    await progressFenceExit(coords ?? { latitude: center.latitude, longitude: center.longitude });
     return;
   }
 
@@ -285,8 +397,18 @@ export async function reconcileGeofenceAttendance(): Promise<void> {
   // Approved on-duty suppresses the repair path too, otherwise reconciliation
   // would clock out the very employee the geofence handler just spared.
   if (onShift && dist > fence.radius + EXIT_MARGIN_M) {
-    if (today.on_duty_now) return;
-    await doAutoClockOut(coords);
+    if (today.on_duty_now) {
+      await resetFenceExitStrikes();
+      return;
+    }
+    // Starts the escalation when the OS Exit event was missed (network blip
+    // during the transition), or advances one already running — either way the
+    // employee gets the warnings, not a clock-out from nowhere.
+    await progressFenceExit(coords);
+  } else if (onShift && dist <= fence.radius) {
+    // Back inside with the day still open: the escalation (if any) is over and
+    // the day simply never closed.
+    await resetFenceExitStrikes(true);
   } else if (
     !onShift &&
     // Closed for leaving the site — by this phone, or by the server's watchdog.
@@ -348,4 +470,9 @@ export async function stopGeofenceAutoMode(): Promise<void> {
   }
   await SecureStore.deleteItemAsync(AUTO_OUT_KEY).catch(() => {});
   await SecureStore.deleteItemAsync(FENCE_KEY).catch(() => {});
+  // Monitoring is over, so no warning count may survive into the next shift —
+  // stale strikes would give tomorrow's first step outside an instant
+  // "final warning".
+  await SecureStore.setItemAsync(EXIT_STRIKE_COUNT_KEY, '0').catch(() => {});
+  await SecureStore.setItemAsync(EXIT_STRIKE_TS_KEY, '0').catch(() => {});
 }
