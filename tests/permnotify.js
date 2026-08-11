@@ -118,6 +118,26 @@ const empHdrs = { 'Content-Type': 'application/json', 'user-agent': UA, Authoriz
       mod.includes('!seen.includes(u.id)'));
     check('a failed notification is retried, not swallowed',
       /catch[\s\S]{0,200}continue;[\s\S]{0,80}seen\.push/.test(mod));
+
+    console.log('\n7. The heartbeat outlives the shift — closed-app delivery');
+    // The background announce used to ride the location watch, which stops
+    // when someone is off shift or untracked — exactly the person waiting to
+    // hear about tomorrow's permission. The inbox poller is its own task:
+    // started at login, stopped ONLY at logout.
+    const poller = fs.readFileSync(path.join(ROOT, 'mobile/src/notifications/inboxPoller.ts'), 'utf8');
+    check('a dedicated background task polls the inbox',
+      poller.includes('defineTask(INBOX_TASK') && poller.includes('notifyPermissionUpdates'));
+    check('registered when the dashboard loads', dash.includes('void startInboxPoller();'));
+    const logoutStart = dash.indexOf('const handleLogout');
+    // Search for the end FROM the start — an earlier onLogout() call (the
+    // session-expiry path) otherwise yields an empty slice and a false FAIL.
+    const logoutFn = dash.slice(logoutStart, dash.indexOf('onLogout();', logoutStart));
+    check('stopped at logout', logoutFn.includes('stopInboxPoller'));
+    check('clock-out does NOT stop it — off-shift staff still get verdicts',
+      (dash.match(/stopInboxPoller/g) || []).length === 2 /* import + logout only */);
+    check('it asks for notification permission itself, not only tracking',
+      poller.includes('POST_NOTIFICATIONS'));
+
   } finally {
     await wipe();
     await c.end();

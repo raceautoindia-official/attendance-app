@@ -32,6 +32,7 @@ import {
 import { startLocationWatch, stopLocationWatch, checkLocationAndWarn } from '../location/locationWatch';
 import { scheduleShiftEndReminders, cancelShiftEndReminders } from '../notifications/shiftReminder';
 import { notifyPermissionUpdates, PermissionUpdate } from '../notifications/permissionUpdates';
+import { startInboxPoller, stopInboxPoller } from '../notifications/inboxPoller';
 import { requestIgnoreBatteryOptimization, openAppSettings } from '../location/batteryOptimization';
 import ConsentModal from './ConsentModal';
 import { colors } from '../theme';
@@ -535,6 +536,9 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     // in-app check every minute while the dashboard is open (strike spacing
     // is enforced inside checkLocationAndWarn, so this cannot spam).
     void startLocationWatch();
+    // Inbox heartbeat: announces permission decisions with the app closed.
+    // Independent of shift/tracking state — it dies only at logout.
+    void startInboxPoller();
     void checkLocationAndWarn();
     const watchId = setInterval(() => void checkLocationAndWarn(), 60_000);
     const id = setInterval(fetchPos, 20_000);
@@ -854,6 +858,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     await stopBackgroundTracking().catch(() => {});
     await stopGeofenceAutoMode().catch(() => {});
     await stopLocationWatch().catch(() => {});
+    await stopInboxPoller().catch(() => {});
     await cancelShiftEndReminders();
     await clearTodayCache();
     await logout();
