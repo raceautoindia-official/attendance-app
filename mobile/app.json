@@ -19,7 +19,8 @@
         "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
         "POST_NOTIFICATIONS",
         "USE_BIOMETRIC"
-      ]
+      ],
+      "versionCode": 9
     },
     "plugins": [
       [
