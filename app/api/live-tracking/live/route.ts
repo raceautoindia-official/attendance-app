@@ -5,7 +5,13 @@ import { getWorkDateIST, toMySQLDatetime } from '@/lib/attendance';
 import type { ApiResponse } from '@/lib/types';
 
 interface LiveRow {
-  session_id: number;
+  /**
+   * NULL when the employee is on shift but has no live-tracking session — their
+   * phone is not reporting. The row is still returned: absence from this list
+   * used to be the only signal, and it is indistinguishable from having gone
+   * home.
+   */
+  session_id: number | null;
   employee_id: number;
   emp_id: string;
   employee_name: string;
@@ -125,24 +131,32 @@ export async function GET(request: NextRequest) {
       ? auth.role !== 'employee'
       : !['0', 'false', 'no'].includes(includePathParam.toLowerCase());
 
-  const conditions: string[] = ['s.is_active = TRUE', 'e.is_active = TRUE'];
+  const conditions: string[] = ['e.is_active = TRUE'];
   const params: unknown[] = [];
 
   if (auth.role === 'employee') {
-    conditions.push('s.employee_id = ?');
+    conditions.push('a.employee_id = ?');
     params.push(auth.id);
   } else if (auth.role === 'manager') {
     conditions.push('e.manager_id = ?');
     params.push(auth.id);
   }
 
+  // Driven by WHO IS CLOCKED IN, not by who has a tracking session.
+  //
+  // It used to start from live_tracking_sessions, so an employee on shift whose
+  // phone was not reporting simply vanished from the page — and "vanished" is
+  // indistinguishable from "went home". Three people disappeared from this list
+  // on the same afternoon they were sitting at their desks, and answering why
+  // took four wrong guesses. Someone on shift now always appears; whether their
+  // phone is reporting is shown as a fact about them, not by their absence.
   const rows = await query<LiveRow>(
     `SELECT
        s.id AS session_id,
-       s.employee_id,
+       a.employee_id,
        e.emp_id,
        e.name AS employee_name,
-       s.started_at_utc,
+       COALESCE(s.started_at_utc, a.clock_in_utc) AS started_at_utc,
        s.last_ping_utc,
        p.tracked_at_utc,
        p.latitude,
@@ -150,32 +164,44 @@ export async function GET(request: NextRequest) {
        p.accuracy_meters,
        l.name    AS location_name,
        l.address AS location_address
-     FROM live_tracking_sessions s
-     JOIN employees e ON e.id = s.employee_id
+     FROM attendance a
+     JOIN employees e ON e.id = a.employee_id
+     -- The open session IS the definition of "on shift": clocked in, not yet
+     -- clocked out. Matching on work_date instead would drop anyone still on an
+     -- overnight shift once the 07:00 boundary moved the date on.
+     LEFT JOIN live_tracking_sessions s
+       ON s.employee_id = a.employee_id AND s.is_active = TRUE
      -- The work site this employee is scheduled to mark attendance at, so the
      -- Overview can name the place instead of only showing raw coordinates.
      LEFT JOIN employee_schedules es
        ON es.id = (
          SELECT es2.id
          FROM employee_schedules es2
-         WHERE es2.employee_id = s.employee_id
+         WHERE es2.employee_id = a.employee_id
            AND es2.effective_from <= ?
            AND (es2.effective_to IS NULL OR es2.effective_to >= ?)
          ORDER BY es2.effective_from DESC, es2.id DESC
          LIMIT 1
        )
      LEFT JOIN locations l ON l.id = es.location_id
+     -- Latest fix of this shift. Keyed on the employee and their clock-in
+     -- rather than on the session id, so a phone that reported before its
+     -- session was replaced still shows its last known position instead of a
+     -- blank row.
      LEFT JOIN live_tracking_points p
        ON p.id = (
          SELECT p2.id
          FROM live_tracking_points p2
-         WHERE p2.session_id = s.id
+         WHERE p2.employee_id = a.employee_id
+           AND p2.tracked_at_utc >= a.clock_in_utc
          ORDER BY (p2.accuracy_meters IS NULL OR p2.accuracy_meters <= ?) DESC,
                   p2.tracked_at_utc DESC, p2.id DESC
          LIMIT 1
        )
-     WHERE ${conditions.join(' AND ')}
-     ORDER BY s.last_ping_utc DESC, s.started_at_utc DESC`,
+     WHERE a.clock_in_utc IS NOT NULL
+       AND a.clock_out_utc IS NULL
+       AND ${conditions.join(' AND ')}
+     ORDER BY p.tracked_at_utc IS NULL, p.tracked_at_utc DESC, a.clock_in_utc DESC`,
     // The two schedule-date params come first: that subquery appears before the
     // accuracy-ordered point lookup in the statement.
     [getWorkDateIST(), getWorkDateIST(), MAX_ACCURACY_M, ...params],
@@ -195,7 +221,17 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  const sessionIds = Array.from(new Set(rows.map(r => r.session_id)));
+  // Someone on shift whose phone is not reporting has no session at all, so
+  // session_id is NULL for them. Left in, those would build `IN (NULL)` — and
+  // if NOBODY has a session, `IN ()`, which is a syntax error that would take
+  // the whole page down rather than showing it with empty paths.
+  const sessionIds = Array.from(new Set(rows.map(r => r.session_id).filter((id): id is number => id != null)));
+  if (!sessionIds.length) {
+    return NextResponse.json<ApiResponse<{ sessions: LiveRow[] }>>({
+      success: true,
+      data: { sessions: rows.map(row => ({ ...row, path: [], recorded_path: [], recorded_count: 0 })) },
+    });
+  }
   const placeholders = sessionIds.map(() => '?').join(',');
   const pointConditions: string[] = [
     `session_id IN (${placeholders})`,
@@ -238,7 +274,7 @@ export async function GET(request: NextRequest) {
   }
 
   const sessionsWithPath = rows.map(row => {
-    const raw = rawBySession.get(row.session_id) ?? [];
+    const raw = (row.session_id != null ? rawBySession.get(row.session_id) : undefined) ?? [];
     return {
       ...row,
       path: cleanPath(raw),
