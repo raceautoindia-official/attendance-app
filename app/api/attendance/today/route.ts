@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { queryOne } from '@/lib/db';
+import { query, queryOne } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import { getWorkDateIST } from '@/lib/attendance';
 import { hasWorkModeColumns } from '@/lib/employeeDetails';
 import {
+  hasOnDutyColumn,
   activeOnDuty,
   creditedMinutes,
   emptyBalance,
@@ -39,6 +40,24 @@ interface TodayResponse {
   /** Approved out-of-office duty covering RIGHT NOW. While this is set the
    *  phone must not auto clock-out on leaving the work-site geofence. */
   on_duty_now: { start_time: string; end_time: string; reason: string | null } | null;
+  /**
+   * Permission requests reviewed in the last few days, so the PHONE can tell
+   * the employee the verdict. There is no push server: the phone polls this
+   * endpoint from the dashboard and the background watch anyway, raises a
+   * local notification for any decision it has not announced yet, and keeps
+   * its own record of which ids it has already announced. Without this, an
+   * approval changed a status silently in a list nobody was looking at.
+   */
+  permission_updates: Array<{
+    id: number;
+    request_type: string;
+    permission_date: string;
+    start_time: string;
+    end_time: string;
+    status: string;
+    review_notes: string | null;
+    reviewed_at: string;
+  }>;
 }
 
 export async function GET(request: NextRequest) {
@@ -196,6 +215,24 @@ export async function GET(request: NextRequest) {
         permission_balance: permissionsAvailable
           ? await getMonthlyBalance(auth.id, workDate)
           : emptyBalance(workDate),
+        // Decisions from the last 3 days — wide enough to survive a phone that
+        // was off overnight, small enough that the dedup set on the phone stays
+        // tiny. Cancelled is excluded: the employee did that themselves.
+        permission_updates: permissionsAvailable
+          ? await query<TodayResponse['permission_updates'][number]>(
+              `SELECT pr.id,
+                      ${await hasOnDutyColumn() ? 'pr.request_type' : "'permission' AS request_type"},
+                      DATE_FORMAT(pr.permission_date, '%Y-%m-%d') AS permission_date,
+                      pr.start_time, pr.end_time, pr.status, pr.review_notes, pr.reviewed_at
+               FROM permission_requests pr
+               WHERE pr.employee_id = ?
+                 AND pr.status IN ('approved', 'rejected')
+                 AND pr.reviewed_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 3 DAY)
+               ORDER BY pr.reviewed_at DESC
+               LIMIT 20`,
+              [auth.id],
+            ).catch(() => [])
+          : [],
         on_duty_now: permissionsAvailable
           ? await activeOnDuty(
               auth.id,

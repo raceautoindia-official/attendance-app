@@ -89,6 +89,7 @@ ship.
 | `autologin.js` | coming back to the site clocks you in again after the SERVER clocked you out — the case that never worked in production — while a manual clock-out still ends the day |
 | `doubleclockin.js` | two clock-ins fired at once — only one may win, or the race erases the hours already banked that day |
 | `pingheal.js` | a fix from an on-shift phone is never refused — ping self-heals a missing session, and a quiet spell is reported to admins, never executed |
+| `permnotify.js` | an approved or rejected permission reaches the employee — the decision rides /today (which the phone already polls) and the phone announces each verdict exactly once |
 | `enablerollout.js` | `enable_auto_logout.sql` is a dry run until told otherwise, and never arms a phone that is not reporting — the mistake that would have cost six people about seven hours each |
 
 ## Writing another one

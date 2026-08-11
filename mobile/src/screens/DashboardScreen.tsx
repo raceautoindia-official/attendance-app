@@ -31,6 +31,7 @@ import {
 } from '../location/geofenceAuto';
 import { startLocationWatch, stopLocationWatch, checkLocationAndWarn } from '../location/locationWatch';
 import { scheduleShiftEndReminders, cancelShiftEndReminders } from '../notifications/shiftReminder';
+import { notifyPermissionUpdates, PermissionUpdate } from '../notifications/permissionUpdates';
 import { requestIgnoreBatteryOptimization, openAppSettings } from '../location/batteryOptimization';
 import ConsentModal from './ConsentModal';
 import { colors } from '../theme';
@@ -326,7 +327,11 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         multi_session?: boolean;
         permission_minutes?: number;
         permission_balance?: PermissionBalance;
+        permission_updates?: PermissionUpdate[];
       }>('/api/attendance/today');
+      // Announce approved/rejected permission decisions — deduped internally,
+      // so calling on every refresh is safe.
+      void notifyPermissionUpdates(data.permission_updates);
       setAttendance(data.attendance);
       setShift(data.schedule?.shift ?? null);
       setMultiSession(data.multi_session === true);

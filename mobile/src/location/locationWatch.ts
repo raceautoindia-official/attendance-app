@@ -9,6 +9,7 @@ import { stopBackgroundTracking } from './tracking';
 import { reconcileGeofenceAttendance } from './geofenceAuto';
 import { cancelShiftEndReminders } from '../notifications/shiftReminder';
 import { decideLocationAction, MAX_WARNINGS } from './locationWatchPolicy';
+import { notifyPermissionUpdates, PermissionUpdate } from '../notifications/permissionUpdates';
 
 // Location-off enforcement: while an employee is clocked in, the phone checks
 // that location services and permissions are still on — every ~15 minutes in
@@ -32,6 +33,7 @@ const CHANNEL_ID = 'location-warnings';
 
 interface TodayResponse {
   attendance: { clock_in_utc: string | null; clock_out_utc: string | null } | null;
+  permission_updates?: PermissionUpdate[];
 }
 
 async function notify(title: string, body: string): Promise<void> {
@@ -81,6 +83,9 @@ export async function checkLocationAndWarn(): Promise<void> {
     if (err instanceof ApiError && err.status === 401) await stopLocationWatch();
     return;
   }
+  // Piggyback again: announce permission decisions on the background cadence
+  // too, so the verdict reaches a phone that stays in a pocket all day.
+  void notifyPermissionUpdates(today.permission_updates);
   const att = today.attendance;
   const onShift = !!att?.clock_in_utc && !att?.clock_out_utc;
   if (!onShift) {
