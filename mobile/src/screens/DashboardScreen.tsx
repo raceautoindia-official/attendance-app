@@ -33,6 +33,7 @@ import { startLocationWatch, stopLocationWatch, checkLocationAndWarn } from '../
 import { scheduleShiftEndReminders, cancelShiftEndReminders } from '../notifications/shiftReminder';
 import { notifyPermissionUpdates, PermissionUpdate } from '../notifications/permissionUpdates';
 import { startInboxPoller, stopInboxPoller } from '../notifications/inboxPoller';
+import DatePicker from './DatePicker';
 import { requestIgnoreBatteryOptimization, openAppSettings } from '../location/batteryOptimization';
 import ConsentModal from './ConsentModal';
 import { colors } from '../theme';
@@ -283,6 +284,19 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   const [todayPermissionMinutes, setTodayPermissionMinutes] = useState(0);
   const [permFormOpen, setPermFormOpen] = useState(false);
   const [permDate, setPermDate] = useState(istCalendarYmd(new Date()));
+  const [permDateOpen, setPermDateOpen] = useState(false);
+  // The server refuses dates more than 3 days back (PERMISSION_MAX_PAST_DAYS),
+  // so the calendar greys those out instead of letting someone pick a day the
+  // submit will bounce.
+  const permMinDate = istCalendarYmd(new Date(Date.now() - 3 * 86_400_000));
+  // "Mon, 11 Aug" — what a person calls a day. Anchored to noon so the label
+  // cannot slip a day in any timezone.
+  const permDateLabel = (() => {
+    const d = new Date(`${permDate}T12:00:00Z`);
+    return Number.isNaN(d.getTime())
+      ? permDate
+      : d.toLocaleDateString('en-IN', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+  })();
   const [permStart, setPermStart] = useState('');
   const [permEnd, setPermEnd] = useState('');
   // Times are entered in 12-hour form with an AM/PM toggle — the form used to
@@ -1072,10 +1086,10 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
 
           {permissionBalance && (
             <View style={styles.statsRow}>
-              <View style={styles.statCol}>
-                <Text style={styles.statLabel}>Left this month</Text>
-                <Text style={styles.statValue}>{minutesToHours(permissionBalance.remaining_minutes)}</Text>
-              </View>
+              {/* "Left this month" used to lead this row. Permission quantity
+                  is unlimited now — every request stands on the manager's
+                  approval — so a countdown that always reads ~744h would only
+                  confuse. */}
               <View style={styles.statCol}>
                 <Text style={styles.statLabel}>Approved</Text>
                 <Text style={styles.statValue}>{minutesToHours(permissionBalance.used_minutes)}</Text>
@@ -1089,14 +1103,16 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
 
           {permFormOpen && (
             <View style={styles.permForm}>
-              <Text style={styles.permFieldLabel}>Date (YYYY-MM-DD)</Text>
-              <TextInput
-                style={styles.permInput}
+              <Text style={styles.permFieldLabel}>Date</Text>
+              <TouchableOpacity style={styles.permInput} onPress={() => setPermDateOpen(true)}>
+                <Text style={styles.permDateText}>{permDateLabel}</Text>
+              </TouchableOpacity>
+              <DatePicker
+                visible={permDateOpen}
                 value={permDate}
-                onChangeText={setPermDate}
-                placeholder="2026-08-04"
-                placeholderTextColor={colors.textFaint}
-                autoCapitalize="none"
+                minYmd={permMinDate}
+                onPick={setPermDate}
+                onClose={() => setPermDateOpen(false)}
               />
               <View style={styles.permTimeRow}>
                 <View style={styles.permTimeCol}>
@@ -1456,6 +1472,7 @@ const styles = StyleSheet.create({
   permReasonInput: { minHeight: 64 },
   permTimeRow: { flexDirection: 'row', gap: 12 },
   permTimeCol: { flex: 1 },
+  permDateText: { color: colors.text, fontSize: 14, paddingVertical: 2 },
   permTimeInputRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   permTimeInput: { flex: 1 },
   permAmPmGroup: {
