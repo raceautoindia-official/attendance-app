@@ -49,6 +49,12 @@ const empHdrs = { 'Content-Type': 'application/json', 'user-agent': UA,
     'SELECT work_mode, live_tracking_enabled FROM employees WHERE id = ?', [EMP]);
 
   const wipe = async () => {
+    // Audit rows for this employee too — not only for isolation from earlier
+    // suites, but because rows written BEFORE created_at became explicit UTC
+    // carry the dev DB server's IST stamp, which reads as five and a half
+    // hours in the FUTURE and invades every "recent events" window until the
+    // clock catches up with the mistake.
+    await c.query("DELETE FROM audit_log WHERE JSON_EXTRACT(details, '$.employee_id') = ?", [EMP]);
     await c.query('DELETE FROM attendance WHERE employee_id = ?', [EMP]);
     await c.query('DELETE FROM employee_devices WHERE employee_id = ?', [EMP]);
     await c.query('DELETE FROM live_tracking_sessions WHERE employee_id = ?', [EMP]);

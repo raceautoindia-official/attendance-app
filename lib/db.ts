@@ -15,14 +15,6 @@ const pool = mysql.createPool({
   queueLimit: 0,
   // Return JS Date objects for DATETIME/DATE columns
   dateStrings: false,
-  // Every DATETIME in this schema is UTC (the _utc suffix is a promise), and
-  // every write formats UTC components (toMySQLDatetime). Without this, mysql2
-  // interprets those values in the MACHINE's timezone on read — harmless on
-  // the UTC production host, but on an IST dev box every Date came back 5½
-  // hours early, and the first route to round-trip one through toISOString()
-  // shipped shifted timestamps. 'Z' makes reads keep the promise writes make,
-  // on every machine.
-  timezone: 'Z',
   // Always read/write as UTC — the app layer handles IST conversion
   timezone: '+00:00',
 });
@@ -74,9 +66,15 @@ export async function insertAuditLog(params: {
 }): Promise<void> {
   try {
     await query(
+      // created_at explicitly, in UTC. The column default is CURRENT_TIMESTAMP,
+      // which is whatever timezone the DATABASE SERVER happens to run in — UTC
+      // on the production host, IST on a local dev box. Every other datetime in
+      // this schema is written as explicit UTC; the audit log was the one
+      // exception, and on a non-UTC server its entries land shifted against the
+      // very events they narrate.
       `INSERT INTO audit_log
-         (action, entity, entity_id, performed_by, details, ip_address)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+         (action, entity, entity_id, performed_by, details, ip_address, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())`,
       [
         params.action,
         params.entity,
