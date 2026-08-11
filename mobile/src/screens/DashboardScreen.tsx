@@ -284,6 +284,40 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   const [permDate, setPermDate] = useState(istCalendarYmd(new Date()));
   const [permStart, setPermStart] = useState('');
   const [permEnd, setPermEnd] = useState('');
+  // Times are entered in 12-hour form with an AM/PM toggle — the form used to
+  // demand HH:MM in 24-hour, and "remove the 24h apply time" was a literal user
+  // request: staff think "2:30 pm", not "14:30". The server still receives
+  // 24-hour values; only the typing changed.
+  //
+  // Defaults: From = AM, To = PM, matching an ordinary working day. Typing an
+  // hour of 1–7 flips that field to PM automatically (nobody asks for 3 AM
+  // permission), unless the person has tapped the toggle themselves — an
+  // explicit choice always wins over a guess.
+  const [permStartAmPm, setPermStartAmPm] = useState<'AM' | 'PM'>('AM');
+  const [permEndAmPm, setPermEndAmPm] = useState<'AM' | 'PM'>('PM');
+  const permAmPmTouched = useRef<{ start: boolean; end: boolean }>({ start: false, end: false });
+
+  const onPermTime = (field: 'start' | 'end', text: string) => {
+    (field === 'start' ? setPermStart : setPermEnd)(text);
+    if (permAmPmTouched.current[field]) return;
+    const h = Number(text.trim().match(/^(\d{1,2})/)?.[1]);
+    if (h >= 1 && h <= 7) (field === 'start' ? setPermStartAmPm : setPermEndAmPm)('PM');
+    else if (h >= 8 && h <= 11) (field === 'start' ? setPermStartAmPm : setPermEndAmPm)('AM');
+  };
+
+  /** "h:mm" + AM/PM → "HH:MM" 24-hour, or null when malformed. */
+  const to24 = (value: string, ampm: 'AM' | 'PM'): string | null => {
+    const m = value.trim().match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) return null;
+    let h = Number(m[1]);
+    const min = Number(m[2]);
+    if (h < 1 || h > 12 || min > 59) return null;
+    if (ampm === 'PM' && h !== 12) h += 12;
+    if (ampm === 'AM' && h === 12) h = 0;
+    return `${String(h).padStart(2, '0')}:${m[2]}`;
+  };
+  const permStart24 = to24(permStart, permStartAmPm);
+  const permEnd24 = to24(permEnd, permEndAmPm);
   const [permReason, setPermReason] = useState('');
   const [permError, setPermError] = useState<string | null>(null);
   const [permBusy, setPermBusy] = useState(false);
@@ -736,9 +770,13 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       setPermError('Date must be YYYY-MM-DD');
       return;
     }
-    const minutes = spanMinutes(permStart, permEnd);
+    if (!permStart24 || !permEnd24) {
+      setPermError('Enter times like 2:30 and pick AM or PM');
+      return;
+    }
+    const minutes = spanMinutes(permStart24, permEnd24);
     if (minutes === null) {
-      setPermError('Enter times as HH:MM (24-hour), with the end after the start');
+      setPermError('The end time must be after the start time');
       return;
     }
     if (permissionBalance) {
@@ -766,8 +804,8 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         method: 'POST',
         body: {
           permission_date: permDate.trim(),
-          start_time: permStart.trim(),
-          end_time: permEnd.trim(),
+          start_time: permStart24,
+          end_time: permEnd24,
           reason: permReason.trim() || null,
         },
       });
@@ -1057,31 +1095,57 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
               />
               <View style={styles.permTimeRow}>
                 <View style={styles.permTimeCol}>
-                  <Text style={styles.permFieldLabel}>From (24h)</Text>
-                  <TextInput
-                    style={styles.permInput}
-                    value={permStart}
-                    onChangeText={setPermStart}
-                    placeholder="10:00"
-                    placeholderTextColor={colors.textFaint}
-                    keyboardType="numbers-and-punctuation"
-                  />
+                  <Text style={styles.permFieldLabel}>From</Text>
+                  <View style={styles.permTimeInputRow}>
+                    <TextInput
+                      style={[styles.permInput, styles.permTimeInput]}
+                      value={permStart}
+                      onChangeText={t => onPermTime('start', t)}
+                      placeholder="10:00"
+                      placeholderTextColor={colors.textFaint}
+                      keyboardType="numbers-and-punctuation"
+                    />
+                    <View style={styles.permAmPmGroup}>
+                      {(['AM', 'PM'] as const).map(ap => (
+                        <TouchableOpacity
+                          key={ap}
+                          style={[styles.permAmPmBtn, permStartAmPm === ap && styles.permAmPmBtnOn]}
+                          onPress={() => { permAmPmTouched.current.start = true; setPermStartAmPm(ap); }}
+                        >
+                          <Text style={[styles.permAmPmText, permStartAmPm === ap && styles.permAmPmTextOn]}>{ap}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
                 </View>
                 <View style={styles.permTimeCol}>
-                  <Text style={styles.permFieldLabel}>To (24h)</Text>
-                  <TextInput
-                    style={styles.permInput}
-                    value={permEnd}
-                    onChangeText={setPermEnd}
-                    placeholder="12:00"
-                    placeholderTextColor={colors.textFaint}
-                    keyboardType="numbers-and-punctuation"
-                  />
+                  <Text style={styles.permFieldLabel}>To</Text>
+                  <View style={styles.permTimeInputRow}>
+                    <TextInput
+                      style={[styles.permInput, styles.permTimeInput]}
+                      value={permEnd}
+                      onChangeText={t => onPermTime('end', t)}
+                      placeholder="12:00"
+                      placeholderTextColor={colors.textFaint}
+                      keyboardType="numbers-and-punctuation"
+                    />
+                    <View style={styles.permAmPmGroup}>
+                      {(['AM', 'PM'] as const).map(ap => (
+                        <TouchableOpacity
+                          key={ap}
+                          style={[styles.permAmPmBtn, permEndAmPm === ap && styles.permAmPmBtnOn]}
+                          onPress={() => { permAmPmTouched.current.end = true; setPermEndAmPm(ap); }}
+                        >
+                          <Text style={[styles.permAmPmText, permEndAmPm === ap && styles.permAmPmTextOn]}>{ap}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
                 </View>
               </View>
-              {spanMinutes(permStart, permEnd) !== null && (
+              {permStart24 != null && permEnd24 != null && spanMinutes(permStart24, permEnd24) !== null && (
                 <Text style={styles.permDuration}>
-                  Duration: {minutesToHours(spanMinutes(permStart, permEnd))}
+                  Duration: {minutesToHours(spanMinutes(permStart24, permEnd24))}
                 </Text>
               )}
               <Text style={styles.permFieldLabel}>Reason</Text>
@@ -1387,6 +1451,16 @@ const styles = StyleSheet.create({
   permReasonInput: { minHeight: 64 },
   permTimeRow: { flexDirection: 'row', gap: 12 },
   permTimeCol: { flex: 1 },
+  permTimeInputRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  permTimeInput: { flex: 1 },
+  permAmPmGroup: {
+    flexDirection: 'column', borderRadius: 8, overflow: 'hidden',
+    borderWidth: 1, borderColor: colors.borderInput,
+  },
+  permAmPmBtn: { paddingHorizontal: 8, paddingVertical: 4, backgroundColor: colors.bg },
+  permAmPmBtnOn: { backgroundColor: colors.brand },
+  permAmPmText: { color: colors.textMuted, fontSize: 11, fontWeight: '700' },
+  permAmPmTextOn: { color: '#ffffff' },
   permDuration: { color: colors.textLabel, fontSize: 13, marginBottom: 12 },
   permRow: {
     flexDirection: 'row',
