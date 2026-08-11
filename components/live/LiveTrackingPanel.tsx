@@ -98,7 +98,7 @@ function phoneState(row: LiveTrackingLiveRow): { label: string; tone: string; ti
     return {
       label: 'Not reporting',
       tone: 'text-red-600 dark:text-red-400',
-      title: 'Clocked in, but no live-tracking session. The app is not running on their phone.',
+      title: 'The app on their phone has stopped sending. The coordinates shown are their last known position — ask them to open the app once to restart tracking.',
     };
   }
   if (!row.last_ping_utc) {
@@ -394,7 +394,18 @@ else if(ll.length===1){map.setView(ll[0],17);}
                 return <span className={`text-xs font-medium ${s.tone}`} title={s.title}>{s.label}</span>;
               },
             },
-            { key: 'last_ping_utc', header: 'Last Update', render: r => toIST((r as LiveTrackingLiveRow).last_ping_utc) },
+            {
+            key: 'last_ping_utc',
+            header: 'Last Update',
+            // Falls back to the newest FIX when there is no session: a phone
+            // that stopped still has a last-seen moment, and rendering a dash
+            // next to real coordinates read as a contradiction — it was the
+            // first question asked about this screen.
+            render: r => {
+              const row = r as LiveTrackingLiveRow;
+              return toIST(row.last_ping_utc ?? row.tracked_at_utc);
+            },
+          },
             {
               key: 'location_name',
               header: 'Attendance Location',
