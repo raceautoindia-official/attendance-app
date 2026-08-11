@@ -18,6 +18,37 @@ import { formatDateOnly } from '@/lib/date';
 
 type AttRow = AttendanceRecord & { employee_name?: string; emp_id?: string };
 
+interface TimelineEvent {
+  at_utc: string;
+  kind: string;
+  title: string;
+  detail: string | null;
+  latitude: number | null;
+  longitude: number | null;
+}
+interface TimelineData {
+  employee: { id: number; name: string; emp_id: string };
+  work_date: string;
+  events: TimelineEvent[];
+  tracking: { points: number; first_utc: string | null; last_utc: string | null };
+}
+
+const TL_TZ = 'Asia/Kolkata';
+const tlTime = (iso: string | null) =>
+  iso ? formatInTimeZone(new Date(iso), TL_TZ, 'hh:mm:ss a') : '—';
+
+// Colour per event kind: green for arrivals, red for enforced departures,
+// amber for exceptions someone should read, blue for the rest.
+const TL_TONE: Record<string, string> = {
+  clock_in: 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300',
+  clock_out: 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300',
+  geofence_auto_clockout: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
+  live_tracking_signal_lost: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
+  marked_absent: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
+  clock_in_outside_fence: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+  off_site_clock_in_rejected: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+};
+
 const STATUS_BADGE: Record<AttendanceStatus, 'success' | 'warning' | 'danger' | 'info' | 'neutral'> = {
   present: 'success', late: 'warning', absent: 'danger',
   early_departure: 'warning', leave: 'info', holiday: 'info',
@@ -53,6 +84,17 @@ type EditForm = z.infer<typeof editSchema>;
 const selectClass = 'block w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500';
 
 export default function AttendancePage() {
+  // One employee's whole day, told in order — every clock event, warning,
+  // exception and decision between the 07:00 boundaries.
+  const [dayView, setDayView] = useState<{ employeeId: number; date: string; name: string } | null>(null);
+  const { data: timelineData, isLoading: timelineLoading } = useQuery({
+    queryKey: ['timeline', dayView?.employeeId, dayView?.date],
+    enabled: !!dayView,
+    queryFn: async () => {
+      const res = await fetch(`/api/employees/${dayView!.employeeId}/timeline?date=${dayView!.date}`);
+      return res.json() as Promise<ApiResponse<TimelineData>>;
+    },
+  });
   const qc = useQueryClient();
   const today = formatInTimeZone(new Date(), TZ, 'yyyy-MM-dd');
   const [fromDate, setFromDate] = useState(today);
@@ -206,6 +248,26 @@ export default function AttendancePage() {
                 },
               },
               {
+                key: 'day_view',
+                header: 'Day',
+                render: r => {
+                  const row = r as AttRow;
+                  return (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setDayView({
+                        employeeId: row.employee_id,
+                        date: row.work_date,
+                        name: row.employee_name ?? row.emp_id ?? String(row.employee_id),
+                      })}
+                    >
+                      View
+                    </Button>
+                  );
+                },
+              },
+              {
                 key: 'clock_in_lat',
                 header: 'Location',
                 render: r => {
@@ -276,6 +338,63 @@ export default function AttendancePage() {
               <Button type="submit" loading={editMutation.isPending}>Save</Button>
             </div>
           </form>
+        )}
+      </Modal>
+      {/* The day, as a story. */}
+      <Modal
+        open={!!dayView}
+        onClose={() => setDayView(null)}
+        title={dayView ? `${dayView.name} — ${dayView.date}` : ''}
+        size="lg"
+      >
+        {timelineLoading ? (
+          <div className="flex justify-center py-8"><Spinner /></div>
+        ) : timelineData?.data ? (
+          <div className="space-y-3">
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {timelineData.data.tracking.points > 0
+                ? `Phone reported ${timelineData.data.tracking.points} fixes, ${tlTime(timelineData.data.tracking.first_utc)} – ${tlTime(timelineData.data.tracking.last_utc)}.`
+                : 'The phone sent no location fixes this day.'}
+            </p>
+            {timelineData.data.events.length === 0 ? (
+              <p className="py-4 text-sm text-slate-500 dark:text-slate-400">
+                No recorded events for this day.
+              </p>
+            ) : (
+              <div className="max-h-96 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-700/50">
+                {timelineData.data.events.map((ev, i) => (
+                  <div key={`${ev.at_utc}-${i}`} className="flex items-start gap-3 py-2">
+                    <span className={`mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-[11px] font-semibold ${TL_TONE[ev.kind] ?? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'}`}>
+                      {i + 1}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium text-slate-800 dark:text-slate-200">
+                        {ev.title}
+                        <span className="ml-2 text-xs font-normal tabular-nums text-slate-400">
+                          {tlTime(ev.at_utc)}
+                        </span>
+                      </p>
+                      {ev.detail && (
+                        <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{ev.detail}</p>
+                      )}
+                    </div>
+                    {ev.latitude != null && ev.longitude != null && (
+                      <a
+                        href={`https://www.google.com/maps?q=${ev.latitude},${ev.longitude}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="mt-0.5 flex-shrink-0 text-xs text-blue-600 hover:underline dark:text-blue-400"
+                      >
+                        Map ↗
+                      </a>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          <p className="py-4 text-sm text-red-500">Could not load the day.</p>
         )}
       </Modal>
     </div>
