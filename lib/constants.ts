@@ -123,17 +123,27 @@ export const REQUIRED_SHIFT_MINUTES = REQUIRED_SHIFT_HOURS * 60;
 // push a day above what the shift requires.
 // ---------------------------------------------------------------------------
 
-/** Shortest slice an employee may request. */
+// Permission quantity is deliberately UNLIMITED by default — the business
+// decided every request should stand on the manager's approval, not on a
+// quota. The dials still exist (set the env vars to reinstate a policy), and
+// the defaults below are the arithmetic ceilings rather than policies: a
+// request cannot outgrow its day, a month cannot hold more minutes than it
+// has. Every request still requires a manager's approval — THAT is the limit.
+
+/** Shortest slice an employee may request. 1 = no effective minimum. */
 export const PERMISSION_MIN_MINUTES =
-  Number(process.env.PERMISSION_MIN_MINUTES) || 15;
+  Number(process.env.PERMISSION_MIN_MINUTES) || 1;
 
-/** Longest single permission. */
+/** Longest single permission. A request lives inside one calendar day, so
+ *  1439 minutes is "the whole day" — no effective cap. */
 export const PERMISSION_MAX_MINUTES_PER_REQUEST =
-  Number(process.env.PERMISSION_MAX_MINUTES_PER_REQUEST) || 120;
+  Number(process.env.PERMISSION_MAX_MINUTES_PER_REQUEST) || 1439;
 
-/** Monthly entitlement. Pending + approved requests both consume it. */
+/** Monthly entitlement. 44640 is every minute of a 31-day month — the ceiling
+ *  arithmetic allows, i.e. no effective quota. Pending + approved both count,
+ *  which only matters if a real quota is ever reinstated via env. */
 export const PERMISSION_MAX_MINUTES_PER_MONTH =
-  Number(process.env.PERMISSION_MAX_MINUTES_PER_MONTH) || 120;
+  Number(process.env.PERMISSION_MAX_MINUTES_PER_MONTH) || 44640;
 
 /** How far back / forward a permission may be dated. */
 /**
