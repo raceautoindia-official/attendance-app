@@ -5,6 +5,8 @@ import { usePathname, useRouter } from 'next/navigation';
 import { cn } from '@/lib/cn';
 import { useCurrentUser } from '@/lib/useCurrentUser';
 import { clearStoredUser } from '@/lib/user';
+import { useQuery } from '@tanstack/react-query';
+import type { ApiResponse } from '@/lib/types';
 
 const NAV = [
   {
@@ -36,6 +38,19 @@ const NAV = [
       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
           d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"
+        />
+      </svg>
+    ),
+  },
+  {
+    label: 'Notifications',
+    href: '/notifications',
+    // Shows the number of off-site clock-ins nobody has looked at yet.
+    badge: true,
+    icon: (
+      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+          d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
         />
       </svg>
     ),
@@ -128,6 +143,20 @@ export default function Sidebar() {
   const user = useCurrentUser();
   const isSuperAdmin = user?.role === 'super_admin';
 
+  // How many off-site clock-ins nobody has looked at. Polled rather than pushed:
+  // the count only needs to be roughly current, and a socket for one integer is
+  // not worth the failure modes. The endpoint answers 0 before its migration has
+  // run, so this is safe on a server that has not been updated yet.
+  const { data: notifData } = useQuery({
+    queryKey: ['notifications', 'pending-count'],
+    queryFn: async () => {
+      const res = await fetch('/api/notifications?status=pending&limit=1');
+      return res.json() as Promise<ApiResponse<{ pending_count: number }>>;
+    },
+    refetchInterval: 60_000,
+  });
+  const pendingCount = notifData?.data?.pending_count ?? 0;
+
   async function handleLogout() {
     await fetch('/api/auth/logout', { method: 'POST' });
     clearStoredUser();
@@ -173,7 +202,12 @@ export default function Sidebar() {
                 )}
               >
                 {item.icon}
-                {item.label}
+                <span className="flex-1">{item.label}</span>
+                {item.badge && pendingCount > 0 && (
+                  <span className="rounded-full bg-red-500 px-2 py-0.5 text-xs font-semibold text-white">
+                    {pendingCount > 99 ? '99+' : pendingCount}
+                  </span>
+                )}
               </Link>
             );
           })}
@@ -211,7 +245,14 @@ export default function Sidebar() {
                 active ? 'text-blue-400' : 'text-slate-500 hover:text-slate-300',
               )}
             >
-              {item.icon}
+              {/* A dot, not a number: the bottom bar has no room for one, and
+                  "there is something waiting" is all it needs to say. */}
+              <span className="relative">
+                {item.icon}
+                {item.badge && pendingCount > 0 && (
+                  <span className="absolute -right-1 -top-0.5 h-2 w-2 rounded-full bg-red-500" />
+                )}
+              </span>
               <span className="hidden xs:block">{item.label}</span>
             </Link>
           );

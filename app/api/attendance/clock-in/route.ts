@@ -3,7 +3,12 @@ import { z } from 'zod';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import { isWithinGeofence, haversineDistance } from '@/lib/geo';
-import { hasWorkModeColumns, hasSessionColumns, hasOutOfFenceReasonColumn } from '@/lib/employeeDetails';
+import {
+  hasWorkModeColumns,
+  hasSessionColumns,
+  hasOutOfFenceReasonColumn,
+  hasOutOfFenceReviewColumns,
+} from '@/lib/employeeDetails';
 import {
   getWorkDateIST,
   isLate,
@@ -172,10 +177,11 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const [workModeCols, sessionCols, reasonCol] = await Promise.all([
+  const [workModeCols, sessionCols, reasonCol, reviewCols] = await Promise.all([
     hasWorkModeColumns(),
     hasSessionColumns(),
     hasOutOfFenceReasonColumn(),
+    hasOutOfFenceReviewColumns(),
   ]);
   const flags = workModeCols
     ? await queryOne<{ work_mode: string; allow_multiple_sessions: number | boolean }>(
@@ -375,6 +381,14 @@ export async function POST(request: NextRequest) {
     // morning's excuse attached and read as an exception it was not.
     const reasonSet = reasonCol ? ', out_of_fence_reason = ?' : '';
     const reasonParams = reasonCol ? [outOfFenceReason] : [];
+    // 'pending' the moment it happens, so it appears in the admin's
+    // Notifications tab. Cleared back to NULL on an ordinary clock-in, or a
+    // later session from the desk would inherit the morning's review state and
+    // sit in that list for ever.
+    const reviewSet = reviewCols
+      ? ', out_of_fence_status = ?, out_of_fence_reviewed_by = NULL, out_of_fence_reviewed_at = NULL, out_of_fence_review_notes = NULL'
+      : '';
+    const reviewParams = reviewCols ? [outOfFenceReason ? 'pending' : null] : [];
     // The duplicate-clock-in check earlier is a SEPARATE statement, so two
     // requests can both pass it before either one writes — a phone retrying a
     // slow request is enough to arrange that. Unguarded, the second UPDATE
@@ -401,10 +415,10 @@ export async function POST(request: NextRequest) {
            status          = ?,
            clock_out_utc   = NULL,
            total_minutes   = NULL
-           ${sessionSet}${reasonSet}
+           ${sessionSet}${reasonSet}${reviewSet}
        WHERE id = ? ${raceGuard}`,
       [toMySQLDatetime(nowUtc), lat, lng, ip, geofenceStatus, authMethod, effectiveStatus,
-       ...sessionParams, ...reasonParams, existing.id],
+       ...sessionParams, ...reasonParams, ...reviewParams, existing.id],
     );
     if ((updated as unknown as { affectedRows: number }).affectedRows === 0) {
       return NextResponse.json<ApiResponse>(
@@ -417,8 +431,8 @@ export async function POST(request: NextRequest) {
     const result = await query<{ insertId: number }>(
       `INSERT INTO attendance
          (employee_id, work_date, clock_in_utc, clock_in_lat, clock_in_lng,
-          ip_address, geofence_status, auth_method, status${reasonCol ? ', out_of_fence_reason' : ''})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?${reasonCol ? ', ?' : ''})`,
+          ip_address, geofence_status, auth_method, status${reasonCol ? ', out_of_fence_reason' : ''}${reviewCols ? ', out_of_fence_status' : ''})
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?${reasonCol ? ', ?' : ''}${reviewCols ? ', ?' : ''})`,
       [
         auth.id,
         workDate,
@@ -430,6 +444,7 @@ export async function POST(request: NextRequest) {
         authMethod,
         status,
         ...(reasonCol ? [outOfFenceReason] : []),
+        ...(reviewCols ? [outOfFenceReason ? 'pending' : null] : []),
       ],
     );
     // mysql2 returns OkPacket-shaped result with insertId
