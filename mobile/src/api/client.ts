@@ -9,7 +9,18 @@ import {
 } from '../storage/tokens';
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  /**
+   * The server's machine-readable refusal code and any facts it sent with it,
+   * e.g. code 'outside_fence' plus the site name, its radius and how far out
+   * the employee is. Matching on the MESSAGE instead would break the first time
+   * the wording changed — and that message carries a distance, so it changes.
+   */
+  constructor(
+    public status: number,
+    message: string,
+    public code?: string,
+    public info?: Record<string, unknown>,
+  ) {
     super(message);
   }
 }
@@ -118,7 +129,7 @@ export async function apiFetch<T = unknown>(
     throw new ApiError(401, 'Session expired. Please log in again.');
   }
   if (!res.ok || json?.success === false) {
-    throw new ApiError(res.status, json?.error ?? `HTTP ${res.status}`);
+    throw new ApiError(res.status, json?.error ?? `HTTP ${res.status}`, json?.code, json);
   }
   return json.data as T;
 }

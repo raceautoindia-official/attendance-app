@@ -184,7 +184,26 @@ export default function AttendancePage() {
               {
                 key: 'status',
                 header: 'Status',
-                render: r => <Badge variant={STATUS_BADGE[(r as AttRow).status]}>{(r as AttRow).status.replace('_', ' ')}</Badge>,
+                render: r => {
+                  const row = r as AttRow;
+                  return (
+                    <div>
+                      <Badge variant={STATUS_BADGE[row.status]}>{row.status.replace('_', ' ')}</Badge>
+                      {/* Clocked in away from the work site, having given a
+                          reason. Shown next to the status because it is the one
+                          thing about the day an admin has to actually read: the
+                          fence was waived on the employee's own say-so. */}
+                      {row.out_of_fence_reason && (
+                        <p
+                          className="mt-1 text-xs text-amber-600 dark:text-amber-400"
+                          title={row.out_of_fence_reason}
+                        >
+                          Off-site: {row.out_of_fence_reason}
+                        </p>
+                      )}
+                    </div>
+                  );
+                },
               },
               {
                 key: 'clock_in_lat',

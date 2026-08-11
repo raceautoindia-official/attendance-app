@@ -14,11 +14,12 @@ import {
   ToastAndroid,
   Alert,
   AppState,
+  Modal,
 } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { WebView } from 'react-native-webview';
 import * as Location from 'expo-location';
-import { apiFetch, logout } from '../api/client';
+import { apiFetch, logout, ApiError } from '../api/client';
 import { getStoredEmployee, StoredEmployee } from '../storage/tokens';
 import { saveTodayCache, getTodayCache, clearTodayCache } from '../storage/cache';
 import { startBackgroundTracking, stopBackgroundTracking, isTrackingRunning } from '../location/tracking';
@@ -253,6 +254,16 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   // Google Play prominent-disclosure consent. null = not yet loaded.
   const [hasConsent, setHasConsent] = useState<boolean | null>(null);
   const [consentVisible, setConsentVisible] = useState(false);
+  // Set when the server refuses a clock-in with code 'outside_fence'. Holding
+  // the server's own numbers — the site, its radius, how far out — means the
+  // prompt tells the employee exactly what it is asking them to explain.
+  const [fenceRefusal, setFenceRefusal] = useState<{
+    message: string;
+    locationName: string | null;
+    distanceM: number | null;
+    radiusM: number | null;
+  } | null>(null);
+  const [reasonText, setReasonText] = useState('');
   // Which action the consent modal should continue with after acceptance.
   const consentActionRef = useRef<'in' | 'out'>('in');
   // True once /today has actually answered — effects that stop/start the
@@ -594,12 +605,15 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     else await performClockOut();
   };
 
-  const performClockIn = async () => {
+  const performClockIn = async (outOfFenceReason?: string) => {
     setBusy(true);
     setError(null);
     try {
       const coords = await getCoords();
-      await apiFetch('/api/attendance/clock-in', { method: 'POST', body: coords });
+      await apiFetch('/api/attendance/clock-in', {
+        method: 'POST',
+        body: outOfFenceReason ? { ...coords, out_of_fence_reason: outOfFenceReason } : coords,
+      });
       // Only start location tracking if the admin enabled it for this employee.
       if (trackingEnabled) {
         await startBackgroundTracking();
@@ -616,14 +630,43 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         }
       }
       refresh();
-      toast('Clocked in successfully ✓');
+      toast(outOfFenceReason ? 'Clocked in — your manager has been notified' : 'Clocked in successfully ✓');
     } catch (e) {
+      // Away from the work site. Being refused outright is right for someone
+      // trying it on and wrong for the ordinary case — a delivery, a customer
+      // visit — where the employee could previously do nothing at all. Ask why,
+      // and send it: the day is still recorded as outside the fence and an
+      // admin is told, so this is an exception on the record, not a way round it.
+      //
+      // Only offered once per attempt: `outOfFenceReason` is already set on the
+      // retry, so a second refusal is shown as an error instead of looping.
+      if (!outOfFenceReason && e instanceof ApiError && e.code === 'outside_fence') {
+        setBusy(false);
+        setFenceRefusal({
+          message: e.message,
+          locationName: (e.info?.location_name as string | null) ?? null,
+          distanceM: (e.info?.distance_m as number | null) ?? null,
+          radiusM: (e.info?.radius_m as number | undefined) ?? null,
+        });
+        setReasonText('');
+        return;
+      }
       const msg = e instanceof Error ? e.message : 'Clock-in failed.';
       setError(msg);
       toast(msg);
     } finally {
       setBusy(false);
     }
+  };
+
+  const submitOutOfFenceReason = async () => {
+    const reason = reasonText.trim();
+    if (reason.length < 5) {
+      setError('Please say why you are clocking in from here — at least a few words.');
+      return;
+    }
+    setFenceRefusal(null);
+    await performClockIn(reason);
   };
 
   // Consent must precede ALL location access — clock-out also reads GPS, so a
@@ -816,6 +859,52 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
           setError('Location consent is required to mark attendance.');
         }}
       />
+
+      {/* Clocking in away from the work site. The refusal already told us the
+          site, its radius and how far out they are, so the prompt can say what
+          it is asking about rather than "you are outside". */}
+      <Modal visible={!!fenceRefusal} transparent animationType="fade" onRequestClose={() => setFenceRefusal(null)}>
+        <View style={styles.reasonBackdrop}>
+          <View style={styles.reasonCard}>
+            <Text style={styles.reasonTitle}>You are away from your work site</Text>
+            <Text style={styles.reasonBody}>
+              {fenceRefusal?.distanceM != null && fenceRefusal?.radiusM != null
+                ? `You are about ${fenceRefusal.distanceM} m from ${fenceRefusal.locationName ?? 'your work location'}, which has a ${fenceRefusal.radiusM} m boundary.`
+                : fenceRefusal?.message}
+            </Text>
+            <Text style={styles.reasonBody}>
+              You can still clock in — tell us why. Your manager is notified and the
+              day is recorded as off-site.
+            </Text>
+            <TextInput
+              style={styles.reasonInput}
+              placeholder="e.g. Customer visit at Ambattur"
+              placeholderTextColor={colors.textFaint}
+              value={reasonText}
+              onChangeText={setReasonText}
+              multiline
+              numberOfLines={3}
+              maxLength={500}
+              autoFocus
+            />
+            <View style={styles.reasonActions}>
+              <TouchableOpacity
+                style={styles.reasonCancel}
+                onPress={() => { setFenceRefusal(null); setReasonText(''); }}
+              >
+                <Text style={styles.reasonCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.reasonSubmit, reasonText.trim().length < 5 && styles.reasonSubmitOff]}
+                disabled={reasonText.trim().length < 5}
+                onPress={() => { void submitOutOfFenceReason(); }}
+              >
+                <Text style={styles.reasonSubmitText}>Clock in anyway</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
       <View style={styles.header}>
         <View style={styles.brandRow}>
           <View style={styles.logo}>
@@ -1169,6 +1258,30 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
 }
 
 const styles = StyleSheet.create({
+  // Away-from-site reason prompt.
+  reasonBackdrop: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center', paddingHorizontal: 20,
+  },
+  reasonCard: {
+    backgroundColor: colors.card, borderRadius: 14, padding: 20,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  reasonTitle: { color: colors.text, fontSize: 17, fontWeight: '700', marginBottom: 10 },
+  reasonBody: { color: colors.textMuted, fontSize: 13, lineHeight: 19, marginBottom: 10 },
+  reasonInput: {
+    backgroundColor: colors.bg, borderWidth: 1, borderColor: colors.borderInput,
+    borderRadius: 10, color: colors.text, paddingHorizontal: 12, paddingVertical: 10,
+    fontSize: 14, minHeight: 76, textAlignVertical: 'top', marginTop: 4, marginBottom: 16,
+  },
+  reasonActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10 },
+  reasonCancel: { paddingVertical: 10, paddingHorizontal: 16, borderRadius: 10 },
+  reasonCancelText: { color: colors.textMuted, fontSize: 14, fontWeight: '600' },
+  reasonSubmit: {
+    backgroundColor: colors.brand, paddingVertical: 10, paddingHorizontal: 16, borderRadius: 10,
+  },
+  reasonSubmitOff: { opacity: 0.45 },
+  reasonSubmitText: { color: '#ffffff', fontSize: 14, fontWeight: '700' },
   container: { flex: 1, backgroundColor: colors.bg },
   center: { flex: 1, backgroundColor: colors.bg, justifyContent: 'center', alignItems: 'center' },
   header: {

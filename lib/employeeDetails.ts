@@ -69,6 +69,18 @@ export async function hasSessionColumns(): Promise<boolean> {
   return Number(row?.c ?? 0) > 0;
 }
 
+/** True once the 2026-08-11 out-of-fence-reason migration has run. */
+export async function hasOutOfFenceReasonColumn(): Promise<boolean> {
+  const row = await queryOne<{ c: number }>(
+    `SELECT COUNT(*) AS c
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'attendance'
+       AND COLUMN_NAME = 'out_of_fence_reason'`,
+  );
+  return Number(row?.c ?? 0) > 0;
+}
+
 export function bankSelect(exists: boolean, alias = 'e'): string {
   return exists
     ? BANK_COLUMNS.map(c => `${alias}.${c}`).join(', ')

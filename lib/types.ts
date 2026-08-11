@@ -216,6 +216,8 @@ export interface AttendanceRecord {
   credited_minutes?: number | null;
   /** Hours actually worked on the day (banked sessions included) */
   worked_minutes?: number | null;
+  /** Why this clock-in was allowed from outside the work site, if it was. */
+  out_of_fence_reason?: string | null;
   /** Worked beyond the rostered day — the part credited_minutes caps off */
   overtime_minutes?: number;
   /**
@@ -330,6 +332,19 @@ export interface ApiResponse<T = undefined> {
   data?: T;
   error?: string;
   message?: string;
+  /**
+   * A stable identifier for a refusal the client must handle specially, e.g.
+   * 'outside_fence', which makes the phone ask for a reason and retry.
+   *
+   * The message beside it is written for a person and carries a distance and a
+   * site name, so it changes; matching on its text would break silently the
+   * first time the wording did.
+   */
+  code?: string;
+  /** Extra facts about a refusal — the fence's name, radius and how far out. */
+  location_name?: string | null;
+  radius_m?: number;
+  distance_m?: number | null;
 }
 
 // ---------------------------------------------------------------------------

@@ -2,8 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
-import { isWithinGeofence } from '@/lib/geo';
-import { hasWorkModeColumns, hasSessionColumns } from '@/lib/employeeDetails';
+import { isWithinGeofence, haversineDistance } from '@/lib/geo';
+import { hasWorkModeColumns, hasSessionColumns, hasOutOfFenceReasonColumn } from '@/lib/employeeDetails';
 import {
   getWorkDateIST,
   isLate,
@@ -15,6 +15,7 @@ import { TIMEZONE, MIN_FENCE_RADIUS_M } from '@/lib/constants';
 import { shiftForClockIn, type DayShift } from '@/lib/shifts';
 import { assessLocation } from '@/lib/locationTrust';
 import { checkDevice } from '@/lib/deviceBinding';
+import { sendOutOfFenceClockInAlert } from '@/lib/mailer';
 import type {
   ApiResponse,
   AttendanceRecord,
@@ -36,6 +37,11 @@ const ClockInSchema = z.object({
   // lib/locationTrust.ts. Absent on older builds, which are simply not checked.
   is_mocked: z.boolean().optional(),
   accuracy_m: z.number().nullable().optional(),
+  // Why this employee is clocking in from OUTSIDE their work site. Absent on
+  // the first attempt: the phone only asks for one after the server has
+  // refused with code 'outside_fence', so nobody is prompted for a reason they
+  // do not need. Long enough to be an explanation, not a keystroke.
+  out_of_fence_reason: z.string().trim().min(5).max(500).optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -166,9 +172,10 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const [workModeCols, sessionCols] = await Promise.all([
+  const [workModeCols, sessionCols, reasonCol] = await Promise.all([
     hasWorkModeColumns(),
     hasSessionColumns(),
+    hasOutOfFenceReasonColumn(),
   ]);
   const flags = workModeCols
     ? await queryOne<{ work_mode: string; allow_multiple_sessions: number | boolean }>(
@@ -299,16 +306,35 @@ export async function POST(request: NextRequest) {
     );
     geofenceStatus = inside ? 'inside' : 'outside';
 
-    if (geofenceStatus === 'outside') {
+    // Outside the fence WITHOUT a reason is still refused — but the refusal now
+    // says so in a form the phone can act on. Previously an employee genuinely
+    // away on work (a delivery, a customer visit) could do nothing at all, and
+    // no record was kept that they had even tried.
+    //
+    // `code` is what the app keys on. Matching on the message text would break
+    // the moment the wording changed, and the wording carries a distance that
+    // has to change.
+    if (geofenceStatus === 'outside' && !parsed.data.out_of_fence_reason) {
+      const away = Math.round(haversineDistance(lat, lng, schedule.loc_lat, schedule.loc_lng));
       return NextResponse.json<ApiResponse>(
         {
           success: false,
+          code: 'outside_fence',
           error: `You are outside ${schedule.loc_name ?? 'your work location'} — move within ${effectiveRadius} m to clock in`,
+          location_name: schedule.loc_name ?? null,
+          radius_m: effectiveRadius,
+          distance_m: Number.isFinite(away) ? away : null,
         },
         { status: 403 },
       );
     }
   }
+
+  // A reason only means anything when they really are outside a real fence.
+  // Sending one from inside the site, or with no fence at all, must not record
+  // an exception that never happened.
+  const outOfFenceReason =
+    geofenceStatus === 'outside' ? (parsed.data.out_of_fence_reason ?? null) : null;
 
   // 5. Determine attendance status
   const nowUtc = new Date();
@@ -344,6 +370,11 @@ export async function POST(request: NextRequest) {
       ? ', banked_minutes = ?, session_count = session_count + ?'
       : '';
     const sessionParams = sessionCols ? [bankedMinutes, completedToday ? 1 : 0] : [];
+    // Always written, never only when set: an attendance row is reused all day,
+    // so a later session clocked in from the site would otherwise keep the
+    // morning's excuse attached and read as an exception it was not.
+    const reasonSet = reasonCol ? ', out_of_fence_reason = ?' : '';
+    const reasonParams = reasonCol ? [outOfFenceReason] : [];
     // The duplicate-clock-in check earlier is a SEPARATE statement, so two
     // requests can both pass it before either one writes — a phone retrying a
     // slow request is enough to arrange that. Unguarded, the second UPDATE
@@ -370,9 +401,10 @@ export async function POST(request: NextRequest) {
            status          = ?,
            clock_out_utc   = NULL,
            total_minutes   = NULL
-           ${sessionSet}
+           ${sessionSet}${reasonSet}
        WHERE id = ? ${raceGuard}`,
-      [toMySQLDatetime(nowUtc), lat, lng, ip, geofenceStatus, authMethod, effectiveStatus, ...sessionParams, existing.id],
+      [toMySQLDatetime(nowUtc), lat, lng, ip, geofenceStatus, authMethod, effectiveStatus,
+       ...sessionParams, ...reasonParams, existing.id],
     );
     if ((updated as unknown as { affectedRows: number }).affectedRows === 0) {
       return NextResponse.json<ApiResponse>(
@@ -385,8 +417,8 @@ export async function POST(request: NextRequest) {
     const result = await query<{ insertId: number }>(
       `INSERT INTO attendance
          (employee_id, work_date, clock_in_utc, clock_in_lat, clock_in_lng,
-          ip_address, geofence_status, auth_method, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ip_address, geofence_status, auth_method, status${reasonCol ? ', out_of_fence_reason' : ''})
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?${reasonCol ? ', ?' : ''})`,
       [
         auth.id,
         workDate,
@@ -397,6 +429,7 @@ export async function POST(request: NextRequest) {
         geofenceStatus,
         authMethod,
         status,
+        ...(reasonCol ? [outOfFenceReason] : []),
       ],
     );
     // mysql2 returns OkPacket-shaped result with insertId
@@ -420,9 +453,72 @@ export async function POST(request: NextRequest) {
       latitude: lat,
       longitude: lng,
       auth_method: authMethod,
+      out_of_fence_reason: outOfFenceReason,
     },
     ip_address: ip,
   });
+
+  // 7.2 Tell an admin when the fence was waived.
+  //
+  // The fence was not enforced, on the employee's own say-so, and the only thing
+  // standing behind it is the sentence they typed — so this is the one event an
+  // admin has to actually see. It is written to the audit log FIRST and emailed
+  // second: email has been misconfigured for weeks on this deployment, and a
+  // notification that exists only in a failed SMTP call is no notification.
+  //
+  // Nothing here may break the clock-in. The employee has already been recorded
+  // as present; failing their attendance because an alert could not be sent
+  // would punish them for an admin's mail settings.
+  if (outOfFenceReason) {
+    const awayM = schedule?.loc_lat != null && schedule?.loc_lng != null
+      ? Math.round(haversineDistance(lat, lng, schedule.loc_lat, schedule.loc_lng))
+      : null;
+    try {
+      await insertAuditLog({
+        action: 'clock_in_outside_fence',
+        entity: 'attendance',
+        entity_id: insertId,
+        performed_by: auth.id,
+        details: {
+          employee_id: auth.id,
+          work_date: workDate,
+          reason: outOfFenceReason,
+          location: schedule?.loc_name ?? null,
+          radius_m: schedule?.loc_radius != null ? Number(schedule.loc_radius) : null,
+          distance_m: awayM,
+          latitude: lat,
+          longitude: lng,
+        },
+        ip_address: ip,
+      });
+
+      const admins = await query<{ email: string | null }>(
+        `SELECT DISTINCT email FROM employees
+          WHERE is_active = TRUE AND role IN ('super_admin', 'manager') AND email IS NOT NULL`,
+      );
+      const me = await queryOne<{ name: string; emp_id: string }>(
+        'SELECT name, emp_id FROM employees WHERE id = ?', [auth.id]);
+      await Promise.all(
+        admins
+          .map(a => a.email)
+          .filter((e): e is string => !!e)
+          .map(email =>
+            sendOutOfFenceClockInAlert(email, {
+              employeeName: me?.name ?? `Employee ${auth.id}`,
+              empId: me?.emp_id ?? String(auth.id),
+              locationName: schedule?.loc_name ?? null,
+              distanceM: awayM,
+              radiusM: Math.max(Number(schedule?.loc_radius ?? 100), MIN_FENCE_RADIUS_M),
+              reason: outOfFenceReason,
+              latitude: lat,
+              longitude: lng,
+              clockedInAt: nowUtc,
+            })),
+      );
+    } catch (err) {
+      console.error('[clock-in] off-site alert failed (attendance was still recorded)', err);
+    }
+  }
 
   // 7.5 Auto-start live tracking right after successful clock-in.
   // If live-tracking tables are missing in a local/legacy DB, we do not fail clock-in.
