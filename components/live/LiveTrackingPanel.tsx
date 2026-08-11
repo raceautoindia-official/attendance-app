@@ -230,7 +230,24 @@ export default function LiveTrackingPanel() {
       if (!Number.isFinite(ms) || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
       buckets.set(Math.floor(ms / 60_000), { lat, lng, t: fmt(p.tracked_at_utc) });
     }
-    let marks = [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([, m]) => m);
+    const bucketed = [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([, m]) => m);
+    // A number should advance when the PERSON moves, not when the signal
+    // wobbles. GPS on a stationary phone drifts a few metres each fix, and one
+    // badge per minute turned somebody sitting at a desk into a 79-badge pile.
+    // Consecutive minute-marks within jitter distance of the last KEPT badge
+    // merge into it as a dwell — the badge remembers when they arrived (t) and
+    // when they were last seen there (t2), so its popup reads "2:10 – 3:29 pm"
+    // instead of pretending 79 separate visits.
+    const JITTER_M = 40;
+    let marks: Array<{ lat: number; lng: number; t: string; t2?: string }> = [];
+    for (const m of bucketed) {
+      const prev = marks[marks.length - 1];
+      if (prev && metresBetween(prev.lat, prev.lng, m.lat, m.lng) <= JITTER_M) {
+        prev.t2 = m.t; // still there — extend the dwell
+      } else {
+        marks.push({ ...m });
+      }
+    }
     if (!marks.length && selectedHasCoords) {
       marks = [{ lat: Number(selectedLat), lng: Number(selectedLng), t: '' }];
     }
@@ -292,7 +309,8 @@ function badge(n,bg){return L.divIcon({className:'',iconSize:[24,24],iconAnchor:
 var group=[];
 marks.forEach(function(m,i){
   var bg = i===0 ? '#16a34a' : (i===marks.length-1 ? '#dc2626' : '#2563eb');
-  var label = (i===0?'Start':(i===marks.length-1?'Latest':'Minute mark'))+' #'+m.n+(m.t?'<br/>🕐 '+m.t:'');
+  var when = m.t2 && m.t2!==m.t ? m.t+' – '+m.t2 : m.t;
+  var label = (i===0?'Start':(i===marks.length-1?'Latest':'Stop'))+' #'+m.n+(when?'<br/>🕐 '+when:'');
   group.push(L.marker([m.lat,m.lng],{icon:badge(m.n,bg),zIndexOffset:i===marks.length-1?1000:i===0?900:0})
     .addTo(map).bindPopup(label));
 });
@@ -493,7 +511,7 @@ else if(ll.length===1){map.setView(ll[0],17);}
                 />
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Numbers are minute-by-minute: 1 (green) is where the window starts, the highest number (red) is where they are now. Tap a number for its exact time. The blue line is the path taken.
+                Numbers mark each place they stopped or passed, in order — 1 (green) first, the highest (red) latest. Someone who stays put keeps ONE badge; its time shows how long they were there. Tap a number for times. The blue line is the path taken.
               </p>
 
               {/* Numbered movement log: every recorded location in order,
