@@ -221,8 +221,14 @@ export interface AttendanceRecord {
   worked_minutes?: number | null;
   /** Why this clock-in was allowed from outside the work site, if it was. */
   out_of_fence_reason?: string | null;
-  /** Worked beyond the rostered day — the part credited_minutes caps off */
+  /** Worked past the overtime line — the part credited_minutes caps off */
   overtime_minutes?: number;
+  /** How late the day's FIRST clock-in was, past shift start + grace.
+   *  null when the day has no start time to be late against (flexible shift,
+   *  or no schedule at all) — which is not the same as 0. */
+  late_minutes?: number | null;
+  /** Minutes between sessions: elapsed span minus time actually worked. */
+  break_minutes?: number | null;
   /**
    * This session was closed by the away-from-site watchdog, not by a person.
    *

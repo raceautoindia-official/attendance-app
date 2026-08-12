@@ -116,6 +116,25 @@ export const LATE_THRESHOLD_MINUTES = 10; // matches default grace_minutes
 export const REQUIRED_SHIFT_HOURS = 9;
 export const REQUIRED_SHIFT_MINUTES = REQUIRED_SHIFT_HOURS * 60;
 
+/**
+ * Work past this many minutes in a day is overtime — the SAME line for
+ * everyone, whatever their own shift asks of them. Nine hours: 9h 00m is the
+ * day, 9h 01m is one minute of overtime.
+ *
+ * It used to be measured against each employee's rostered length, so an
+ * eight-hour shift started earning overtime at 8h while a nine-hour one did
+ * not — two people doing 8h 30m on the same site, one shown as owed overtime
+ * and one not. Whether the day was long enough to have been short is what
+ * `credited_minutes` answers; overtime answers a different question, and the
+ * business answers it with one number.
+ *
+ * Set OVERTIME_AFTER_HOURS to move the line.
+ */
+export const OVERTIME_AFTER_MINUTES =
+  Number(process.env.OVERTIME_AFTER_HOURS) > 0
+    ? Math.round(Number(process.env.OVERTIME_AFTER_HOURS) * 60)
+    : REQUIRED_SHIFT_MINUTES;
+
 // ---------------------------------------------------------------------------
 // Permission hours — a short paid absence inside a working day (e.g. 10:00 to
 // 12:00) that the employee applies for and an admin approves. Approved minutes

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import StatCard from '@/components/ui/StatCard';
@@ -28,6 +28,12 @@ const STATUS_BADGE: Record<AttendanceStatus, 'success' | 'warning' | 'danger' | 
   present: 'success', late: 'warning', absent: 'danger',
   early_departure: 'warning', leave: 'info', holiday: 'info',
 };
+
+// The values /api/attendance accepts for its status filter. Anything else is
+// ignored there, so the dropdown must not offer one.
+const STATUS_FILTERS: AttendanceStatus[] = [
+  'present', 'late', 'absent', 'early_departure', 'leave', 'holiday',
+];
 
 const IST = 'Asia/Kolkata';
 const IST_LOCALE = 'en-IN';
@@ -122,14 +128,29 @@ export default function OverviewPage() {
     refetchInterval: 60_000,
   });
 
-  const { data: attData, isLoading: attLoading } = useQuery({
-    queryKey: ['attendance', 'today-list', today],
+  // Status filter for the day's table. Applied by the SERVER, not by hiding
+  // rows here: the list is capped at 100 records, so filtering after the fetch
+  // would search only the first hundred and quietly miss the rest.
+  const [statusFilter, setStatusFilter] = useState<AttendanceStatus | ''>('');
+
+  const dayQuery = useCallback((status: AttendanceStatus | '') => ({
+    queryKey: ['attendance', 'today-list', today, status] as const,
     queryFn: async () => {
-      const res = await fetch(`/api/attendance?from_date=${today}&to_date=${today}&limit=100`);
+      const res = await fetch(
+        `/api/attendance?from_date=${today}&to_date=${today}&limit=100`
+        + (status ? `&status=${status}` : ''),
+      );
       return res.json() as Promise<ApiResponse<{ records: AttRow[]; pagination: { total: number } }>>;
     },
     refetchInterval: 60_000,
-  });
+  }), [today]);
+
+  // The table honours the filter; the stat cards never do. Counting "present"
+  // off a list filtered to 'absent' would report nobody present all day.
+  // With no filter set both hooks resolve to the SAME query key, so this is
+  // one request until somebody actually filters.
+  const { data: attData, isLoading: attLoading } = useQuery(dayQuery(statusFilter));
+  const { data: allDayData } = useQuery(dayQuery(''));
 
   const { data: absentData } = useQuery({
     queryKey: ['attendance', 'absent-today', today],
@@ -153,7 +174,8 @@ export default function OverviewPage() {
   const totalEmployees = empData?.data?.pagination.total ?? 0;
   const records = attData?.data?.records ?? [];
   const dailyUpdates = dailyUpdatesData?.data?.updates ?? [];
-  const present = records.filter(r => r.status === 'present' || r.status === 'late').length;
+  const allDayRecords = allDayData?.data?.records ?? records;
+  const present = allDayRecords.filter(r => r.status === 'present' || r.status === 'late').length;
   // Absent comes from the server, which applies the same rule the end-of-day
   // job does. Counting rows here showed 0 all day every day: an 'absent' row
   // is only written after the day FINISHES. Deriving it in the browser instead
@@ -292,9 +314,24 @@ export default function OverviewPage() {
               })}
             </p>
           </div>
-          <span className="text-xs text-slate-400 dark:text-slate-500">
-            Auto-refreshes every 60s
-          </span>
+          <div className="flex items-center gap-3">
+            <label className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+              Status
+              <select
+                value={statusFilter}
+                onChange={e => setStatusFilter(e.target.value as AttendanceStatus | '')}
+                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1.5 text-xs text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">All</option>
+                {STATUS_FILTERS.map(s => (
+                  <option key={s} value={s}>{s.replace('_', ' ')}</option>
+                ))}
+              </select>
+            </label>
+            <span className="hidden sm:inline text-xs text-slate-400 dark:text-slate-500">
+              Auto-refreshes every 60s
+            </span>
+          </div>
         </div>
 
         {attLoading ? (
@@ -304,30 +341,107 @@ export default function OverviewPage() {
             columns={[
               {
                 key: 'employee_name',
-                header: 'Employee',
+                header: 'Employee Name',
                 render: r => (
-                  <div>
-                    <p className="font-medium text-slate-800 dark:text-slate-200">{(r as AttRow).employee_name ?? '—'}</p>
-                    <p className="text-xs text-slate-400">{(r as AttRow).emp_id}</p>
-                  </div>
+                  <span className="font-medium text-slate-800 dark:text-slate-200">
+                    {(r as AttRow).employee_name ?? '—'}
+                  </span>
+                ),
+              },
+              {
+                key: 'emp_id',
+                header: 'Employee ID',
+                render: r => (
+                  <span className="text-slate-500 dark:text-slate-400 tabular-nums">
+                    {(r as AttRow).emp_id ?? '—'}
+                  </span>
                 ),
               },
               {
                 key: 'clock_in_utc',
-                header: 'Clock In',
-                render: r => toIST((r as AttRow).clock_in_utc),
+                header: 'Check-in',
+                render: r => {
+                  const row = r as AttRow;
+                  // The day's FIRST arrival, not the current session's start —
+                  // on a multi-session day clock_in_utc moves to the afternoon
+                  // and would report someone in at 9:10 as having arrived at 2pm.
+                  const first = row.first_clock_in_utc ?? row.clock_in_utc;
+                  return (
+                    <div>
+                      <span className="tabular-nums">{toIST(first)}</span>
+                      {/* Clocked in from outside the work site. The Geofence
+                          column that used to carry this is gone, but the fact
+                          is not: it belongs to the check-in itself. */}
+                      {row.geofence_status === 'outside' && (
+                        <p
+                          className="text-[11px] text-red-600 dark:text-red-400"
+                          title={row.out_of_fence_reason ?? 'Clocked in away from the work site'}
+                        >
+                          off-site
+                        </p>
+                      )}
+                    </div>
+                  );
+                },
               },
               {
                 key: 'clock_out_utc',
-                header: 'Clock Out',
-                render: r => toIST((r as AttRow).clock_out_utc),
+                header: 'Check-out',
+                render: r => <span className="tabular-nums">{toIST((r as AttRow).clock_out_utc)}</span>,
+              },
+              {
+                key: 'break_minutes',
+                header: 'Break',
+                render: r => {
+                  const m = (r as AttRow).break_minutes;
+                  if (m == null) return <span className="text-slate-400">—</span>;
+                  return <span className="tabular-nums">{minutesToHours(m)}</span>;
+                },
               },
               {
                 key: 'total_minutes',
-                header: 'Hours',
+                header: 'Total Hours',
                 render: r => {
-                  const m = (r as AttRow).total_minutes;
-                  return m != null ? `${Math.floor(m / 60)}h ${m % 60}m` : '—';
+                  const row = r as AttRow;
+                  // worked_minutes counts the sessions already banked, so an
+                  // employee back from lunch shows the morning rather than a
+                  // blank until they clock out for the day.
+                  const m = row.worked_minutes ?? row.total_minutes;
+                  return (
+                    <span className="tabular-nums font-medium text-slate-800 dark:text-slate-200">
+                      {minutesToHours(m)}
+                    </span>
+                  );
+                },
+              },
+              {
+                key: 'late_minutes',
+                header: 'Late',
+                render: r => {
+                  const m = (r as AttRow).late_minutes;
+                  // null and 0 mean different things: null is "this day has no
+                  // start time to be late against" (flexible shift, or nobody
+                  // rostered them), 0 is "they made it".
+                  if (m == null) return <span className="text-slate-400">—</span>;
+                  if (m === 0) return <span className="text-slate-400">On time</span>;
+                  return (
+                    <span className="tabular-nums text-amber-600 dark:text-amber-400">
+                      {minutesToHours(m)}
+                    </span>
+                  );
+                },
+              },
+              {
+                key: 'overtime_minutes',
+                header: 'Overtime',
+                render: r => {
+                  const m = (r as AttRow).overtime_minutes ?? 0;
+                  if (m <= 0) return <span className="text-slate-400">—</span>;
+                  return (
+                    <span className="tabular-nums text-green-600 dark:text-green-400">
+                      +{minutesToHours(m)}
+                    </span>
+                  );
                 },
               },
               {
@@ -339,38 +453,24 @@ export default function OverviewPage() {
                   </Badge>
                 ),
               },
-              {
-                key: 'location_name',
-                header: 'Location',
-                render: r => {
-                  const row = r as AttRow;
-                  return row.location_name ? (
-                    <div>
-                      <p className="text-sm">{row.location_name}</p>
-                      <p className="text-xs text-slate-400">{row.location_address ?? ''}</p>
-                    </div>
-                  ) : <span className="text-slate-400 text-xs">No location assigned</span>;
-                },
-              },
-              {
-                key: 'geofence_status',
-                header: 'Geofence',
-                render: r => {
-                  const g = (r as AttRow).geofence_status;
-                  if (g === 'not_required') return <span className="text-slate-400 text-xs">—</span>;
-                  return <Badge variant={g === 'inside' ? 'success' : 'danger'}>{g}</Badge>;
-                },
-              },
-              { key: 'work_date', header: 'Date', render: r => formatDateOnly((r as AttRow).work_date) },
-              // A "Signal" column used to sit here. It cast an attendance row to
-              // a live-tracking row and read last_ping_utc, which belongs to
-              // live_tracking_sessions and is not returned by this endpoint — so
-              // it rendered "Unknown" for every employee, every day, since it was
-              // written. Whether a phone is reporting now lives on the Live
-              // Tracking page, where the data actually is.
+              // Location, Geofence and Date columns used to follow. The date is
+              // now on the heading (the table is one day), and the location is
+              // on the Live Tracking page beside the map that shows it. The one
+              // thing that was load-bearing — an off-site clock-in — moved onto
+              // the Check-in cell rather than being dropped.
+              //
+              // A "Signal" column used to sit here too. It cast an attendance
+              // row to a live-tracking row and read last_ping_utc, which belongs
+              // to live_tracking_sessions and is not returned by this endpoint —
+              // so it rendered "Unknown" for every employee, every day, since it
+              // was written.
             ]}
             data={records as object[]}
-            emptyMessage="No attendance records for today."
+            emptyMessage={
+              statusFilter
+                ? `No one is "${statusFilter.replace('_', ' ')}" today.`
+                : 'No attendance records for today.'
+            }
           />
         )}
       </Card>

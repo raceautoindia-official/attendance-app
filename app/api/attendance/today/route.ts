@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
-import { getWorkDateIST, workDayEndUtc, previousWorkDate, toMySQLDatetime } from '@/lib/attendance';
+import { getWorkDateIST, workDayEndUtc, previousWorkDate, toMySQLDatetime, overtimeMinutes } from '@/lib/attendance';
 import { hasWorkModeColumns } from '@/lib/employeeDetails';
 import {
   hasOnDutyColumn,
@@ -179,16 +179,13 @@ export async function GET(request: NextRequest) {
       requiredMinutes,
     );
     // Hours on the day so far — banked sessions plus the open one — and how
-    // much of that is beyond the rostered day. The phone shows both so someone
+    // much of that is past the overtime line. The phone shows both so someone
     // working late can see the extra time accruing rather than a figure pinned
     // at the shift length.
     const banked = Number(attendance.banked_minutes ?? 0);
     const worked = attendance.total_minutes ?? (banked > 0 ? banked : null);
     attendance.worked_minutes = worked;
-    attendance.overtime_minutes =
-      worked != null && requiredMinutes != null && worked > requiredMinutes
-        ? worked - requiredMinutes
-        : 0;
+    attendance.overtime_minutes = overtimeMinutes(worked);
 
     // Did the away-from-site watchdog close this session?
     //

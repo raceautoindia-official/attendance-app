@@ -9,6 +9,7 @@ import {
   permissionMinutesSelect,
 } from '@/lib/permissions';
 import { dayRequiredMinutesSelect } from '@/lib/shifts';
+import { overtimeMinutes, lateMinutes, breakMinutes } from '@/lib/attendance';
 import type { ApiResponse, AttendanceRecord } from '@/lib/types';
 
 // ---------------------------------------------------------------------------
@@ -130,6 +131,8 @@ export async function GET(request: NextRequest) {
               ${sessionCols ? 'a.banked_minutes, a.session_count,' : '0 AS banked_minutes, 1 AS session_count,'}
               e.name AS employee_name, e.emp_id,
               l.name AS location_name, l.address AS location_address,
+              s.start_time AS shift_start_time, s.grace_minutes AS shift_grace_minutes,
+              s.type AS shift_type,
               ${permissionExpr} AS permission_minutes,
               ${dayRequiredMinutesSelect('a.employee_id', 'a.work_date')} AS required_minutes
        FROM attendance a
@@ -164,12 +167,15 @@ export async function GET(request: NextRequest) {
     // credit those so a plant employee's hours aren't shown as blank mid-day.
     const banked = Number(r.banked_minutes ?? 0);
     const worked = r.total_minutes ?? (banked > 0 ? banked : null);
-    // Hours beyond what the day asked for. Reported separately from credited
-    // minutes, which cap at the rostered day — overtime is precisely the part
-    // that cap hides, and it is the reason a day can read more than a shift.
-    const overtime = worked != null && required != null && worked > required
-      ? worked - required
-      : 0;
+    // Hours past the overtime line — a flat nine for everyone, not each
+    // employee's own roster. Reported separately from credited minutes, which
+    // cap at the rostered day and so can never show a long day as long.
+    const shift = r as AttendanceRecord & {
+      shift_start_time?: string | null;
+      shift_grace_minutes?: number | null;
+      shift_type?: string | null;
+    };
+    const firstIn = r.first_clock_in_utc ?? r.clock_in_utc;
     return {
       ...r,
       banked_minutes: banked,
@@ -178,7 +184,20 @@ export async function GET(request: NextRequest) {
       required_minutes: required,
       credited_minutes: creditedMinutes(worked, permission, required),
       worked_minutes: worked,
-      overtime_minutes: overtime,
+      overtime_minutes: overtimeMinutes(worked),
+      late_minutes: lateMinutes(
+        firstIn ? new Date(firstIn) : null,
+        shift.shift_start_time,
+        shift.shift_grace_minutes,
+        shift.shift_type,
+      ),
+      break_minutes: breakMinutes(
+        firstIn ? new Date(firstIn) : null,
+        r.clock_in_utc ? new Date(r.clock_in_utc) : null,
+        r.clock_out_utc ? new Date(r.clock_out_utc) : null,
+        worked,
+        banked,
+      ),
     };
   });
 

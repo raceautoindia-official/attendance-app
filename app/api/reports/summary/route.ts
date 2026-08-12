@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
-import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from '@/lib/constants';
+import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, OVERTIME_AFTER_MINUTES } from '@/lib/constants';
 import {
   hasOnDutyColumn,
   hasPermissionTable,
@@ -164,11 +164,16 @@ export async function GET(request: NextRequest) {
                   )
            END
          ), 0)                                                                          AS total_minutes_credited,
-         -- Hours worked BEYOND the day's roster, summed per day so a long day
+         -- Hours worked BEYOND the overtime line, summed per day so a long day
          -- is not cancelled out by a short one. This is the part the credited
          -- figure caps away, and what "worked extra" means on a report.
+         --
+         -- The line is the same for everyone (OVERTIME_AFTER_MINUTES) rather
+         -- than each employee's rostered length, which is how the attendance
+         -- list and the phone read it too. It was per-shift here, so an
+         -- eight-hour roster accrued overtime an hour before a nine-hour one.
          COALESCE(SUM(GREATEST(0,
-           COALESCE(a.total_minutes, 0) - ${dayRequiredMinutesSelect('a.employee_id', 'a.work_date')}
+           COALESCE(a.total_minutes, 0) - ${OVERTIME_AFTER_MINUTES}
          )), 0)                                                                         AS total_overtime_minutes,
          COUNT(CASE WHEN a.total_minutes IS NOT NULL THEN 1 END)                        AS days_with_hours
        FROM employees e
