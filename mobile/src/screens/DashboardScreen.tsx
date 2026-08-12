@@ -744,6 +744,16 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       //
       // Only offered once per attempt: `outOfFenceReason` is already set on the
       // retry, so a second refusal is shown as an error instead of looping.
+      // The fence already ended this day once, and they are still away from the
+      // site. No reason box: the answer would be refused, and offering it reads
+      // as "type something and you are back on the clock". Shown as an alert
+      // rather than a toast because it asks them to do something — walk back —
+      // and a toast is gone before they have read it.
+      if (e instanceof ApiError && e.code === 'fence_closed_day') {
+        setBusy(false);
+        Alert.alert('Come back to the site to clock in', e.message, [{ text: 'OK' }]);
+        return;
+      }
       if (!outOfFenceReason && e instanceof ApiError && e.code === 'outside_fence') {
         setBusy(false);
         setFenceRefusal({

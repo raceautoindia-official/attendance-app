@@ -20,6 +20,8 @@ import { formatInTimeZone } from 'date-fns-tz';
 import { TIMEZONE, MIN_FENCE_RADIUS_M } from '@/lib/constants';
 import { shiftForClockIn, type DayShift } from '@/lib/shifts';
 import { assessLocation } from '@/lib/locationTrust';
+import { activeOnDuty } from '@/lib/permissions';
+import { lastFenceClosure } from '@/lib/fenceClosure';
 import { checkDevice } from '@/lib/deviceBinding';
 import { sendOutOfFenceClockInAlert } from '@/lib/mailer';
 import type {
@@ -314,6 +316,46 @@ export async function POST(request: NextRequest) {
     );
     geofenceStatus = inside ? 'inside' : 'outside';
 
+    // Working away from the site WITH AN ADMIN'S BLESSING. The watchdog already
+    // honours this — an approved on-duty window never ends anyone's day — but
+    // clock-in did not, so the sanctioned route still put people in front of
+    // the reason box like an exception. Approved is approved: no reason asked,
+    // nothing flagged for review.
+    const onDuty = geofenceStatus === 'outside'
+      ? await activeOnDuty(auth.id, workDate, formatInTimeZone(new Date(), TIMEZONE, 'HH:mm:ss'))
+      : null;
+
+    // THE FENCE ALREADY ENDED THIS DAY ONCE.
+    //
+    // Being away from the site with a reason is for a day that starts away —
+    // a delivery, a customer visit. It must not undo an away-from-site
+    // clock-out: leave the site, take the four warnings, get clocked out, then
+    // type five characters and be back on the clock from the same spot. The
+    // watchdog would close it again, they would re-open it again, and the
+    // fence would mean nothing at all.
+    //
+    // Checked BEFORE the reason prompt, so the phone never offers a box whose
+    // answer is going to be refused.
+    if (geofenceStatus === 'outside' && !onDuty && existing?.id) {
+      const closure = await lastFenceClosure(existing.id);
+      if (closure) {
+        const away = Math.round(haversineDistance(lat, lng, schedule.loc_lat, schedule.loc_lng));
+        return NextResponse.json<ApiResponse>(
+          {
+            success: false,
+            code: 'fence_closed_day',
+            error: `Your day was closed automatically when you left ${schedule.loc_name ?? 'your work location'}`
+              + `. You are ${Number.isFinite(away) ? `${away} m` : 'still'} away — return to within ${effectiveRadius} m`
+              + ' to clock in again, or ask your manager to approve on-duty work.',
+            location_name: schedule.loc_name ?? null,
+            radius_m: effectiveRadius,
+            distance_m: Number.isFinite(away) ? away : null,
+          },
+          { status: 403 },
+        );
+      }
+    }
+
     // Outside the fence WITHOUT a reason is still refused — but the refusal now
     // says so in a form the phone can act on. Previously an employee genuinely
     // away on work (a delivery, a customer visit) could do nothing at all, and
@@ -322,7 +364,7 @@ export async function POST(request: NextRequest) {
     // `code` is what the app keys on. Matching on the message text would break
     // the moment the wording changed, and the wording carries a distance that
     // has to change.
-    if (geofenceStatus === 'outside' && !parsed.data.out_of_fence_reason) {
+    if (geofenceStatus === 'outside' && !onDuty && !parsed.data.out_of_fence_reason) {
       const away = Math.round(haversineDistance(lat, lng, schedule.loc_lat, schedule.loc_lng));
       return NextResponse.json<ApiResponse>(
         {
