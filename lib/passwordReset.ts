@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { query, queryOne } from '@/lib/db';
+import { usingSesApi } from '@/lib/mailer';
 
 // ---------------------------------------------------------------------------
 // Emailed PIN resets.
@@ -47,6 +48,10 @@ export async function hasPasswordResetTable(): Promise<boolean> {
  * about any account.
  */
 export function mailIsConfigured(): boolean {
+  // The SES API path needs no SMTP host at all — region plus IAM keys is the
+  // whole configuration, and it is the preferred route because it speaks
+  // HTTPS rather than a mail port a host may block.
+  if (usingSesApi()) return true;
   const host = process.env.SMTP_HOST?.trim();
   if (!host) return false;
   return !/yourprovider|example\.|changeme/i.test(host);

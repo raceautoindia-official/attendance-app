@@ -1,9 +1,38 @@
 import nodemailer from 'nodemailer';
+import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
 import { format } from 'date-fns';
 
 // ---------------------------------------------------------------------------
-// Transporter — created once and reused for all sends.
+// Two ways out, chosen by what is configured.
+//
+// 1. AMAZON SES API — set SES_REGION, SES_ACCESS_KEY_ID, SES_SECRET_ACCESS_KEY.
+//    Preferred: it speaks HTTPS on 443, which hosting providers do not block,
+//    while outbound 587/465 frequently are — and it uses ordinary IAM keys
+//    rather than the separate SMTP credentials SES makes you generate.
+// 2. PLAIN SMTP — SMTP_HOST/PORT/USER/PASSWORD, for any other provider (or
+//    SES via its SMTP interface, if that is already set up).
+//
+// Both send from SMTP_FROM, which must be an identity SES has verified.
 // ---------------------------------------------------------------------------
+
+const FROM = process.env.SMTP_FROM ?? 'noreply@company.com';
+
+const SES_REGION = process.env.SES_REGION?.trim();
+const SES_KEY = process.env.SES_ACCESS_KEY_ID?.trim();
+const SES_SECRET = process.env.SES_SECRET_ACCESS_KEY?.trim();
+
+/** True when the SES API is fully configured. */
+export function usingSesApi(): boolean {
+  return !!(SES_REGION && SES_KEY && SES_SECRET);
+}
+
+// Created once and reused; the SDK keeps its own connection pool.
+const ses = usingSesApi()
+  ? new SESv2Client({
+      region: SES_REGION,
+      credentials: { accessKeyId: SES_KEY!, secretAccessKey: SES_SECRET! },
+    })
+  : null;
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
@@ -14,8 +43,6 @@ const transporter = nodemailer.createTransport({
     pass: process.env.SMTP_PASSWORD,
   },
 });
-
-const FROM = process.env.SMTP_FROM ?? 'noreply@company.com';
 
 // ---------------------------------------------------------------------------
 // Internal send helper — all errors are caught and logged so that email
@@ -28,7 +55,20 @@ async function send(
   html: string,
 ): Promise<void> {
   try {
-    await transporter.sendMail({ from: FROM, to, subject, html });
+    if (ses) {
+      await ses.send(new SendEmailCommand({
+        FromEmailAddress: FROM,
+        Destination: { ToAddresses: [to] },
+        Content: {
+          Simple: {
+            Subject: { Data: subject, Charset: 'UTF-8' },
+            Body: { Html: { Data: html, Charset: 'UTF-8' } },
+          },
+        },
+      }));
+    } else {
+      await transporter.sendMail({ from: FROM, to, subject, html });
+    }
   } catch (err) {
     console.error('[mailer] Failed to send email:', {
       to,
