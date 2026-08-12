@@ -1,7 +1,7 @@
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import * as Notifications from 'expo-notifications';
-import * as SecureStore from 'expo-secure-store';
+import { getState, setState, removeState } from '../storage/state';
 import { Platform } from 'react-native';
 import { apiFetch, ApiError } from '../api/client';
 import { startBackgroundTracking, stopBackgroundTracking, setFixListener } from './tracking';
@@ -94,7 +94,7 @@ async function notify(title: string, body: string): Promise<void> {
 
 async function storedFence(): Promise<Fence | null> {
   try {
-    const raw = await SecureStore.getItemAsync(FENCE_KEY);
+    const raw = await getState(FENCE_KEY);
     return raw ? (JSON.parse(raw) as Fence) : null;
   } catch {
     return null;
@@ -102,7 +102,7 @@ async function storedFence(): Promise<Fence | null> {
 }
 
 async function autoOutPending(): Promise<boolean> {
-  return (await SecureStore.getItemAsync(AUTO_OUT_KEY).catch(() => null)) === '1';
+  return (await getState(AUTO_OUT_KEY)) === '1';
 }
 
 /** Auto clock-out (site exit). Returns true when the day state changed. */
@@ -112,7 +112,7 @@ async function doAutoClockOut(coords: { latitude: number; longitude: number }): 
       method: 'POST',
       body: { ...coords, auto: true, reason: 'geofence_exit' },
     });
-    await SecureStore.setItemAsync(AUTO_OUT_KEY, '1').catch(() => {});
+    await setState(AUTO_OUT_KEY, '1');
     await stopBackgroundTracking();
     await cancelShiftEndReminders();
     await notify(
@@ -134,7 +134,7 @@ async function doAutoClockIn(coords: { latitude: number; longitude: number }): P
       method: 'POST',
       body: { ...coords, auto: true },
     });
-    await SecureStore.deleteItemAsync(AUTO_OUT_KEY).catch(() => {});
+    await removeState(AUTO_OUT_KEY);
     // A new session starts with a clean slate — no warning count carried over
     // from the excursion that ended the previous one.
     await resetFenceExitStrikes();
@@ -163,7 +163,7 @@ async function doAutoClockIn(coords: { latitude: number; longitude: number }): P
         return true;
       }
       // Otherwise: already clocked in. Nothing to do.
-      await SecureStore.deleteItemAsync(AUTO_OUT_KEY).catch(() => {});
+      await removeState(AUTO_OUT_KEY);
       return true;
     }
     if (err instanceof ApiError && err.status === 401) await stopGeofenceAutoMode();
@@ -194,8 +194,8 @@ const EXIT_STRIKE_COUNT_KEY = 'fence_exit_strikes';
 const EXIT_STRIKE_TS_KEY = 'fence_exit_last_strike_ms';
 
 async function exitStrikes(): Promise<{ warnings: number; lastMs: number }> {
-  const warnings = Number(await SecureStore.getItemAsync(EXIT_STRIKE_COUNT_KEY).catch(() => '0')) || 0;
-  const lastMs = Number(await SecureStore.getItemAsync(EXIT_STRIKE_TS_KEY).catch(() => '0')) || 0;
+  const warnings = Number(await getState(EXIT_STRIKE_COUNT_KEY)) || 0;
+  const lastMs = Number(await getState(EXIT_STRIKE_TS_KEY)) || 0;
   return { warnings, lastMs };
 }
 
@@ -205,8 +205,8 @@ async function exitStrikes(): Promise<{ warnings: number; lastMs: number }> {
 async function resetFenceExitStrikes(announce = false): Promise<void> {
   const { warnings } = await exitStrikes();
   if (warnings === 0) return;
-  await SecureStore.setItemAsync(EXIT_STRIKE_COUNT_KEY, '0').catch(() => {});
-  await SecureStore.setItemAsync(EXIT_STRIKE_TS_KEY, '0').catch(() => {});
+  await setState(EXIT_STRIKE_COUNT_KEY, '0');
+  await setState(EXIT_STRIKE_TS_KEY, '0');
   if (announce) {
     await notify('Back on site', 'You returned in time — you are still clocked in.');
   }
@@ -238,8 +238,8 @@ async function progressFenceExit(coords: { latitude: number; longitude: number }
     return;
   }
 
-  await SecureStore.setItemAsync(EXIT_STRIKE_COUNT_KEY, String(decision.warningNumber)).catch(() => {});
-  await SecureStore.setItemAsync(EXIT_STRIKE_TS_KEY, String(Date.now())).catch(() => {});
+  await setState(EXIT_STRIKE_COUNT_KEY, String(decision.warningNumber));
+  await setState(EXIT_STRIKE_TS_KEY, String(Date.now()));
   await notify(
     `Return to your work site — warning ${decision.warningNumber} of ${EXIT_MAX_WARNINGS}${decision.isFinal ? ' (final)' : ''}`,
     decision.isFinal
@@ -444,7 +444,7 @@ export async function startGeofenceAutoMode(
   // an exit event, and reconcileGeofenceAttendance's distance maths. It is
   // stored as-is, with no floor: a 10 m site means 10 m.
   const inner = Number(radiusMeters) > 0 ? Number(radiusMeters) : 200;
-  await SecureStore.setItemAsync(FENCE_KEY, JSON.stringify({ latitude, longitude, radius: inner })).catch(() => {});
+  await setState(FENCE_KEY, JSON.stringify({ latitude, longitude, radius: inner }));
 
   // The OS region is only a WAKE-UP, not the ruling. Android's geofencing is
   // unreliable much below ~100 m — it may fire late or not at all — so the
@@ -468,11 +468,11 @@ export async function stopGeofenceAutoMode(): Promise<void> {
   } catch {
     // not running — fine
   }
-  await SecureStore.deleteItemAsync(AUTO_OUT_KEY).catch(() => {});
-  await SecureStore.deleteItemAsync(FENCE_KEY).catch(() => {});
+  await removeState(AUTO_OUT_KEY);
+  await removeState(FENCE_KEY);
   // Monitoring is over, so no warning count may survive into the next shift —
   // stale strikes would give tomorrow's first step outside an instant
   // "final warning".
-  await SecureStore.setItemAsync(EXIT_STRIKE_COUNT_KEY, '0').catch(() => {});
-  await SecureStore.setItemAsync(EXIT_STRIKE_TS_KEY, '0').catch(() => {});
+  await setState(EXIT_STRIKE_COUNT_KEY, '0');
+  await setState(EXIT_STRIKE_TS_KEY, '0');
 }

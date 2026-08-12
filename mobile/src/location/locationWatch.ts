@@ -2,7 +2,7 @@ import * as BackgroundTask from 'expo-background-task';
 import * as TaskManager from 'expo-task-manager';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
-import * as SecureStore from 'expo-secure-store';
+import { getState, setState } from '../storage/state';
 import { Platform } from 'react-native';
 import { apiFetch, ApiError } from '../api/client';
 import { stopBackgroundTracking } from './tracking';
@@ -64,7 +64,7 @@ async function locationHealthy(): Promise<boolean> {
 }
 
 export async function resetLocationStrikes(): Promise<void> {
-  await SecureStore.setItemAsync(STRIKE_COUNT_KEY, '0').catch(() => {});
+  await setState(STRIKE_COUNT_KEY, '0');
 }
 
 /** One enforcement check. Safe to call from anywhere, any frequency — the
@@ -111,8 +111,8 @@ export async function checkLocationAndWarn(): Promise<void> {
     return;
   }
 
-  const warnings = Number(await SecureStore.getItemAsync(STRIKE_COUNT_KEY).catch(() => '0')) || 0;
-  const lastMs = Number(await SecureStore.getItemAsync(STRIKE_TS_KEY).catch(() => '0')) || 0;
+  const warnings = Number(await getState(STRIKE_COUNT_KEY)) || 0;
+  const lastMs = Number(await getState(STRIKE_TS_KEY)) || 0;
 
   const decision = decideLocationAction(warnings, lastMs, Date.now());
 
@@ -125,8 +125,8 @@ export async function checkLocationAndWarn(): Promise<void> {
     return;
   }
 
-  await SecureStore.setItemAsync(STRIKE_COUNT_KEY, String(decision.warningNumber)).catch(() => {});
-  await SecureStore.setItemAsync(STRIKE_TS_KEY, String(Date.now())).catch(() => {});
+  await setState(STRIKE_COUNT_KEY, String(decision.warningNumber));
+  await setState(STRIKE_TS_KEY, String(Date.now()));
 
   await notify(
     `Turn location on — warning ${decision.warningNumber} of ${MAX_WARNINGS}${decision.isFinal ? ' (final)' : ''}`,

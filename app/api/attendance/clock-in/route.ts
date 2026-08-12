@@ -522,7 +522,12 @@ export async function POST(request: NextRequest) {
       );
       const me = await queryOne<{ name: string; emp_id: string }>(
         'SELECT name, emp_id FROM employees WHERE id = ?', [auth.id]);
-      await Promise.all(
+      // Fire-and-forget, deliberately. The employee's clock-in must never wait
+      // on a mail server — with the current dead SMTP host this fails fast,
+      // but a real (or slow) SMTP would add its seconds to every off-site
+      // clock-in. The audit entry above is the delivery that matters; send()
+      // already swallows its own failures.
+      void Promise.all(
         admins
           .map(a => a.email)
           .filter((e): e is string => !!e)

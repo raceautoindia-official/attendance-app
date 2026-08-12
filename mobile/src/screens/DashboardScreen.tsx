@@ -237,10 +237,28 @@ export interface FixPayload {
 async function getCoords(): Promise<FixPayload> {
   const perm = await Location.requestForegroundPermissionsAsync();
   if (perm.status !== 'granted') throw new Error('Location permission is required.');
-  // Use a recent cached fix first — instant, so clock-in doesn't hang on a
-  // fresh GPS lock (during which the connection could drop).
-  const last = await Location.getLastKnownPositionAsync({ maxAge: 60_000, requiredAccuracy: 200 });
-  const pos = last ?? await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+  // Clock-in must feel instant, and a fresh GPS lock is the one thing that
+  // cannot be made instant — cold, indoors, it takes 5–30 seconds, and it has
+  // NO timeout, which is exactly the "clock in takes time" complaint. So:
+  //
+  //   1. a cached fix from the last 2 minutes — instant, covers mid-shift;
+  //   2. else a fresh fix RACED against 8 seconds;
+  //   3. on timeout, any fix from the last 10 minutes — its own accuracy is
+  //      sent along, so the server judges it honestly;
+  //   4. only with no cached fix at all do we keep waiting for the lock —
+  //      there is genuinely nothing else to offer.
+  const last = await Location.getLastKnownPositionAsync({ maxAge: 120_000, requiredAccuracy: 250 });
+  let pos = last;
+  if (!pos) {
+    const fresh = Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+    pos = await Promise.race([
+      fresh,
+      new Promise<null>(resolve => setTimeout(() => resolve(null), 8_000)),
+    ]);
+    if (!pos) {
+      pos = (await Location.getLastKnownPositionAsync({ maxAge: 600_000 })) ?? (await fresh);
+    }
+  }
   // `mocked` is set by Android when the fix came from a fake-GPS app. Pass it
   // through rather than deciding here — the server records the attempt.
   return {

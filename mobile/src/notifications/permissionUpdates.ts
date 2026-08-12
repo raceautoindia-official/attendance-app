@@ -1,5 +1,5 @@
 import * as Notifications from 'expo-notifications';
-import * as SecureStore from 'expo-secure-store';
+import { getState, setState } from '../storage/state';
 import { Platform } from 'react-native';
 
 // ---------------------------------------------------------------------------
@@ -42,7 +42,7 @@ function hhmm(t: string): string {
 
 async function announced(): Promise<number[]> {
   try {
-    const raw = await SecureStore.getItemAsync(ANNOUNCED_KEY);
+    const raw = await getState(ANNOUNCED_KEY);
     const arr = raw ? (JSON.parse(raw) as number[]) : [];
     return Array.isArray(arr) ? arr : [];
   } catch {
@@ -96,5 +96,5 @@ export async function notifyPermissionUpdates(updates: PermissionUpdate[] | unde
     seen.push(u.id);
   }
 
-  await SecureStore.setItemAsync(ANNOUNCED_KEY, JSON.stringify(seen.slice(-MAX_REMEMBERED))).catch(() => {});
+  await setState(ANNOUNCED_KEY, JSON.stringify(seen.slice(-MAX_REMEMBERED)));
 }
