@@ -13,6 +13,52 @@ import { WEEKLY_OFF_DAYS } from '@/lib/constants';
 // it safe to run repeatedly. Returns the number of employees newly considered
 // absent. Shared by the cron endpoint and the in-app scheduler.
 // ---------------------------------------------------------------------------
+/**
+ * Employees who were EXPECTED to work this date and have no attendance row and
+ * no leave — the exact population markAbsentees() writes rows for.
+ *
+ * Exported because the Overview page needs the same answer for TODAY, where no
+ * rows have been written yet: an 'absent' row is only created after the day
+ * ends, so counting rows made "Absent today" read 0 every day until midnight.
+ * Deriving it in the browser instead would have needed the schedules, the
+ * weekly-off rule and the leave table — three chances to disagree with the job
+ * that actually decides. One rule, two callers.
+ *
+ * For a day still in progress the honest reading is "not in yet" rather than
+ * "absent": somebody may still arrive. The caller chooses the wording.
+ */
+export async function expectedButMissing(
+  workDate: string,
+): Promise<Array<{ id: number; name: string }>> {
+  const weekdayAbbr = formatInTimeZone(new Date(`${workDate}T00:00:00Z`), 'UTC', 'EEE');
+  const isCompanyOffDay = WEEKLY_OFF_DAYS.includes(weekdayAbbr);
+  return query<{ id: number; name: string }>(
+    `SELECT DISTINCT e.id, e.name
+     FROM employees e
+     LEFT JOIN employee_schedules es
+       ON  es.employee_id = e.id
+       AND es.effective_from <= ?
+       AND (es.effective_to IS NULL OR es.effective_to >= ?)
+     LEFT JOIN shifts s ON s.id = es.shift_id
+     WHERE e.is_active = TRUE
+       AND (
+             (s.id IS NOT NULL AND JSON_CONTAINS(s.working_days, JSON_QUOTE(?)))
+             OR (s.id IS NULL AND ? = FALSE)
+           )
+       AND NOT EXISTS (
+             SELECT 1 FROM attendance a
+             WHERE a.employee_id = e.id AND a.work_date = ?
+               AND a.clock_in_utc IS NOT NULL
+           )
+       AND NOT EXISTS (
+             SELECT 1 FROM leave_records lr
+             WHERE lr.leave_date = ?
+               AND (lr.employee_id = e.id OR lr.employee_id IS NULL)
+           )`,
+    [workDate, workDate, weekdayAbbr, isCompanyOffDay, workDate, workDate],
+  );
+}
+
 export async function markAbsentees(workDate: string): Promise<number> {
   // Weekday abbreviation ("Mon".."Sun") for the work date, matching the values
   // stored in shifts.working_days. The weekday of a CALENDAR DATE is a property

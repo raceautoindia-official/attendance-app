@@ -131,6 +131,15 @@ export default function OverviewPage() {
     refetchInterval: 60_000,
   });
 
+  const { data: absentData } = useQuery({
+    queryKey: ['attendance', 'absent-today', today],
+    queryFn: async () => {
+      const res = await fetch(`/api/attendance/absent-today?date=${today}`);
+      return res.json() as Promise<ApiResponse<{ count: number; employees: Array<{ id: number; name: string }> }>>;
+    },
+    refetchInterval: 60_000,
+  });
+
   const { data: dailyUpdatesData, isLoading: dailyUpdatesLoading } = useQuery({
     queryKey: ['daily-updates', 'admin', today],
     queryFn: async () => {
@@ -145,9 +154,13 @@ export default function OverviewPage() {
   const records = attData?.data?.records ?? [];
   const dailyUpdates = dailyUpdatesData?.data?.updates ?? [];
   const present = records.filter(r => r.status === 'present' || r.status === 'late').length;
-  const absent = records.filter(r => r.status === 'absent').length;
-  const totalMinutes = records.reduce((s, r) => s + (r.total_minutes ?? 0), 0);
-  const avgHours = records.length > 0 ? (totalMinutes / records.length / 60).toFixed(1) : '0';
+  // Absent comes from the server, which applies the same rule the end-of-day
+  // job does. Counting rows here showed 0 all day every day: an 'absent' row
+  // is only written after the day FINISHES. Deriving it in the browser instead
+  // would need the schedules, the weekly-off rule and the leave table — three
+  // chances to disagree with the job that decides.
+  const absent = absentData?.data?.count ?? 0;
+  const absentNames = absentData?.data?.employees ?? [];
 
   const isLoading = empLoading || attLoading;
 
@@ -219,7 +232,7 @@ export default function OverviewPage() {
       )}
 
       {/* Stats */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <StatCard
           label="Total Employees"
           value={totalEmployees}
@@ -245,33 +258,40 @@ export default function OverviewPage() {
           }
         />
         <StatCard
-          label="Absent Today"
+          label="Not In Yet"
           value={absent}
           loading={isLoading}
           variant="danger"
+          // Naming them is the point. A count tells an admin something is
+          // wrong; the names tell them who to ring.
+          subLabel={absentNames.length
+            ? absentNames.slice(0, 3).map(e => e.name).join(', ')
+              + (absentNames.length > 3 ? ` +${absentNames.length - 3} more` : '')
+            : undefined}
           icon={
             <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
           }
         />
-        <StatCard
-          label="Avg Hours Today"
-          value={isLoading ? '…' : `${avgHours}h`}
-          loading={isLoading}
-          variant="warning"
-          icon={
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-          }
-        />
+
       </div>
 
       {/* Today attendance table */}
       <Card padding={false}>
         <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
-          <h2 className="font-semibold text-slate-800 dark:text-slate-200">Today Attendance</h2>
+          <div>
+            <h2 className="font-semibold text-slate-800 dark:text-slate-200">Today Attendance</h2>
+            {/* Which day this actually is. The table is a live view of one
+                work day and said so nowhere — an admin reading it at 7am,
+                when the work day has just rolled over, had no way to tell
+                which day they were looking at. */}
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {new Date(`${today}T12:00:00Z`).toLocaleDateString('en-IN', {
+                timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+              })}
+            </p>
+          </div>
           <span className="text-xs text-slate-400 dark:text-slate-500">
             Auto-refreshes every 60s
           </span>
