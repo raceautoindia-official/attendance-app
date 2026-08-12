@@ -182,3 +182,56 @@ export async function stopBackgroundTracking(): Promise<void> {
 export async function isTrackingRunning(): Promise<boolean> {
   return Location.hasStartedLocationUpdatesAsync(LOCATION_TASK).catch(() => false);
 }
+
+/**
+ * WHY tracking cannot start — checked in the order the OS enforces them.
+ *
+ * The "tap to fix" helper used to offer battery settings for every failure,
+ * because the real reason was thrown away by a catch. On a phone whose actual
+ * blocker was the location permission, allowing background activity changed
+ * nothing and the same dialog returned — repeatedly, which is exactly what was
+ * reported. Naming the blocker is the difference between a loop and a fix.
+ */
+export type TrackingBlocker = 'services' | 'foreground' | 'precise' | 'background' | 'notifications' | null;
+
+export async function diagnoseTracking(): Promise<{ blocker: TrackingBlocker; message: string }> {
+  const services = await Location.hasServicesEnabledAsync().catch(() => false);
+  if (!services) {
+    return { blocker: 'services', message: 'Location (GPS) is switched off on this phone.' };
+  }
+  const fg = await Location.getForegroundPermissionsAsync().catch(() => null);
+  if (!fg?.granted) {
+    return { blocker: 'foreground', message: 'This app does not have location permission.' };
+  }
+  if (Platform.OS === 'android' && fg.android?.accuracy === 'coarse') {
+    return { blocker: 'precise', message: 'Location is set to Approximate. Attendance needs Precise.' };
+  }
+  const bg = await Location.getBackgroundPermissionsAsync().catch(() => null);
+  if (!bg?.granted) {
+    return {
+      blocker: 'background',
+      message: 'Location is set to "While using the app". It must be "Allow all the time".',
+    };
+  }
+  // Android 13+ refuses to show the foreground service's notification without
+  // POST_NOTIFICATIONS — and without a visible notification the OS will not
+  // keep the service alive. An employee who dismissed that permission prompt
+  // has perfect location settings and no tracking, which looks like nothing at
+  // all is wrong. It is the one blocker nobody thinks to check.
+  if (Platform.OS === 'android' && typeof Platform.Version === 'number' && Platform.Version >= 33) {
+    const canNotify = await PermissionsAndroid.check(
+      PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
+    ).catch(() => true); // unknown → do not accuse
+    if (!canNotify) {
+      return {
+        blocker: 'notifications',
+        message: 'Notifications are blocked, so the tracking service cannot stay running.',
+      };
+    }
+  }
+
+  // Everything the app can see is in order, so what remains is the OS killing
+  // the service — battery management, which is the one thing no API reports
+  // reliably across OEMs.
+  return { blocker: null, message: 'Your phone is stopping the app from running in the background.' };
+}

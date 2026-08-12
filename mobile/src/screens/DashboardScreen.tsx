@@ -22,7 +22,7 @@ import * as Location from 'expo-location';
 import { apiFetch, logout, ApiError } from '../api/client';
 import { getStoredEmployee, StoredEmployee } from '../storage/tokens';
 import { saveTodayCache, getTodayCache, clearTodayCache } from '../storage/cache';
-import { startBackgroundTracking, stopBackgroundTracking, isTrackingRunning } from '../location/tracking';
+import { startBackgroundTracking, stopBackgroundTracking, isTrackingRunning, diagnoseTracking } from '../location/tracking';
 import {
   startGeofenceAutoMode,
   stopGeofenceAutoMode,
@@ -277,6 +277,10 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [tracking, setTracking] = useState(false);
+  // The reason tracking is not running, in the employee's words. Thrown away
+  // before, which left "tap to fix" offering battery settings for problems
+  // battery settings cannot fix.
+  const [trackingIssue, setTrackingIssue] = useState<string | null>(null);
   const [trackingEnabled, setTrackingEnabled] = useState(true); // admin per-employee toggle
   const [multiSession, setMultiSession] = useState(false); // plant: several clock-ins per day
   const [fenceLocation, setFenceLocation] = useState<FenceLocation | null>(null);
@@ -544,7 +548,16 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       return;
     }
     // No auto-start (or map polling) before the disclosure has been accepted.
-    if (hasConsent !== true) return;
+    // No auto-start before the disclosure is accepted. Say so on the pill —
+    // this branch returns without starting anything, and the pill's generic
+    // "off" plus a battery dialog could never fix a missing consent flag. A
+    // silent dead end is how an employee ends up with perfect settings and no
+    // tracking.
+    if (hasConsent !== true) {
+      setTracking(false);
+      setTrackingIssue('Location consent not accepted');
+      return;
+    }
     let active = true;
 
     const ensureTracking = async () => {
@@ -553,9 +566,14 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         if (!running) {
           await startBackgroundTracking();
         }
-        if (active) setTracking(true);
-      } catch {
-        if (active) setTracking(false);
+        if (active) { setTracking(true); setTrackingIssue(null); }
+      } catch (e) {
+        // startBackgroundTracking throws a precise, actionable message — keep
+        // it. Discarding it is what made the fix helper useless.
+        if (active) {
+          setTracking(false);
+          setTrackingIssue(e instanceof Error ? e.message : null);
+        }
       }
     };
 
@@ -908,14 +926,99 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     onLogout();
   };
 
-  // Shown when tracking is off — helps the employee re-enable background tracking.
-  const fixTracking = () => {
+  // Shown when tracking is off. Diagnoses the ACTUAL blocker and offers the
+  // one action that clears it — the old version offered battery settings for
+  // everything, so an employee whose real problem was the location permission
+  // could grant background activity all day and see the same dialog return.
+  const fixTracking = async () => {
+    // Consent first: nothing else can start without it, and no settings screen
+    // can grant it — it is a tap inside this app.
+    if (hasConsent !== true) {
+      consentActionRef.current = 'in';
+      setConsentVisible(true);
+      return;
+    }
+    const { blocker, message } = await diagnoseTracking();
+
+    // Nothing the app can see is wrong: try starting the service right now. If
+    // it starts, there was nothing to fix and saying so beats another dialog.
+    if (blocker === null) {
+      try {
+        await startBackgroundTracking();
+        setTracking(true);
+        setTrackingIssue(null);
+        toast('Tracking started ✓');
+        return;
+      } catch (e) {
+        setTrackingIssue(e instanceof Error ? e.message : null);
+      }
+    }
+
+    const retryAfter = async () => {
+      // Give the settings screen a moment to apply, then re-check so the pill
+      // turns green without the employee wondering whether it worked.
+      setTimeout(() => {
+        void (async () => {
+          const again = await diagnoseTracking();
+          if (again.blocker === null) {
+            try {
+              await startBackgroundTracking();
+              setTracking(true);
+              setTrackingIssue(null);
+              toast('Tracking started ✓');
+            } catch { /* the pill still shows the reason */ }
+          }
+        })();
+      }, 1500);
+    };
+
+    if (blocker === 'services') {
+      Alert.alert('Turn on location', `${message} Switch GPS on from the quick settings, then tap the pill again.`,
+        [{ text: 'OK' }]);
+      return;
+    }
+    if (blocker === 'notifications') {
+      Alert.alert(
+        'Allow notifications',
+        `${message}\n\nAndroid keeps the tracking service alive only while its notification can be shown. Turn Notifications on for this app.`,
+        [
+          { text: 'Open app settings', onPress: () => { void openAppSettings(); void retryAfter(); } },
+          { text: 'Cancel', style: 'cancel' },
+        ],
+      );
+      return;
+    }
+    if (blocker === 'foreground' || blocker === 'precise' || blocker === 'background') {
+      Alert.alert(
+        'Location permission needed',
+        `${message}\n\nOpen Permissions → Location and choose "Allow all the time" with Precise turned on.`,
+        [
+          {
+            text: 'Fix permission',
+            onPress: () => {
+              void (async () => {
+                // Ask directly first — on Android 11+ the OS itself sends the
+                // employee to the right settings page for "all the time".
+                await Location.requestForegroundPermissionsAsync().catch(() => null);
+                await Location.requestBackgroundPermissionsAsync().catch(() => null);
+                await retryAfter();
+              })();
+            },
+          },
+          { text: 'Open app settings', onPress: () => { void openAppSettings(); void retryAfter(); } },
+          { text: 'Cancel', style: 'cancel' },
+        ],
+      );
+      return;
+    }
+
+    // Permissions are all in order — this is battery management.
     Alert.alert(
-      'Turn on background tracking',
-      'Your phone is stopping the app from tracking in the background. Allow it to run in the background, then it will keep recording your location.',
+      'Allow background activity',
+      `${message}\n\nAllow it to run in the background. On Oppo, Realme, Vivo and Xiaomi phones also turn on "Auto-start" and set Battery to "Don't optimise" for this app.`,
       [
-        { text: 'Allow background', onPress: () => { void requestIgnoreBatteryOptimization(); } },
-        { text: 'Open app settings', onPress: () => { void openAppSettings(); } },
+        { text: 'Allow background', onPress: () => { void requestIgnoreBatteryOptimization(); void retryAfter(); } },
+        { text: 'Open app settings', onPress: () => { void openAppSettings(); void retryAfter(); } },
         { text: 'Cancel', style: 'cancel' },
       ],
     );
@@ -1337,12 +1440,14 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
           <TouchableOpacity
             style={styles.trackPill}
             activeOpacity={tracking ? 1 : 0.7}
-            onPress={tracking ? undefined : fixTracking}
+            onPress={tracking ? undefined : () => { void fixTracking(); }}
             disabled={tracking}
           >
             <View style={[styles.dot, { backgroundColor: tracking ? colors.greenText : colors.textFaint }]} />
             <Text style={[styles.trackText, { color: tracking ? colors.greenText : '#fbbf24' }]}>
-              {tracking ? 'Location tracking is on' : 'Location tracking is off — tap to fix'}
+              {tracking
+                ? 'Location tracking is on'
+                : `${trackingIssue ?? 'Location tracking is off'} — tap to fix`}
             </Text>
           </TouchableOpacity>
         )}
