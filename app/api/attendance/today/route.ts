@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
-import { getWorkDateIST } from '@/lib/attendance';
+import { getWorkDateIST, workDayEndUtc, previousWorkDate, toMySQLDatetime } from '@/lib/attendance';
 import { hasWorkModeColumns } from '@/lib/employeeDetails';
 import {
   hasOnDutyColumn,
@@ -57,6 +57,18 @@ interface TodayResponse {
     status: string;
     review_notes: string | null;
     reviewed_at: string;
+  }>;
+  /**
+   * Every session of the day, in order, paired from the audit log — because
+   * the attendance row only holds the CURRENT session's times, and an employee
+   * looking at their own day deserves to see all of it: when each stretch
+   * started, when it ended, and what ended it.
+   */
+  today_sessions: Array<{
+    in_utc: string;
+    out_utc: string | null;
+    /** manual | left_site | location_off | watchdog — how the session ended. */
+    out_kind: string | null;
   }>;
 }
 
@@ -233,6 +245,44 @@ export async function GET(request: NextRequest) {
               [auth.id],
             ).catch(() => [])
           : [],
+        today_sessions: await (async () => {
+          // The audit log is the only place every session survives — the row
+          // itself is reused and holds only the current one. Newest 100 within
+          // the day's 07:00 boundaries, flipped chronological (the same
+          // keep-the-newest lesson the timeline endpoint learned), then paired:
+          // a clock_in opens, the next closing event closes.
+          const startUtc = workDayEndUtc(previousWorkDate(workDate));
+          const endUtc = workDayEndUtc(workDate);
+          const rows = await query<{ created_at: string | Date; action: string; details: string | null }>(
+            `SELECT created_at, action, details FROM audit_log
+             WHERE created_at >= ? AND created_at < ?
+               AND JSON_EXTRACT(details, '$.employee_id') = ?
+               AND action IN ('clock_in', 'clock_out', 'geofence_auto_clockout')
+             ORDER BY created_at DESC LIMIT 100`,
+            [toMySQLDatetime(startUtc), toMySQLDatetime(endUtc), auth.id],
+          ).catch(() => []);
+          rows.reverse();
+          const sessions: TodayResponse['today_sessions'] = [];
+          for (const r of rows) {
+            let d: Record<string, unknown> = {};
+            try { d = r.details ? JSON.parse(r.details) : {}; } catch { /* pair without */ }
+            const at = new Date(r.created_at).toISOString();
+            if (r.action === 'clock_in') {
+              sessions.push({ in_utc: at, out_utc: null, out_kind: null });
+            } else {
+              const open = sessions.findLast?.(s => s.out_utc === null)
+                ?? [...sessions].reverse().find(s => s.out_utc === null);
+              if (!open) continue; // closure without an audited opening — skip
+              open.out_utc = at;
+              open.out_kind =
+                r.action === 'geofence_auto_clockout' ? 'watchdog'
+                : d.reason === 'geofence_exit' ? 'left_site'
+                : d.reason === 'location_off' ? 'location_off'
+                : 'manual';
+            }
+          }
+          return sessions;
+        })(),
         on_duty_now: permissionsAvailable
           ? await activeOnDuty(
               auth.id,

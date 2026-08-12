@@ -54,6 +54,10 @@ const clockOut = () => fetch(`${BASE}/api/attendance/clock-out`, {
        FROM employee_schedules WHERE employee_id = ?`, [EMP]);
 
   const wipe = async () => {
+    // Audit rows too: today_sessions reads the whole day from the audit log,
+    // so another suite's clock events minutes earlier would appear — correctly
+    // — in this test's session list.
+    await c.query("DELETE FROM audit_log WHERE JSON_EXTRACT(details, '$.employee_id') = ?", [EMP]);
     await c.query('DELETE FROM attendance WHERE employee_id = ?', [EMP]);
     await c.query('DELETE FROM employee_devices WHERE employee_id = ?', [EMP]);
     await c.query('DELETE FROM live_tracking_sessions WHERE employee_id = ?', [EMP]);
@@ -139,6 +143,16 @@ const clockOut = () => fetch(`${BASE}/api/attendance/clock-out`, {
       mine?.first_clock_in_utc != null && mine?.clock_in_utc != null &&
       mine.first_clock_in_utc !== mine.clock_in_utc,
       JSON.stringify({ first: mine?.first_clock_in_utc, session: mine?.clock_in_utc }));
+
+    console.log('\n3b. /today lists EVERY session of the day, with how each ended');
+    const sess = today.data?.today_sessions ?? [];
+    console.log('   ' + sess.map(x =>
+      `${x.in_utc?.slice(11, 16)}–${x.out_utc ? x.out_utc.slice(11, 16) : 'open'}${x.out_kind ? ` (${x.out_kind})` : ''}`
+    ).join(' | '));
+    check('two sessions are listed', sess.length === 2, sess.length);
+    check('the first closed as a manual clock-out',
+      sess[0]?.out_utc != null && sess[0]?.out_kind === 'manual', JSON.stringify(sess[0]));
+    check('the second is still open', sess[1]?.out_utc === null, JSON.stringify(sess[1]));
 
     console.log('\n4. The displays show the morning, not the in-between login');
     const adminPage = fs.readFileSync(path.join(ROOT, 'app/(admin)/attendance/page.tsx'), 'utf8');

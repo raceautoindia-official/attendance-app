@@ -43,6 +43,12 @@ const CONSENT_KEY = 'location_consent_v1';
 const STATUS_BAR_PAD = Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 : 0;
 const TZ = 'Asia/Kolkata'; // all dates/times shown in IST, matching the web app
 
+interface TodaySession {
+  in_utc: string;
+  out_utc: string | null;
+  out_kind: string | null;
+}
+
 interface TodayAttendance {
   /** The day's first login — never moves; clock_in_utc is the current session. */
   first_clock_in_utc?: string | null;
@@ -256,6 +262,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   const [trackingEnabled, setTrackingEnabled] = useState(true); // admin per-employee toggle
   const [multiSession, setMultiSession] = useState(false); // plant: several clock-ins per day
   const [fenceLocation, setFenceLocation] = useState<FenceLocation | null>(null);
+  const [todaySessions, setTodaySessions] = useState<TodaySession[]>([]);
   // Google Play prominent-disclosure consent. null = not yet loaded.
   const [hasConsent, setHasConsent] = useState<boolean | null>(null);
   const [consentVisible, setConsentVisible] = useState(false);
@@ -379,7 +386,9 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         permission_minutes?: number;
         permission_balance?: PermissionBalance;
         permission_updates?: PermissionUpdate[];
+        today_sessions?: TodaySession[];
       }>('/api/attendance/today');
+      setTodaySessions(data.today_sessions ?? []);
       // Announce approved/rejected permission decisions — deduped internally,
       // so calling on every refresh is safe.
       void notifyPermissionUpdates(data.permission_updates);
@@ -995,6 +1004,29 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         <Text style={styles.date}>{dateStr}</Text>
         <Text style={styles.clock}>{timeStr}</Text>
 
+        {/* How far from the work site, refreshed with the 20s position poll.
+            When the fence is armed, being outside means clock-in needs a
+            reason — say so BEFORE the button refuses, not after. */}
+        {fenceLocation && liveCoords && (() => {
+          const toRad = (d: number) => (d * Math.PI) / 180;
+          const dLat = toRad(fenceLocation.latitude - liveCoords.lat);
+          const dLng = toRad(fenceLocation.longitude - liveCoords.lng);
+          const a = Math.sin(dLat / 2) ** 2 +
+            Math.cos(toRad(liveCoords.lat)) * Math.cos(toRad(fenceLocation.latitude)) * Math.sin(dLng / 2) ** 2;
+          const dist = Math.round(6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+          const inside = dist <= fenceLocation.radius_meters;
+          const distText = dist >= 1000 ? `${(dist / 1000).toFixed(1)} km` : `${dist} m`;
+          return (
+            <View style={[styles.fenceBanner, inside ? styles.fenceBannerIn : styles.fenceBannerOut]}>
+              <Text style={[styles.fenceBannerText, inside ? styles.fenceBannerTextIn : styles.fenceBannerTextOut]}>
+                {inside
+                  ? `✓ At your work site — ${distText} from centre (limit ${fenceLocation.radius_meters} m)`
+                  : `⚠ Away from your work site — ${distText} away. Clocking in from here needs a reason.`}
+              </Text>
+            </View>
+          );
+        })()}
+
         {/* TODAY */}
         <View style={styles.card}>
           <Text style={styles.cardLabel}>TODAY</Text>
@@ -1012,6 +1044,22 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
               <Text style={styles.statValue}>{minutesToHours(liveCreditedMinutes)}</Text>
             </View>
           </View>
+
+          {/* Every session of the day, not only the current one — the whole
+              point of recording everything is being able to SEE everything. */}
+          {todaySessions.length > 1 && (
+            <View style={styles.sessionList}>
+              {todaySessions.map((sess, i) => (
+                <Text key={`${sess.in_utc}-${i}`} style={styles.sessionRow}>
+                  {i + 1}.  {timeOnly(sess.in_utc)} – {sess.out_utc ? timeOnly(sess.out_utc) : 'now'}
+                  {sess.out_kind === 'left_site' ? '  ·  left site'
+                    : sess.out_kind === 'watchdog' ? '  ·  away from site'
+                    : sess.out_kind === 'location_off' ? '  ·  location off'
+                    : ''}
+                </Text>
+              ))}
+            </View>
+          )}
 
           {todayPermissionMinutes > 0 && (
             <Text style={styles.permissionNote}>
@@ -1474,6 +1522,14 @@ const styles = StyleSheet.create({
   permReasonInput: { minHeight: 64 },
   permTimeRow: { flexDirection: 'row', gap: 12 },
   permTimeCol: { flex: 1 },
+  fenceBanner: { borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10, marginTop: 14, borderWidth: 1 },
+  fenceBannerIn: { backgroundColor: 'rgba(22,163,74,0.12)', borderColor: 'rgba(22,163,74,0.4)' },
+  fenceBannerOut: { backgroundColor: 'rgba(239,68,68,0.12)', borderColor: 'rgba(239,68,68,0.4)' },
+  fenceBannerText: { fontSize: 13, lineHeight: 18 },
+  fenceBannerTextIn: { color: '#86efac' },
+  fenceBannerTextOut: { color: '#fca5a5' },
+  sessionList: { marginTop: 12, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 10, gap: 4 },
+  sessionRow: { color: colors.textMuted, fontSize: 13 },
   permDateText: { color: colors.text, fontSize: 14, paddingVertical: 2 },
   permTimeInputRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   permTimeInput: { flex: 1 },
