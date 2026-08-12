@@ -253,12 +253,16 @@ export async function GET(request: NextRequest) {
           // a clock_in opens, the next closing event closes.
           const startUtc = workDayEndUtc(previousWorkDate(workDate));
           const endUtc = workDayEndUtc(workDate);
+          // id as the tiebreak: clock events can land within the same SECOND
+          // (a quick out-and-in, or anything racing), and created_at alone
+          // leaves their order undefined — a shuffled reversal once put a
+          // clock-out BEFORE its clock-in and both sessions read as open.
           const rows = await query<{ created_at: string | Date; action: string; details: string | null }>(
-            `SELECT created_at, action, details FROM audit_log
+            `SELECT id, created_at, action, details FROM audit_log
              WHERE created_at >= ? AND created_at < ?
                AND JSON_EXTRACT(details, '$.employee_id') = ?
                AND action IN ('clock_in', 'clock_out', 'geofence_auto_clockout')
-             ORDER BY created_at DESC LIMIT 100`,
+             ORDER BY created_at DESC, id DESC LIMIT 100`,
             [toMySQLDatetime(startUtc), toMySQLDatetime(endUtc), auth.id],
           ).catch(() => []);
           rows.reverse();
