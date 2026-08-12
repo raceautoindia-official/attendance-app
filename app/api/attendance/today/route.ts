@@ -108,7 +108,20 @@ export async function GET(request: NextRequest) {
          'grace_minutes',  s.grace_minutes,
          'working_days',   s.working_days
        ) AS shift,
-       IF(l.id IS NOT NULL,
+       -- ONLY when this employee is actually fenced.
+       --
+       -- The phone arms its geofence from this object: four warnings on the way
+       -- out, then a clock-out. It was handed over whenever the schedule
+       -- pointed at a live location, with no regard for es.geofencing_enabled —
+       -- so an employee whose admin had switched geofencing OFF, but who still
+       -- had a site assigned, got clocked out by their own phone for leaving a
+       -- fence that was supposed to be off. Meanwhile clock-in DID honour the
+       -- flag, so they could clock straight back in from anywhere and were
+       -- never even asked for a reason. That pair of symptoms is one bug.
+       --
+       -- All three now read the same flag: clock-in enforces it, the server
+       -- watchdog requires it, and the phone is only armed when it is set.
+       IF(l.id IS NOT NULL AND es.geofencing_enabled = TRUE,
          JSON_OBJECT(
            'id',             l.id,
            'name',           l.name,
