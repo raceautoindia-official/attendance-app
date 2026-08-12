@@ -165,3 +165,22 @@ export async function logout(): Promise<void> {
   }
   await clearSession();
 }
+
+/**
+ * Ask the server to email a PIN-reset link. Returns the sentence to show the
+ * employee — deliberately the same whether or not the ID exists, so this
+ * cannot be used to discover employee IDs. Throws only when the SERVER says it
+ * cannot send mail at all, which is worth telling them plainly.
+ */
+export async function requestPasswordReset(empId: string): Promise<string> {
+  const res = await fetch(`${API_BASE_URL}/api/auth/forgot-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ emp_id: empId }),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || !json?.success) {
+    throw new ApiError(res.status, json?.error ?? 'Could not request a reset.');
+  }
+  return json.message ?? 'If that employee ID exists, a reset link is on its way.';
+}

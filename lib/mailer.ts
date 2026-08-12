@@ -328,3 +328,51 @@ export async function sendOutOfFenceClockInAlert(
     `,
   );
 }
+
+// ---------------------------------------------------------------------------
+// PIN reset link
+// ---------------------------------------------------------------------------
+
+interface PasswordResetData {
+  employeeName: string;
+  link: string;
+  expiresMinutes: number;
+}
+
+/**
+ * The reset link itself. Unlike every other mail in this file, a FAILURE here
+ * matters to the person waiting: the caller catches it and still answers
+ * neutrally (so this cannot become an account oracle), but the error reaches
+ * the log rather than being lost, and the forgot-password route refuses
+ * outright when SMTP is unconfigured instead of pretending to send.
+ */
+export async function sendPasswordResetEmail(
+  to: string,
+  payload: PasswordResetData,
+): Promise<void> {
+  await send(
+    to,
+    'Reset your Attendance PIN',
+    `
+      <p>Hi ${payload.employeeName},</p>
+      <p>Someone asked to reset the PIN for your Attendance account. Tap the
+      button below to choose a new one. The link works once and expires in
+      <strong>${payload.expiresMinutes} minutes</strong>.</p>
+      <p style="margin:22px 0">
+        <a href="${payload.link}"
+           style="background:#2563eb;color:#fff;padding:12px 20px;border-radius:8px;
+                  text-decoration:none;font-weight:600;display:inline-block">
+          Set a new PIN
+        </a>
+      </p>
+      <p style="font-size:13px;color:#475569">
+        If the button does not work, copy this into your browser:<br/>
+        <span style="word-break:break-all">${payload.link}</span>
+      </p>
+      <p style="font-size:13px;color:#475569">
+        If you did not ask for this, you can ignore this email — your PIN stays
+        as it is, and the link expires on its own.
+      </p>
+    `,
+  );
+}

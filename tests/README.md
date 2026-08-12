@@ -90,6 +90,7 @@ ship.
 | `doubleclockin.js` | two clock-ins fired at once — only one may win, or the race erases the hours already banked that day |
 | `pingheal.js` | a fix from an on-shift phone is never refused — ping self-heals a missing session, and a quiet spell is reported to admins, never executed |
 | `firstlogin.js` | the day first login is recorded once and shown everywhere — an in-between re-login moves only the session start, never the morning |
+| `forgotpin.js` | emailed PIN reset — a real and an invented employee ID answer identically, only the token hash is stored, a link works once and expires, and the new PIN logs in |
 | `timeline.js` | one employee day as an ordered story — clock events, decisions and exceptions narrated; self and manager may read, a colleague may not; the newest events survive a busy day |
 | `permnotify.js` | an approved or rejected permission reaches the employee — the decision rides /today (which the phone already polls) and the phone announces each verdict exactly once |
 | `enablerollout.js` | `enable_auto_logout.sql` is a dry run until told otherwise, and never arms a phone that is not reporting — the mistake that would have cost six people about seven hours each |
