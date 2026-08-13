@@ -1169,10 +1169,11 @@ If you are working away from the site today, ask your `
             // the day-wise report.
             return (
               <View style={styles.sessionList}>
-                {/* A title, because a bare pair of times is not self-
-                    explanatory — somebody looking at their own day could not
-                    tell what the rows were counting. */}
-                <Text style={styles.sessionHeading}>Clock In / Clock Out</Text>
+                {/* PLURAL. "Clock In / Clock Out" reads as the two buttons —
+                    one action each — when the list underneath is every time
+                    they clocked in and out today. The heading has to describe
+                    a list, not an action. */}
+                <Text style={styles.sessionHeading}>Clock-ins &amp; Clock-outs</Text>
                 {sessions.map((sess, i) => (
                   <Text key={`${sess.in_utc}-${i}`} style={styles.sessionRow}>
                     <Text style={styles.sessionTime}>{timeOnly(sess.in_utc)}</Text>
