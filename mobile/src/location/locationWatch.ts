@@ -1,9 +1,7 @@
 import * as BackgroundTask from 'expo-background-task';
 import * as TaskManager from 'expo-task-manager';
 import * as Location from 'expo-location';
-import * as Notifications from 'expo-notifications';
 import { getState, setState } from '../storage/state';
-import { Platform } from 'react-native';
 import { apiFetch, ApiError } from '../api/client';
 import { stopBackgroundTracking } from './tracking';
 import { reconcileGeofenceAttendance } from './geofenceAuto';
@@ -29,30 +27,16 @@ export const LOCATION_WATCH_TASK = 'attendance-location-watch';
 
 const STRIKE_COUNT_KEY = 'loc_off_strikes';
 const STRIKE_TS_KEY = 'loc_off_last_strike_ms';
-const CHANNEL_ID = 'location-warnings';
+import { notify as sharedNotify, CHANNELS } from '../notifications/setup';
 
 interface TodayResponse {
   attendance: { clock_in_utc: string | null; clock_out_utc: string | null } | null;
   permission_updates?: PermissionUpdate[];
 }
 
+// See setup.ts — one channel, one permission check, no per-send round-trip.
 async function notify(title: string, body: string): Promise<void> {
-  try {
-    if (Platform.OS === 'android') {
-      await Notifications.setNotificationChannelAsync(CHANNEL_ID, {
-        name: 'Location warnings',
-        importance: Notifications.AndroidImportance.HIGH,
-        sound: 'default',
-        vibrationPattern: [0, 400, 200, 400],
-      });
-    }
-    await Notifications.scheduleNotificationAsync({
-      content: { title, body, sound: 'default' },
-      trigger: Platform.OS === 'android' ? { channelId: CHANNEL_ID } : null,
-    });
-  } catch {
-    // never fail enforcement over a notification
-  }
+  await sharedNotify(CHANNELS.location, title, body);
 }
 
 async function locationHealthy(): Promise<boolean> {

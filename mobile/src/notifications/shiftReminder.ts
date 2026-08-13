@@ -1,19 +1,11 @@
 import * as Notifications from 'expo-notifications';
-import { Platform } from 'react-native';
 import { getState, setState } from '../storage/state';
+import { scheduleAt, CHANNELS } from './setup';
 
-// Show shift reminders even while the app is open in the foreground.
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldShowBanner: true,
-    shouldShowList: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
-});
-
-const CHANNEL_ID = 'shift-reminders';
+// The foreground handler used to be set here, as a side effect of importing
+// this module — so whether a notification appeared while the app was open
+// depended on whether an unrelated feature happened to be imported. It belongs
+// to the app, not to shift reminders; see setup.ts.
 /** Identifiers this module scheduled, so cancelling touches only its own. */
 const IDS_KEY = 'shift_reminder_ids';
 // Always 9 working hours counted from the actual clock-in — the reminder is
@@ -22,16 +14,6 @@ const SHIFT_HOURS = 9;
 // First alert exactly when the 9 hours complete, then nags if they still
 // haven't clocked out.
 const REMINDER_OFFSETS_MIN = [0, 30, 60];
-
-async function ensureChannel(): Promise<void> {
-  if (Platform.OS !== 'android') return;
-  await Notifications.setNotificationChannelAsync(CHANNEL_ID, {
-    name: 'Shift reminders',
-    importance: Notifications.AndroidImportance.HIGH,
-    sound: 'default',
-    vibrationPattern: [0, 400, 200, 400],
-  });
-}
 
 /** Schedules OS-level "shift over, please clock out" notifications exactly
  *  9 hours after the given clock-in. They fire on the lock screen /
@@ -42,9 +24,6 @@ export async function scheduleShiftEndReminders(clockInUtc: string): Promise<voi
   if (Number.isNaN(clockInMs)) return;
 
   await cancelShiftEndReminders();
-  const perm = await Notifications.requestPermissionsAsync();
-  if (!perm.granted) return;
-  await ensureChannel();
 
   const shiftEndMs = clockInMs + SHIFT_HOURS * 60 * 60 * 1000;
 
@@ -52,22 +31,15 @@ export async function scheduleShiftEndReminders(clockInUtc: string): Promise<voi
   for (const offsetMin of REMINDER_OFFSETS_MIN) {
     const fireAt = new Date(shiftEndMs + offsetMin * 60 * 1000);
     if (fireAt.getTime() <= Date.now() + 5000) continue; // already past
-    const id = await Notifications.scheduleNotificationAsync({
-      content: {
-        title: offsetMin === 0 ? 'Shift time is over' : 'Reminder: please clock out',
-        body:
-          offsetMin === 0
-            ? `Your ${SHIFT_HOURS}-hour shift is complete. Open Attendance and clock out.`
-            : 'You are still clocked in. Open Attendance and clock out.',
-        sound: 'default',
-      },
-      trigger: {
-        type: Notifications.SchedulableTriggerInputTypes.DATE,
-        date: fireAt,
-        channelId: CHANNEL_ID,
-      },
-    });
-    ids.push(id);
+    const id = await scheduleAt(
+      CHANNELS.shift,
+      fireAt,
+      offsetMin === 0 ? 'Shift time is over' : 'Reminder: please clock out',
+      offsetMin === 0
+        ? `Your ${SHIFT_HOURS}-hour shift is complete. Open Attendance and clock out.`
+        : 'You are still clocked in. Open Attendance and clock out.',
+    );
+    if (id) ids.push(id);
   }
   await setState(IDS_KEY, JSON.stringify(ids));
 }

@@ -2,7 +2,7 @@
   "expo": {
     "name": "Attendance",
     "slug": "attendance-mobile",
-    "version": "1.4.15",
+    "version": "1.4.16",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#0f172a",
@@ -20,7 +20,7 @@
         "POST_NOTIFICATIONS",
         "USE_BIOMETRIC"
       ],
-      "versionCode": 22
+      "versionCode": 23
     },
     "plugins": [
       [
@@ -39,7 +39,13 @@
           }
         }
       ],
-      "expo-background-task"
+      "expo-background-task",
+      [
+        "expo-notifications",
+        {
+          "color": "#2563eb"
+        }
+      ]
     ],
     "icon": "./assets/icon.png"
   }

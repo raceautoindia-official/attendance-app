@@ -1,6 +1,6 @@
 import * as Notifications from 'expo-notifications';
-import { Platform } from 'react-native';
 import { getState, setState } from '../storage/state';
+import { scheduleAt, ensureNotificationPermission, CHANNELS } from './setup';
 
 // ---------------------------------------------------------------------------
 // "You have not clocked in yet" — a local notification each working morning.
@@ -17,7 +17,6 @@ import { getState, setState } from '../storage/state';
 // next app open.
 // ---------------------------------------------------------------------------
 
-const CHANNEL_ID = 'attendance-reminders';
 /** Identifiers we scheduled, so cancelling touches only ours. */
 const IDS_KEY = 'clockin_reminder_ids';
 /** The morning this set was armed for, so re-arming is cheap and idempotent. */
@@ -30,16 +29,6 @@ export const REMINDER_MINUTE = 0;
 const DAYS_AHEAD = 7;
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
-async function ensureChannel(): Promise<void> {
-  if (Platform.OS !== 'android') return;
-  await Notifications.setNotificationChannelAsync(CHANNEL_ID, {
-    name: 'Attendance reminders',
-    importance: Notifications.AndroidImportance.HIGH,
-    sound: 'default',
-    vibrationPattern: [0, 400, 200, 400],
-  });
-}
 
 async function storedIds(): Promise<string[]> {
   try {
@@ -80,12 +69,9 @@ export async function scheduleClockInReminders(
   workingDays: string[] | null,
 ): Promise<void> {
   try {
-    const perm = await Notifications.getPermissionsAsync();
-    if (!perm.granted) {
-      const asked = await Notifications.requestPermissionsAsync();
-      if (!asked.granted) return;
-    }
-    await ensureChannel();
+    // Asked for once at app start (see setup.ts). If it was refused there is
+    // nothing to schedule — the OS would drop these silently.
+    if (!(await ensureNotificationPermission(false))) return;
 
     // Already armed for the same morning — nothing to redo. Without this, every
     // dashboard refresh would cancel and re-create seven notifications.
@@ -104,19 +90,13 @@ export async function scheduleClockInReminders(
       if (fireAt.getTime() <= Date.now() + 60_000) continue;
       if (workingDays && !workingDays.includes(WEEKDAYS[fireAt.getDay()])) continue;
 
-      const id = await Notifications.scheduleNotificationAsync({
-        content: {
-          title: 'Good morning — clock in',
-          body: 'Open Attendance and clock in for today.',
-          sound: 'default',
-        },
-        trigger: {
-          type: Notifications.SchedulableTriggerInputTypes.DATE,
-          date: fireAt,
-          channelId: CHANNEL_ID,
-        },
-      });
-      ids.push(id);
+      const id = await scheduleAt(
+        CHANNELS.attendance,
+        fireAt,
+        'Good morning — clock in',
+        'Open Attendance and clock in for today.',
+      );
+      if (id) ids.push(id);
     }
 
     await setState(IDS_KEY, JSON.stringify(ids));

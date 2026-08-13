@@ -1,8 +1,6 @@
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
-import * as Notifications from 'expo-notifications';
 import { getState, setState, removeState } from '../storage/state';
-import { Platform } from 'react-native';
 import { apiFetch, ApiError } from '../api/client';
 import { startBackgroundTracking, stopBackgroundTracking, setFixListener } from './tracking';
 import { scheduleShiftEndReminders, cancelShiftEndReminders } from '../notifications/shiftReminder';
@@ -33,7 +31,7 @@ export const GEOFENCE_TASK = 'attendance-geofence-auto';
 const INNER_ID = 'fence-inner';
 const OUTER_ID = 'fence-outer';
 const EXIT_MARGIN_M = 150;
-const CHANNEL_ID = 'auto-attendance';
+import { notify as sharedNotify, CHANNELS } from '../notifications/setup';
 
 // Set when THIS device auto-clocked-out on exit; required for auto clock-in.
 const AUTO_OUT_KEY = 'geofence_auto_out_pending';
@@ -74,22 +72,14 @@ function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number)
   return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+// Sent through the shared helper: it owns the channel, the foreground handler
+// and the permission check. This module used to create its channel on every
+// single warning — a native round-trip on a path that runs from a background
+// task — and never checked whether it was allowed to post at all, so on an
+// Android 13 phone that had not granted POST_NOTIFICATIONS the four
+// away-from-site warnings went nowhere and nothing said so.
 async function notify(title: string, body: string): Promise<void> {
-  try {
-    if (Platform.OS === 'android') {
-      await Notifications.setNotificationChannelAsync(CHANNEL_ID, {
-        name: 'Automatic attendance',
-        importance: Notifications.AndroidImportance.HIGH,
-        sound: 'default',
-      });
-    }
-    await Notifications.scheduleNotificationAsync({
-      content: { title, body, sound: 'default' },
-      trigger: Platform.OS === 'android' ? { channelId: CHANNEL_ID } : null,
-    });
-  } catch {
-    // never fail the attendance action over a notification
-  }
+  await sharedNotify(CHANNELS.geofence, title, body);
 }
 
 async function storedFence(): Promise<Fence | null> {
