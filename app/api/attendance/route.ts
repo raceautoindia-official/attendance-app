@@ -6,6 +6,8 @@ import { hasSessionColumns, hasOutOfFenceReasonColumn, hasFirstClockInColumn } f
 import {
   creditedMinutes,
   hasPermissionTable,
+  hasOnDutyColumn,
+  hasApprovedPermissionSql,
   permissionMinutesSelect,
 } from '@/lib/permissions';
 import { dayRequiredMinutesSelect } from '@/lib/shifts';
@@ -83,6 +85,17 @@ export async function GET(request: NextRequest) {
     params.push(`%${employeeSearch}%`, `%${employeeSearch}%`);
   }
 
+  // Which optional migrations this database has. Read BEFORE the filters are
+  // built, because the permission filter below is a different query depending
+  // on the answer.
+  const [permissionsAvailable, sessionCols, reasonCol, firstInCol, onDutyCol] = await Promise.all([
+    hasPermissionTable(),
+    hasSessionColumns(),
+    hasOutOfFenceReasonColumn(),
+    hasFirstClockInColumn(),
+    hasOnDutyColumn(),
+  ]);
+
   // Validate status value against allowed enum before injecting into SQL
   const validStatuses = [
     'present', 'late', 'early_departure', 'absent', 'leave', 'holiday',
@@ -90,6 +103,13 @@ export async function GET(request: NextRequest) {
   if (status && validStatuses.includes(status)) {
     conditions.push('a.status = ?');
     params.push(status);
+  } else if (status === 'permission') {
+    // Not an attendance status: a day on permission is still present, or late,
+    // or whatever the attendance itself was. It asks a different question of a
+    // different table — see hasApprovedPermissionSql().
+    conditions.push(
+      hasApprovedPermissionSql(permissionsAvailable, onDutyCol, 'a.employee_id', 'a.work_date'),
+    );
   }
 
   const whereClause =
@@ -101,16 +121,16 @@ export async function GET(request: NextRequest) {
 
   // Approved permission hours for the row's date, plus what the day's shift
   // requires — together they give the credited hours (see creditedMinutes()).
-  const [permissionsAvailable, sessionCols, reasonCol, firstInCol] = await Promise.all([
-    hasPermissionTable(),
-    hasSessionColumns(),
-    hasOutOfFenceReasonColumn(),
-    hasFirstClockInColumn(),
-  ]);
+  //
+  // onDutyCol is passed so ON-DUTY rows are excluded. It was omitted here while
+  // every other caller passed it, so this list counted a day spent working away
+  // from the site as permission taken — crediting hours that were already being
+  // clocked, and disagreeing with the same figure on the CSV and the reports.
   const permissionExpr = permissionMinutesSelect(
     permissionsAvailable,
     'a.employee_id',
     'a.work_date',
+    onDutyCol,
   );
 
   const [countRow, rows] = await Promise.all([

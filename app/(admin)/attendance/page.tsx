@@ -54,6 +54,21 @@ const STATUS_BADGE: Record<AttendanceStatus, 'success' | 'warning' | 'danger' | 
   early_departure: 'warning', leave: 'info', holiday: 'info',
 };
 
+// What /api/attendance accepts for its status filter. 'permission' is NOT an
+// attendance status — a day on permission is still present, or late, or
+// whatever the attendance was — so the server answers it from the permission
+// requests instead. Anything not on this list is ignored there, so the dropdown
+// must not offer one.
+const STATUS_FILTERS: Array<{ value: string; label: string }> = [
+  { value: 'present',         label: 'Present' },
+  { value: 'late',            label: 'Late' },
+  { value: 'permission',      label: 'Permission' },
+  { value: 'absent',          label: 'Absent' },
+  { value: 'early_departure', label: 'Early departure' },
+  { value: 'leave',           label: 'Leave' },
+  { value: 'holiday',         label: 'Holiday' },
+];
+
 const IST_LOCALE = 'en-IN';
 const TZ = 'Asia/Kolkata';
 
@@ -100,14 +115,18 @@ export default function AttendancePage() {
   const [fromDate, setFromDate] = useState(today);
   const [toDate, setToDate] = useState(today);
   const [empSearch, setEmpSearch] = useState('');
+  // Applied by the SERVER. This list is paginated at 25 rows, so hiding rows
+  // after the fetch would only ever search the page already on screen.
+  const [statusFilter, setStatusFilter] = useState('');
   const [page, setPage] = useState(1);
   const [editTarget, setEditTarget] = useState<AttRow | null>(null);
 
   const { data, isLoading } = useQuery({
-    queryKey: ['attendance', { fromDate, toDate, empSearch, page }],
+    queryKey: ['attendance', { fromDate, toDate, empSearch, statusFilter, page }],
     queryFn: async () => {
       const params = new URLSearchParams({ from_date: fromDate, to_date: toDate, page: String(page), limit: '25' });
       if (empSearch) params.set('employee_search', empSearch);
+      if (statusFilter) params.set('status', statusFilter);
       const res = await fetch(`/api/attendance?${params}`);
       return res.json() as Promise<ApiResponse<{ records: AttRow[]; pagination: { total: number; totalPages: number } }>>;
     },
@@ -167,6 +186,19 @@ export default function AttendancePage() {
           onChange={e => { setEmpSearch(e.target.value); setPage(1); }}
           className="sm:w-48"
         />
+        <div className="flex flex-col gap-1">
+          <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Status</label>
+          <select
+            value={statusFilter}
+            onChange={e => { setStatusFilter(e.target.value); setPage(1); }}
+            className="w-44 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="">All statuses</option>
+            {STATUS_FILTERS.map(f => (
+              <option key={f.value} value={f.value}>{f.label}</option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {/* Table */}

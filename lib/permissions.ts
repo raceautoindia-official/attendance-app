@@ -50,6 +50,36 @@ export function timeOffOnly(hasType: boolean, alias = ''): string {
 }
 
 /**
+ * SQL predicate: does this attendance row's day carry APPROVED PERMISSION?
+ *
+ * "Permission" is not one of the attendance statuses — a day on permission is
+ * still present, or late, or whatever the attendance itself was. It is a
+ * separate fact about the same day, so filtering for it has to ask a different
+ * question rather than compare a.status.
+ *
+ * EXISTS rather than a join: a day can hold several approved requests, and a
+ * join would return the attendance row once per request.
+ *
+ * Returns 'FALSE' when the permissions table has not been migrated, so the
+ * filter finds nothing instead of failing the whole list.
+ */
+export function hasApprovedPermissionSql(
+  exists: boolean,
+  hasType: boolean,
+  empColumn: string,
+  dateColumn: string,
+): string {
+  if (!exists) return 'FALSE';
+  return `EXISTS (
+    SELECT 1 FROM permission_requests pr
+     WHERE pr.employee_id = ${empColumn}
+       AND pr.permission_date = ${dateColumn}
+       AND pr.status = 'approved'
+       ${timeOffOnly(hasType, 'pr')}
+  )`;
+}
+
+/**
  * Is this employee on approved OUT-OF-OFFICE DUTY at this moment?
  *
  * On-duty means they are working away from the site with an admin's approval,
