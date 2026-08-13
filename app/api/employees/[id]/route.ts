@@ -133,18 +133,33 @@ export async function GET(request: NextRequest, context: Params) {
 // PUT /api/employees/[id]
 // ---------------------------------------------------------------------------
 
+// An empty string from a form field means "nothing typed here". For a field
+// that can be cleared, that is NULL; for the PIN it means LEAVE IT ALONE.
+// Without this, the edit form — which always submits every field, blank or not
+// — sent new_pin: "" and was told "PIN must be 4–6 digits". Every edit failed
+// that way, so changing a phone number, or switching someone to Off-site, meant
+// setting a new PIN for them first. Nothing could be saved without one.
+const blankToNull = (v: unknown) => (typeof v === 'string' && v.trim() === '' ? null : v);
+const blankToAbsent = (v: unknown) => (typeof v === 'string' && v.trim() === '' ? undefined : v);
+
 const UpdateEmployeeSchema = z.object({
   name: z.string().min(1).max(100).optional(),
-  email: z.string().email().nullable().optional(),
-  phone: z.string().max(20).nullable().optional(),
-  department: z.string().max(100).nullable().optional(),
+  email: z.preprocess(blankToNull, z.string().email().nullable().optional()),
+  phone: z.preprocess(blankToNull, z.string().max(20).nullable().optional()),
+  department: z.preprocess(blankToNull, z.string().max(100).nullable().optional()),
   role: z.enum(['employee', 'manager', 'super_admin']).optional(),
   manager_id: z.number().int().positive().nullable().optional(),
   is_active: z.boolean().optional(),
   live_tracking_enabled: z.boolean().optional(),
   work_mode: z.enum(['on_site', 'off_site']).optional(),
   allow_multiple_sessions: z.boolean().optional(),
-  new_pin: z.string().regex(/^\d{4,6}$/, 'PIN must be 4–6 digits').optional(),
+  // blankToAbsent, never blankToNull: a PIN is not a field that can be emptied.
+  // Left blank it keeps the one they have; there is no way to leave an employee
+  // with no PIN at all.
+  new_pin: z.preprocess(
+    blankToAbsent,
+    z.string().regex(/^\d{4,6}$/, 'PIN must be 4–6 digits').optional(),
+  ),
 }).extend(BankDetailsSchema.shape);
 
 export async function PUT(request: NextRequest, context: Params) {

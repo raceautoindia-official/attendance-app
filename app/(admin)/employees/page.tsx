@@ -47,6 +47,8 @@ const empSchema = z.object({
   // The API (create, update and both login routes) accepts 4–6 digits — keep
   // the form in step, otherwise a 4-digit PIN is rejected here for no reason.
   pin: z.string().regex(/^\d{4,6}$/, 'PIN must be 4–6 digits'),
+  work_mode: z.enum(['on_site', 'off_site']).optional(),
+  allow_multiple_sessions: z.boolean().optional(),
   shift_id: z.preprocess(v => (v === '' || v === null || v === undefined) ? null : Number(v), z.number().int().positive().nullable().optional()),
   location_id: z.preprocess(v => (v === '' || v === null || v === undefined) ? null : Number(v), z.number().int().positive().nullable().optional()),
   geofencing_enabled: z.boolean().optional(),
@@ -146,6 +148,8 @@ export default function EmployeesPage() {
       // nothing to measure against.
       geofencing_enabled: true,
       live_tracking_enabled: true,
+      work_mode: 'on_site',
+      allow_multiple_sessions: false,
       schedule_effective_from: new Date().toISOString().slice(0, 10),
     },
   });
@@ -338,6 +342,9 @@ export default function EmployeesPage() {
                   </div>
                 ),
               },
+              // Phone was only visible after expanding a row, so an admin who
+              // had just typed one in had no way to see it had been saved.
+              { key: 'phone', header: 'Phone', render: r => (r as EmpRow).phone ?? '—' },
               { key: 'department', header: 'Department', render: r => (r as EmpRow).department ?? '—' },
               {
                 key: 'role',
@@ -549,6 +556,24 @@ export default function EmployeesPage() {
             <input type="checkbox" {...addForm.register('live_tracking_enabled')} />
             Enable live tracking for this employee
           </label>
+
+          {/* Set here rather than only in Edit. Every new employee was created
+              on-site and had to be corrected in a second step, which is easy to
+              forget for the field staff who most need it. */}
+          <div className="grid grid-cols-2 gap-4">
+            <div className="flex flex-col gap-1">
+              <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Work Mode</label>
+              <select {...addForm.register('work_mode')} className={selectClass}>
+                <option value="on_site">On-site (geofence enforced)</option>
+                <option value="off_site">Off-site (field — no geofence)</option>
+              </select>
+            </div>
+            <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300 mt-7">
+              <input type="checkbox" {...addForm.register('allow_multiple_sessions')} />
+              Allow multiple clock-ins per day (plant)
+            </label>
+          </div>
+
           <Input label="Initial PIN (4–6 digits)" type="password" maxLength={6} inputMode="numeric"
             autoComplete="new-password" {...addForm.register('pin')} error={addForm.formState.errors.pin?.message} />
 
@@ -567,7 +592,14 @@ export default function EmployeesPage() {
         {editTarget && (
           <form onSubmit={editForm.handleSubmit((v: EditForm) => editMutation.mutate({ id: editTarget.id, values: v }))} className="space-y-4">
             <div className="grid grid-cols-2 gap-4">
-              <Input label="Employee ID" {...editForm.register('emp_id')} error={editForm.formState.errors.emp_id?.message} />
+              {/* Read-only, because the update API does not accept it: typing a
+                  new one here was silently discarded, and the field looked like
+                  it had worked. The employee ID is what they log in with and
+                  what every attendance row is keyed to, so it is not something
+                  to change in passing. */}
+              <Input label="Employee ID" readOnly disabled
+                helper="Cannot be changed"
+                {...editForm.register('emp_id')} />
               <Input label="Full Name" {...editForm.register('name')} error={editForm.formState.errors.name?.message} />
             </div>
             <div className="grid grid-cols-2 gap-4">
