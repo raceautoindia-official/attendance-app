@@ -1648,9 +1648,10 @@ const styles = StyleSheet.create({
     letterSpacing: 0.4, textTransform: 'uppercase', marginBottom: 3,
   },
   sessionRow: { fontSize: 15, flexShrink: 1 },
-  // The times carry the meaning, so they carry the weight.
   sessionTime: { color: colors.text, fontSize: 15, fontWeight: '700' },
-  sessionJoin: { color: colors.textFaint, fontSize: 13, fontWeight: '500' },
+  // "to" is bold and full-strength as well — asked for plainly. It was quieter
+  // so the times would stand out; one weight throughout reads as one sentence.
+  sessionJoin: { color: colors.text, fontSize: 15, fontWeight: '700' },
   permDateText: { color: colors.text, fontSize: 14, paddingVertical: 2 },
   permTimePlaceholder: { color: colors.textFaint, fontSize: 14, paddingVertical: 2 },
   permQuickRow: { flexDirection: 'row', gap: 8, marginTop: 8, marginBottom: 4 },
