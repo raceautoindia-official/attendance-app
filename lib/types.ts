@@ -239,6 +239,45 @@ export interface AttendanceRecord {
   auto_clocked_out?: boolean;
 }
 
+/**
+ * One employee's whole day, for the admin's day view.
+ *
+ * Built from the EMPLOYEE outwards rather than from an attendance row, so
+ * somebody who has not clocked in is still a row — with nulls where the day
+ * has not happened yet. An AttendanceRecord cannot express that: it only
+ * exists once there is something to record.
+ */
+export interface DayAttendanceRow {
+  employee_id: number;
+  employee_name: string;
+  emp_id: string;
+  role: string;
+  /** null when no attendance row exists for the day yet. */
+  attendance_id: number | null;
+  clock_in_utc: Date | string | null;
+  clock_out_utc: Date | string | null;
+  first_clock_in_utc: Date | string | null;
+  status: AttendanceStatus;
+  /** null = nothing to report yet (not clocked in), not "outside". */
+  geofence_status: GeofenceStatus | null;
+  /** Is this employee fenced at all? Distinguishes "switched off" from "no reading". */
+  geofencing_enabled: boolean;
+  location_name: string | null;
+  location_radius_m: number | null;
+  out_of_fence_reason: string | null;
+  worked_minutes: number | null;
+  credited_minutes: number | null;
+  required_minutes: number | null;
+  permission_minutes: number;
+  overtime_minutes: number;
+  late_minutes: number | null;
+  break_minutes: number | null;
+  session_count: number;
+  /** Was this employee due in at all today? False on their weekly off or a
+   *  weekday their shift does not work — which is not the same as absent. */
+  expected_today: boolean;
+}
+
 /** A short paid absence inside a working day, approved by an admin. */
 export interface PermissionRequest {
   id: number;
