@@ -51,6 +51,55 @@ type LiveRangePreset = '30m' | '2h' | '8h' | '24h' | 'custom';
 const IST = 'Asia/Kolkata';
 const IST_LOCALE = 'en-IN';
 
+/**
+ * Minutes in one spot before it counts as STOOD STILL, and is drawn orange.
+ *
+ * One constant so the map badge, the ring, the popup and the employee list
+ * cannot come to different conclusions about the same stop.
+ *
+ * "One spot" is within the same 40 m jitter radius the numbered marks already
+ * merge on — a stationary phone's GPS wanders a few metres per fix, and
+ * treating that wander as movement is what once turned somebody sitting at a
+ * desk into a pile of 79 separate badges.
+ */
+const STATIONARY_MIN = 10;
+/** Same 40 m the numbered marks merge on — see STATIONARY_MIN. */
+const STATIONARY_JITTER_M = 40;
+
+/**
+ * How long this employee has been standing in the same place, right now.
+ *
+ * Walks BACKWARDS from the newest fix while each one stays within the jitter
+ * radius of it, and returns the span covered. Backwards because the question
+ * is about the present: a two-hour stop this morning is history, whereas
+ * "has not moved for 40 minutes" is the thing worth noticing on a live screen.
+ *
+ * Returns 0 when they are moving, so the caller can simply compare against
+ * STATIONARY_MIN.
+ */
+function stationaryMinutes(
+  path: Array<{ latitude: number | string; longitude: number | string; tracked_at_utc: string }>,
+): number {
+  if (!path.length) return 0;
+  const last = path[path.length - 1];
+  const lat = Number(last.latitude);
+  const lng = Number(last.longitude);
+  const endMs = new Date(last.tracked_at_utc).getTime();
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Number.isNaN(endMs)) return 0;
+
+  let startMs = endMs;
+  for (let i = path.length - 2; i >= 0; i--) {
+    const p = path[i];
+    const pLat = Number(p.latitude);
+    const pLng = Number(p.longitude);
+    const ms = new Date(p.tracked_at_utc).getTime();
+    if (!Number.isFinite(pLat) || !Number.isFinite(pLng) || Number.isNaN(ms)) continue;
+    if (metresBetween(lat, lng, pLat, pLng) > STATIONARY_JITTER_M) break;
+    startMs = ms;
+  }
+  return Math.max(0, Math.round((endMs - startMs) / 60_000));
+}
+
 function toIST(d: Date | string | null) {
   if (!d) return '—';
   return new Date(d).toLocaleTimeString(IST_LOCALE, { timeZone: IST, hour: '2-digit', minute: '2-digit', hour12: true });
@@ -236,13 +285,13 @@ export default function LiveTrackingPanel() {
             timeZone: IST, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true,
           })
         : '';
-    const buckets = new Map<number, { lat: number; lng: number; t: string }>();
+    const buckets = new Map<number, { lat: number; lng: number; t: string; ms: number }>();
     for (const p of selectedRecordedPath) {
       const ms = new Date(p.tracked_at_utc).getTime();
       const lat = Number(p.latitude);
       const lng = Number(p.longitude);
       if (!Number.isFinite(ms) || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
-      buckets.set(Math.floor(ms / 60_000), { lat, lng, t: fmt(p.tracked_at_utc) });
+      buckets.set(Math.floor(ms / 60_000), { lat, lng, t: fmt(p.tracked_at_utc), ms });
     }
     const bucketed = [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([, m]) => m);
     // A number should advance when the PERSON moves, not when the signal
@@ -253,17 +302,24 @@ export default function LiveTrackingPanel() {
     // when they were last seen there (t2), so its popup reads "2:10 – 3:29 pm"
     // instead of pretending 79 separate visits.
     const JITTER_M = 40;
-    let marks: Array<{ lat: number; lng: number; t: string; t2?: string }> = [];
+    type Mark = {
+      lat: number; lng: number; t: string; t2?: string;
+      ms: number; ms2: number; dwellMin: number;
+    };
+    let marks: Mark[] = [];
     for (const m of bucketed) {
       const prev = marks[marks.length - 1];
       if (prev && metresBetween(prev.lat, prev.lng, m.lat, m.lng) <= JITTER_M) {
-        prev.t2 = m.t; // still there — extend the dwell
+        // Still there — extend the dwell rather than adding another badge.
+        prev.t2 = m.t;
+        prev.ms2 = m.ms;
+        prev.dwellMin = Math.round((prev.ms2 - prev.ms) / 60_000);
       } else {
-        marks.push({ ...m });
+        marks.push({ ...m, ms2: m.ms, dwellMin: 0 });
       }
     }
     if (!marks.length && selectedHasCoords) {
-      marks = [{ lat: Number(selectedLat), lng: Number(selectedLng), t: '' }];
+      marks = [{ lat: Number(selectedLat), lng: Number(selectedLng), t: '', ms: 0, ms2: 0, dwellMin: 0 }];
     }
     const MAX_MARKS = 120;
     if (marks.length > MAX_MARKS) {
@@ -298,6 +354,7 @@ export default function LiveTrackingPanel() {
   // recorded point that shows the IST time the employee was there, green start
   // + red latest markers. Keyless (no Google Cloud).
   const routeMapSrc = useMemo(() => {
+    const dwellMin = STATIONARY_MIN;
     if (!routePointsJson && !minuteMarksJson) return null;
     return `<!DOCTYPE html><html><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -322,10 +379,25 @@ function badge(n,bg){return L.divIcon({className:'',iconSize:[24,24],iconAnchor:
   html:'<div style="width:24px;height:24px;border-radius:50%;background:'+bg+';color:#fff;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.45);font:700 11px system-ui;display:flex;align-items:center;justify-content:center">'+n+'</div>'});}
 var group=[];
 marks.forEach(function(m,i){
-  var bg = i===0 ? '#16a34a' : (i===marks.length-1 ? '#dc2626' : '#2563eb');
+  // ORANGE = STOOD STILL. A stop of ${dwellMin} minutes or more in one place is the
+  // thing an admin is scanning for, and it was drawn the same blue as a badge
+  // somebody walked straight past. Orange wins over the blue middle badges but
+  // never over Start and Latest, which answer a different question — where the
+  // trail begins and where the person is NOW.
+  var stationary = (m.dwellMin||0) >= ${dwellMin};
+  var bg = i===0 ? '#16a34a'
+         : (i===marks.length-1 ? '#dc2626'
+         : (stationary ? '#f97316' : '#2563eb'));
   var when = m.t2 && m.t2!==m.t ? m.t+' – '+m.t2 : m.t;
-  var label = (i===0?'Start':(i===marks.length-1?'Latest':'Stop'))+' #'+m.n+(when?'<br/>🕐 '+when:'');
-  group.push(L.marker([m.lat,m.lng],{icon:badge(m.n,bg),zIndexOffset:i===marks.length-1?1000:i===0?900:0})
+  var label = (i===0?'Start':(i===marks.length-1?'Latest':'Stop'))+' #'+m.n+(when?'<br/>🕐 '+when:'')
+    + (stationary ? '<br/><b style="color:#c2410c">Stayed here '+m.dwellMin+' min</b>' : '');
+  // A ring around the stop, sized so it reads at a glance without hiding the
+  // street underneath.
+  if(stationary){
+    L.circle([m.lat,m.lng],{radius:45,color:'#f97316',weight:2,opacity:0.9,
+      fillColor:'#f97316',fillOpacity:0.18}).addTo(map).bindPopup(label);
+  }
+  group.push(L.marker([m.lat,m.lng],{icon:badge(m.n,bg),zIndexOffset:i===marks.length-1?1000:(stationary?800:i===0?900:0)})
     .addTo(map).bindPopup(label));
 });
 var bounds = ll.length>1 ? L.polyline(ll).getBounds() : null;
@@ -442,6 +514,38 @@ else if(ll.length===1){map.setView(ll[0],17);}
               render: r => {
                 const s = phoneState(r as LiveTrackingLiveRow);
                 return <span className={`text-xs font-medium ${s.tone}`} title={s.title}>{s.label}</span>;
+              },
+            },
+            {
+              key: 'stationary',
+              header: 'Movement',
+              // Orange here for the same reason it is orange on the map: an
+              // admin should not have to open each employee's trail to find
+              // out who has not moved. The map shows WHERE the stop is; this
+              // shows WHO is in one.
+              render: r => {
+                const row = r as LiveTrackingLiveRow;
+                const mins = stationaryMinutes(row.recorded_path ?? row.path ?? []);
+                if (!(row.recorded_path?.length || row.path?.length)) {
+                  return <span className="text-xs text-slate-400">—</span>;
+                }
+                if (mins >= STATIONARY_MIN) {
+                  return (
+                    <span
+                      className="inline-flex items-center gap-1.5 text-xs font-medium text-orange-600 dark:text-orange-400"
+                      title={`No movement beyond ${STATIONARY_JITTER_M} m for ${mins} minutes`}
+                    >
+                      <span className="inline-block h-2.5 w-2.5 rounded-full bg-orange-500" />
+                      Same place {mins}m
+                    </span>
+                  );
+                }
+                return (
+                  <span className="inline-flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+                    <span className="inline-block h-2.5 w-2.5 rounded-full bg-green-500" />
+                    Moving
+                  </span>
+                );
               },
             },
             {
