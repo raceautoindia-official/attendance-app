@@ -1162,26 +1162,21 @@ If you are working away from the site today, ask your `
                   }]
                 : [];
             if (!sessions.length) return null;
+            // Just the times: in to out, one line each. No numbering and no
+            // reason the session ended — asked for plainly, and the times are
+            // what anyone is checking here anyway. The reason a day was closed
+            // by the fence still lives on the admin's Notifications page and in
+            // the day-wise report.
             return (
               <View style={styles.sessionList}>
-                <Text style={styles.sessionHeading}>
-                  {sessions.length === 1 ? 'Today’s session' : `All ${sessions.length} sessions today`}
-                </Text>
                 {sessions.map((sess, i) => (
-                  <View key={`${sess.in_utc}-${i}`} style={styles.sessionItem}>
-                    <Text style={styles.sessionNum}>{i + 1}</Text>
-                    <Text style={styles.sessionRow}>
-                      <Text style={styles.sessionTime}>{timeOnly(sess.in_utc)}</Text>
-                      {'  →  '}
-                      <Text style={styles.sessionTime}>
-                        {sess.out_utc ? timeOnly(sess.out_utc) : 'still in'}
-                      </Text>
-                      {sess.out_kind === 'left_site' ? '   left site'
-                        : sess.out_kind === 'watchdog' ? '   away from site'
-                        : sess.out_kind === 'location_off' ? '   location off'
-                        : ''}
+                  <Text key={`${sess.in_utc}-${i}`} style={styles.sessionRow}>
+                    <Text style={styles.sessionTime}>{timeOnly(sess.in_utc)}</Text>
+                    {'  to  '}
+                    <Text style={styles.sessionTime}>
+                      {sess.out_utc ? timeOnly(sess.out_utc) : 'still in'}
                     </Text>
-                  </View>
+                  </Text>
                 ))}
               </View>
             );
@@ -1644,16 +1639,6 @@ const styles = StyleSheet.create({
   fenceBannerTextIn: { color: '#86efac' },
   fenceBannerTextOut: { color: '#fca5a5' },
   sessionList: { marginTop: 12, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 10, gap: 6 },
-  sessionHeading: {
-    color: colors.textFaint, fontSize: 11, fontWeight: '700',
-    letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 2,
-  },
-  sessionItem: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  sessionNum: {
-    width: 20, height: 20, borderRadius: 10, backgroundColor: colors.bg,
-    color: colors.textMuted, fontSize: 11, fontWeight: '700',
-    textAlign: 'center', lineHeight: 20, overflow: 'hidden',
-  },
   sessionRow: { color: colors.textMuted, fontSize: 13, flexShrink: 1 },
   sessionTime: { color: colors.text, fontWeight: '600' },
   permDateText: { color: colors.text, fontSize: 14, paddingVertical: 2 },
