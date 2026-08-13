@@ -113,11 +113,22 @@ export default function PermissionsPage() {
         pagination: { total: number; totalPages: number };
         pending_count: number;
         migration_pending?: boolean;
+        /** Approved minutes per employee over the whole filter, not this page. */
+        employee_totals?: Array<{
+          employee_id: number;
+          employee_name: string;
+          emp_id: string;
+          approved_minutes: number;
+          approved_count: number;
+          pending_count: number;
+          rejected_count: number;
+        }>;
       }>>;
     },
   });
 
   const rows = data?.data?.permissions ?? [];
+  const employeeTotals = data?.data?.employee_totals ?? [];
   const pagination = data?.data?.pagination;
   const pendingCount = data?.data?.pending_count ?? 0;
   const migrationPending = data?.data?.migration_pending === true;
@@ -127,11 +138,16 @@ export default function PermissionsPage() {
       id,
       action,
       review_notes,
-    }: { id: number; action: 'approve' | 'reject'; review_notes?: string }) => {
+      revise,
+    }: {
+      id: number; action: 'approve' | 'reject'; review_notes?: string;
+      /** Changing a decision that was already made, rather than making one. */
+      revise?: boolean;
+    }) => {
       const res = await fetch(`/api/permissions/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, review_notes: review_notes ?? null }),
+        body: JSON.stringify({ action, review_notes: review_notes ?? null, revise: revise ?? false }),
       });
       const json = await res.json() as ApiResponse;
       if (!json.success) throw new Error(json.error ?? 'Failed');
@@ -247,6 +263,43 @@ export default function PermissionsPage() {
         </div>
       </div>
 
+      {/* TOTAL PERMISSION HOURS PER EMPLOYEE, over whatever filter is set.
+          The list below is a page of individual requests and never answered
+          "how much has this person taken", which is the question a month-end
+          review actually asks. Only APPROVED minutes count: a pending or
+          rejected request is not time anybody has had. */}
+      {!isLoading && employeeTotals.length > 0 && (
+        <div className="rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden">
+          <div className="px-4 py-2.5 bg-slate-50 dark:bg-slate-900/60 border-b border-slate-200 dark:border-slate-700">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+              Permission hours taken — approved only, for this filter
+            </p>
+          </div>
+          <div className="divide-y divide-slate-100 dark:divide-slate-700/50">
+            {employeeTotals.map(t => (
+              <div key={t.employee_id} className="flex flex-wrap items-center justify-between gap-2 px-4 py-2">
+                <div className="min-w-0">
+                  <span className="text-sm font-medium text-slate-800 dark:text-slate-200">
+                    {t.employee_name}
+                  </span>
+                  <span className="ml-2 text-xs text-slate-400">{t.emp_id}</span>
+                </div>
+                <div className="flex items-center gap-4 text-xs">
+                  <span className="tabular-nums font-semibold text-blue-600 dark:text-blue-400">
+                    {Math.floor(t.approved_minutes / 60)}h {t.approved_minutes % 60}m
+                  </span>
+                  <span className="text-slate-400 tabular-nums">
+                    {t.approved_count} approved
+                    {t.pending_count > 0 && ` · ${t.pending_count} pending`}
+                    {t.rejected_count > 0 && ` · ${t.rejected_count} rejected`}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {isLoading ? (
         <div className="flex justify-center py-12"><Spinner /></div>
       ) : (
@@ -343,25 +396,56 @@ export default function PermissionsPage() {
                 header: '',
                 render: r => {
                   const row = r as PermissionRequest;
-                  if (row.status !== 'pending') return <span className="text-slate-400">—</span>;
-                  return (
-                    <div className="flex gap-2">
+                  if (row.status === 'pending') {
+                    return (
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          loading={reviewMutation.isPending}
+                          onClick={() => reviewMutation.mutate({ id: row.id, action: 'approve' })}
+                        >
+                          Approve
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="danger"
+                          onClick={() => { setRejectTarget(row); setRejectNote(''); }}
+                        >
+                          Reject
+                        </Button>
+                      </div>
+                    );
+                  }
+                  // CHANGING A DECISION. A verdict used to be final: a mistaken
+                  // rejection could only be fixed by the employee applying
+                  // again, and a mistaken approval could not be taken back at
+                  // all. Approved hours count towards the day, so being unable
+                  // to correct one is a real problem, not a tidiness one.
+                  //
+                  // A cancelled request is the employee's own withdrawal, not a
+                  // verdict, so there is nothing here to change.
+                  if (row.status === 'approved' || row.status === 'rejected') {
+                    const flip = row.status === 'approved' ? 'reject' : 'approve';
+                    return (
                       <Button
                         size="sm"
+                        variant="secondary"
                         loading={reviewMutation.isPending}
-                        onClick={() => reviewMutation.mutate({ id: row.id, action: 'approve' })}
+                        onClick={() => {
+                          if (!confirm(
+                            `Change this from ${row.status} to ${flip === 'approve' ? 'approved' : 'rejected'}?`
+                            + (flip === 'reject'
+                              ? '\n\nThe hours it credited will be taken off the day.'
+                              : '\n\nIt will credit hours towards that day.'),
+                          )) return;
+                          reviewMutation.mutate({ id: row.id, action: flip, revise: true });
+                        }}
                       >
-                        Approve
+                        Change to {flip === 'approve' ? 'approved' : 'rejected'}
                       </Button>
-                      <Button
-                        size="sm"
-                        variant="danger"
-                        onClick={() => { setRejectTarget(row); setRejectNote(''); }}
-                      >
-                        Reject
-                      </Button>
-                    </div>
-                  );
+                    );
+                  }
+                  return <span className="text-slate-400">—</span>;
                 },
               },
             ]}

@@ -19,6 +19,20 @@ const ReviewSchema = z.object({
   // approve / reject — admin. cancel — the employee withdrawing their own.
   action: z.enum(['approve', 'reject', 'cancel']),
   review_notes: z.string().max(500).nullable().optional(),
+  /**
+   * CHANGING A DECISION THAT WAS ALREADY MADE.
+   *
+   * A decided request could not be touched at all: approve or reject was
+   * final, so a mistaken rejection had to be re-applied for by the employee
+   * and a mistaken approval could not be taken back.
+   *
+   * It is a separate flag rather than a loosened guard because the two cases
+   * are genuinely different. Without it, a 409 on a non-pending request still
+   * means what it always meant — someone else reviewed this while you were
+   * looking at it — and that protection is worth keeping. With it, the admin
+   * is saying "I know it was decided; change it."
+   */
+  revise: z.boolean().optional(),
 });
 
 function fail(error: string, status: number) {
@@ -63,13 +77,25 @@ export async function PATCH(request: NextRequest, context: Params) {
   if (!parsed.success) {
     return fail(parsed.error.issues[0]?.message ?? 'Validation error', 400);
   }
-  const { action, review_notes } = parsed.data;
+  const { action, review_notes, revise } = parsed.data;
 
   const existing = await loadRequest(requestId);
   if (!existing) return fail('Permission request not found', 404);
 
-  if (existing.status !== 'pending') {
-    return fail(`This request is already ${existing.status}`, 409);
+  // A revision may only move a DECISION. A cancelled request is the employee's
+  // own withdrawal, not a verdict, and reviving it behind their back would put
+  // hours back on a day they said they were not taking.
+  const isRevision = revise === true
+    && action !== 'cancel'
+    && (existing.status === 'approved' || existing.status === 'rejected');
+
+  if (existing.status !== 'pending' && !isRevision) {
+    return fail(
+      existing.status === 'cancelled'
+        ? 'This request was cancelled by the employee'
+        : `This request is already ${existing.status}`,
+      409,
+    );
   }
 
   // --- Cancellation: only the employee who owns the request ------------------
@@ -146,15 +172,20 @@ export async function PATCH(request: NextRequest, context: Params) {
   }
 
   const newStatus = action === 'approve' ? 'approved' : 'rejected';
-  // Compare-and-set on 'pending'. Two admins reviewing the same request at the
-  // same moment would otherwise BOTH be told they succeeded while only one
-  // verdict was stored — the second admin would walk away believing they had
-  // rejected something that is now approved.
+  if (newStatus === existing.status) {
+    return fail(`This request is already ${existing.status}`, 409);
+  }
+  // Compare-and-set on the status we READ, not on a literal 'pending'. Two
+  // admins reviewing the same request at the same moment would otherwise BOTH
+  // be told they succeeded while only one verdict was stored — the second
+  // would walk away believing they had rejected something that is now
+  // approved. Matching on the status this caller saw keeps that protection
+  // while letting a decision be revised.
   const reviewResult = await query(
     `UPDATE permission_requests
      SET status = ?, reviewed_by = ?, reviewed_at = NOW(), review_notes = ?
-     WHERE id = ? AND status = 'pending'`,
-    [newStatus, auth.id, review_notes ?? null, requestId],
+     WHERE id = ? AND status = ?`,
+    [newStatus, auth.id, review_notes ?? null, requestId, existing.status],
   );
   if ((reviewResult as unknown as { affectedRows: number }).affectedRows === 0) {
     const current = await loadRequest(requestId);
@@ -165,7 +196,11 @@ export async function PATCH(request: NextRequest, context: Params) {
   }
 
   await insertAuditLog({
-    action: newStatus === 'approved' ? 'permission_approved' : 'permission_rejected',
+    // A revision is its own event. Logged as an approval, a decision reversed
+    // twice would read as two approvals with nothing saying what it had been.
+    action: isRevision
+      ? 'permission_decision_revised'
+      : newStatus === 'approved' ? 'permission_approved' : 'permission_rejected',
     entity: 'permission_request',
     entity_id: requestId,
     performed_by: auth.id,
@@ -176,13 +211,20 @@ export async function PATCH(request: NextRequest, context: Params) {
       end_time: existing.end_time,
       minutes: Number(existing.minutes),
       review_notes: review_notes ?? null,
+      // What it was before. A reversal is only auditable if the log says what
+      // was reversed; "approved" on its own cannot be told from a first
+      // approval.
+      previous_status: existing.status,
+      new_status: newStatus,
     },
     ip_address: getClientIp(request),
   });
 
   return NextResponse.json<ApiResponse<PermissionRequest>>({
     success: true,
-    message: `Permission ${newStatus}`,
+    message: isRevision
+      ? `Changed from ${existing.status} to ${newStatus}`
+      : `Permission ${newStatus}`,
     data: (await loadRequest(requestId))!,
   });
 }

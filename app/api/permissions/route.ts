@@ -190,10 +190,48 @@ export async function GET(request: NextRequest) {
 
   const total = Number(countRow?.total ?? 0);
 
+  // TOTAL PERMISSION HOURS PER EMPLOYEE, over the same filter.
+  //
+  // The list is a page of individual requests, which never answers "how much
+  // has this person taken" — the question a monthly review actually asks. Only
+  // APPROVED minutes are totalled: a pending or rejected request is not time
+  // anybody has had.
+  //
+  // Deliberately NOT limited to the current page: the totals are for the
+  // filter, so page two does not report different numbers from page one.
+  const totalsRows = await query<{
+    employee_id: number; employee_name: string; emp_id: string;
+    approved_minutes: number; approved_count: number;
+    pending_count: number; rejected_count: number;
+  }>(
+    `SELECT pr.employee_id,
+            e.name AS employee_name, e.emp_id,
+            COALESCE(SUM(CASE WHEN pr.status = 'approved' THEN pr.minutes ELSE 0 END), 0) AS approved_minutes,
+            COALESCE(SUM(pr.status = 'approved'), 0) AS approved_count,
+            COALESCE(SUM(pr.status = 'pending'), 0)  AS pending_count,
+            COALESCE(SUM(pr.status = 'rejected'), 0) AS rejected_count
+       FROM permission_requests pr
+       JOIN employees e ON e.id = pr.employee_id
+       ${where}
+      GROUP BY pr.employee_id, e.name, e.emp_id
+      ORDER BY approved_minutes DESC, e.name ASC`,
+    params,
+  );
+  const employee_totals = totalsRows.map(t => ({
+    employee_id: t.employee_id,
+    employee_name: t.employee_name,
+    emp_id: t.emp_id,
+    approved_minutes: Number(t.approved_minutes),
+    approved_count: Number(t.approved_count),
+    pending_count: Number(t.pending_count),
+    rejected_count: Number(t.rejected_count),
+  }));
+
   return NextResponse.json<ApiResponse<{
     permissions: PermissionRequest[];
     pagination: { page: number; limit: number; total: number; totalPages: number };
     pending_count: number;
+    employee_totals: typeof employee_totals;
   }>>(
     {
       success: true,
@@ -201,6 +239,7 @@ export async function GET(request: NextRequest) {
         permissions: rows.map(r => ({ ...r, minutes: Number(r.minutes) })),
         pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
         pending_count: Number(pendingRow?.total ?? 0),
+        employee_totals,
       },
     },
     { headers: { 'Cache-Control': 'no-store' } },

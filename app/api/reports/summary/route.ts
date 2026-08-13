@@ -18,8 +18,19 @@ import {
   totalShiftMinutes,
   workingWeekdays,
 } from '@/lib/shifts';
-import { hasWorkModeColumns, workModeSelect, hasDailyUpdatesTable } from '@/lib/employeeDetails';
+import {
+  hasWorkModeColumns, workModeSelect, hasDailyUpdatesTable, hasFirstClockInColumn,
+} from '@/lib/employeeDetails';
+import { lateMinutes } from '@/lib/attendance';
 import type { ApiResponse } from '@/lib/types';
+
+/** Calendar days from one YYYY-MM-DD to another, both ends included. */
+function daysInclusive(from: string, to: string): number {
+  const a = Date.parse(`${from}T00:00:00Z`);
+  const b = Date.parse(`${to}T00:00:00Z`);
+  if (Number.isNaN(a) || Number.isNaN(b) || b < a) return 0;
+  return Math.round((b - a) / 86_400_000) + 1;
+}
 
 interface EmployeeSummary {
   id: number;
@@ -29,6 +40,17 @@ interface EmployeeSummary {
   work_mode: string;
   /** How many days in the period they posted a work update. */
   daily_updates_count: number;
+  /** Every day in the period — the same for every employee. */
+  calendar_days: number;
+  /** Company-wide holidays in the period. */
+  company_holidays: number;
+  /** Calendar days minus their own working days and the holidays. */
+  weekly_off_days: number;
+  /** How late they were, summed over the period, and on how many days. */
+  late_minutes: number;
+  late_days: number;
+  /** (present + late) / their working days, as a percentage. Null with no roster. */
+  attendance_percentage: number | null;
   total_days_present: number;
   total_days_late: number;
   total_days_absent: number;
@@ -100,11 +122,12 @@ export async function GET(request: NextRequest) {
   // permission tops a short day back up, it never inflates one past the shift.
   // On-duty rows are excluded throughout: that is work being clocked, not time
   // off, so it neither tops up hours nor appears as permission taken.
-  const [permissionsAvailable, hasType, workModeCols, updatesTable] = await Promise.all([
+  const [permissionsAvailable, hasType, workModeCols, updatesTable, firstInCol] = await Promise.all([
     hasPermissionTable(),
     hasOnDutyColumn(),
     hasWorkModeColumns(),
     hasDailyUpdatesTable(),
+    hasFirstClockInColumn(),
   ]);
   const permissionJoin = permissionsAvailable
     ? `LEFT JOIN (
@@ -245,6 +268,53 @@ export async function GET(request: NextRequest) {
   // their working days are the UNION.
   const pageShifts = await shiftsForEmployees(rows.map(r => r.id), toDate);
 
+  // HOW LATE, not just how often. The status says 'late'; nothing said whether
+  // that was by two minutes or two hours, and a month of two-minute lates reads
+  // very differently from a month of two-hour ones.
+  //
+  // Computed in JS through the same lateMinutes() the attendance list uses,
+  // rather than a second implementation in SQL that could disagree with it.
+  // Measured from the day's FIRST clock-in: on a multi-session day clock_in_utc
+  // is the afternoon session and would count as hours late.
+  const lateRows = rows.length
+    ? await query<{
+        employee_id: number; first_in: string | null;
+        shift_start_time: string | null; shift_grace_minutes: number | null; shift_type: string | null;
+      }>(
+        `SELECT a.employee_id,
+                ${firstInCol ? 'COALESCE(a.first_clock_in_utc, a.clock_in_utc)' : 'a.clock_in_utc'} AS first_in,
+                s.start_time AS shift_start_time, s.grace_minutes AS shift_grace_minutes,
+                s.type AS shift_type
+           FROM attendance a
+           LEFT JOIN employee_schedules es ON es.id = (
+             SELECT es2.id FROM employee_schedules es2
+              WHERE es2.employee_id = a.employee_id
+                AND es2.effective_from <= a.work_date
+                AND (es2.effective_to IS NULL OR es2.effective_to >= a.work_date)
+              ORDER BY es2.effective_from DESC, es2.id DESC LIMIT 1)
+           LEFT JOIN shifts s ON s.id = es.shift_id
+          WHERE a.clock_in_utc IS NOT NULL
+            AND a.work_date BETWEEN ? AND ?
+            AND a.employee_id IN (${rows.map(() => '?').join(',')})`,
+        [fromDate, toDate, ...rows.map(r => r.id)],
+      )
+    : [];
+
+  const lateByEmployee = new Map<number, { minutes: number; days: number }>();
+  for (const lr of lateRows) {
+    const mins = lateMinutes(
+      lr.first_in ? new Date(lr.first_in) : null,
+      lr.shift_start_time, lr.shift_grace_minutes, lr.shift_type,
+    );
+    if (mins == null || mins <= 0) continue;
+    const acc = lateByEmployee.get(lr.employee_id) ?? { minutes: 0, days: 0 };
+    acc.minutes += mins;
+    acc.days += 1;
+    lateByEmployee.set(lr.employee_id, acc);
+  }
+
+  const calendarDays = daysInclusive(fromDate, toDate);
+
   const summary = rows.map(r => {
     const shifts = pageShifts.get(r.id) ?? [];
     const perDay = totalShiftMinutes(shifts);
@@ -267,6 +337,26 @@ export async function GET(request: NextRequest) {
       working_days: ownWorkingDays,
       expected_minutes: perDay == null ? null : expectedMinutesFor(shifts, counts, holidays),
       days_with_hours: Number(r.days_with_hours ?? 0),
+      // Every day in the period, the same for everyone — carried per row so a
+      // report line can be read on its own.
+      calendar_days: calendarDays,
+      company_holidays: holidays.length,
+      // Whatever is left once their own working days and the holidays are
+      // taken out. Per EMPLOYEE, because a Saturday is a working day for some
+      // shifts and an off day for others.
+      weekly_off_days: Math.max(0, calendarDays - ownWorkingDays - holidays.length),
+      late_minutes: lateByEmployee.get(r.id)?.minutes ?? 0,
+      late_days: lateByEmployee.get(r.id)?.days ?? 0,
+      // Days they were here, over days they were due. Leave is NOT counted as
+      // attendance — it is excused, which is a different thing from present —
+      // and the figure is null rather than 0 when they have no roster, because
+      // "0%" would accuse somebody nothing was ever expected of.
+      attendance_percentage: ownWorkingDays > 0
+        ? Math.round(
+            ((Number(r.total_days_present ?? 0) + Number(r.total_days_late ?? 0))
+              / ownWorkingDays) * 1000,
+          ) / 10
+        : null,
     };
   });
 

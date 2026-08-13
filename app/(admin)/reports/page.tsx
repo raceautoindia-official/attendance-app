@@ -33,6 +33,12 @@ interface SummaryRow {
   work_mode?: string;
   /** Days in the period on which they posted a work update. */
   daily_updates_count?: number;
+  calendar_days?: number;
+  company_holidays?: number;
+  weekly_off_days?: number;
+  late_minutes?: number;
+  late_days?: number;
+  attendance_percentage?: number | null;
   /**
    * This employee's rostered minutes per day (both shifts, if two). Null when
    * they have no schedule, and also when their shifts work different weekdays
@@ -417,6 +423,40 @@ export default function ReportsPage() {
                 },
               },
               {
+                key: 'calendar_days',
+                header: 'Calendar Days',
+                render: r => (
+                  <span className="tabular-nums text-slate-500 dark:text-slate-400">
+                    {(r as SummaryRow).calendar_days ?? '—'}
+                  </span>
+                ),
+              },
+              {
+                key: 'working_days',
+                header: 'Working Days',
+                render: r => (
+                  <span className="tabular-nums">{(r as SummaryRow).working_days ?? '—'}</span>
+                ),
+              },
+              {
+                key: 'weekly_off_days',
+                header: 'Weekly Offs',
+                render: r => (
+                  <span className="tabular-nums text-slate-500 dark:text-slate-400">
+                    {(r as SummaryRow).weekly_off_days ?? '—'}
+                  </span>
+                ),
+              },
+              {
+                key: 'company_holidays',
+                header: 'Holidays',
+                render: r => (
+                  <span className="tabular-nums text-slate-500 dark:text-slate-400">
+                    {(r as SummaryRow).company_holidays ?? '—'}
+                  </span>
+                ),
+              },
+              {
                 key: 'total_days_present',
                 header: 'Present',
                 render: r => (
@@ -428,11 +468,22 @@ export default function ReportsPage() {
               {
                 key: 'total_days_late',
                 header: 'Late',
-                render: r => (
-                  <span className="font-semibold text-amber-600 dark:text-amber-400">
-                    {(r as SummaryRow).total_days_late}
-                  </span>
-                ),
+                render: r => {
+                  const row = r as SummaryRow;
+                  const mins = row.late_minutes ?? 0;
+                  return (
+                    <div>
+                      <span className="font-semibold text-amber-600 dark:text-amber-400 tabular-nums">
+                        {row.total_days_late} day{row.total_days_late === 1 ? '' : 's'}
+                      </span>
+                      {mins > 0 && (
+                        <p className="text-xs text-slate-400 tabular-nums">
+                          {Math.floor(mins / 60)}h {mins % 60}m late
+                        </p>
+                      )}
+                    </div>
+                  );
+                },
               },
               {
                 key: 'total_days_absent',
@@ -488,18 +539,23 @@ export default function ReportsPage() {
                 header: 'Credited Hours',
                 render: r => {
                   const row = r as SummaryRow;
-                  const ot = row.total_overtime_minutes ?? 0;
+                  return <p>{minutesToHours(row.total_minutes_credited ?? row.total_minutes_worked)}</p>;
+                },
+              },
+              {
+                key: 'total_overtime_minutes',
+                header: 'Overtime',
+                render: r => {
+                  // Its own column now. Credited hours stop at the rostered
+                  // day, so overtime is precisely what that cap hides — as a
+                  // footnote under Credited Hours it could not be scanned down
+                  // the page.
+                  const ot = (r as SummaryRow).total_overtime_minutes ?? 0;
+                  if (ot <= 0) return <span className="text-slate-400">—</span>;
                   return (
-                    <div>
-                      <p>{minutesToHours(row.total_minutes_credited ?? row.total_minutes_worked)}</p>
-                      {/* Credited hours stop at the rostered day, so extra time
-                          worked is invisible there — show it in its own right. */}
-                      {ot > 0 && (
-                        <p className="text-xs text-blue-600 dark:text-blue-400">
-                          +{minutesToHours(ot)} extra
-                        </p>
-                      )}
-                    </div>
+                    <span className="font-semibold tabular-nums text-blue-600 dark:text-blue-400">
+                      +{minutesToHours(ot)}
+                    </span>
                   );
                 },
               },
@@ -554,6 +610,22 @@ export default function ReportsPage() {
                   if (row.days_with_hours === 0) return '—';
                   const total = row.total_minutes_credited ?? row.total_minutes_worked;
                   return minutesToHours(Math.round(total / row.days_with_hours));
+                },
+              },
+              {
+                key: 'attendance_percentage',
+                header: 'Attendance %',
+                render: r => {
+                  const pct = (r as SummaryRow).attendance_percentage;
+                  // Null means nothing was expected of them — no roster. "0%"
+                  // there would read as an accusation rather than a fact.
+                  if (pct == null) {
+                    return <span className="text-slate-400 text-xs" title="No shift assigned">—</span>;
+                  }
+                  const tone = pct >= 90 ? 'text-green-600 dark:text-green-400'
+                    : pct >= 75 ? 'text-amber-600 dark:text-amber-400'
+                      : 'text-red-600 dark:text-red-400';
+                  return <span className={`font-semibold tabular-nums ${tone}`}>{pct}%</span>;
                 },
               },
             ]}
