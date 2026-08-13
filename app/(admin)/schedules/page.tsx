@@ -22,7 +22,7 @@ const shiftSchema = z.object({
   start_time: z.string().optional(),
   end_time: z.string().optional(),
   required_hours: z.coerce.number().min(1).max(24).optional(),
-  grace_minutes: z.coerce.number().min(0).max(120).default(10),
+  grace_minutes: z.coerce.number().min(0).max(60, 'Grace cannot exceed 60 minutes').default(10),
   working_days: z.array(z.string()).min(1, 'Select at least one day'),
 });
 
@@ -463,7 +463,7 @@ export default function SchedulesPage() {
               {...shiftForm.register('required_hours')} error={shiftForm.formState.errors.required_hours?.message} />
           )}
 
-          <Input label="Grace Period (minutes)" type="number" min={0} max={120}
+          <Input label="Grace Period (minutes)" type="number" min={0} max={60}
             {...shiftForm.register('grace_minutes')} />
 
           <div>
@@ -527,7 +527,7 @@ export default function SchedulesPage() {
                 {...editShiftForm.register('required_hours')} error={editShiftForm.formState.errors.required_hours?.message} />
             )}
 
-            <Input label="Grace Period (minutes)" type="number" min={0} max={120}
+            <Input label="Grace Period (minutes)" type="number" min={0} max={60}
               {...editShiftForm.register('grace_minutes')} />
 
             <div>

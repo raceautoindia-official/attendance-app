@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
-import { getWorkDateIST, toMySQLDatetime } from '@/lib/attendance';
+import { getWorkDateIST, toMySQLDatetime, workDayStartUtc, workDayEndUtc } from '@/lib/attendance';
 import type { ApiResponse } from '@/lib/types';
 
 interface LiveRow {
@@ -48,6 +48,7 @@ interface LivePoint {
 
 interface LivePointRow extends LivePoint {
   session_id: number;
+  employee_id: number;
 }
 
 // GPS fixes worse than this are Wi-Fi/cell-tower guesses that scatter hundreds
@@ -125,6 +126,19 @@ export async function GET(request: NextRequest) {
   };
   const fromUtc = toMySQLBound(searchParams.get('from_utc'));
   const toUtc = toMySQLBound(searchParams.get('to_utc'));
+  // REVIEW A PAST DAY.
+  //
+  // Without this the page can only ever show people who are clocked in RIGHT
+  // NOW (see the WHERE below), so at the end of the day — once everybody has
+  // gone home — it is empty, and a day's movement cannot be looked at from it
+  // at all. The time-range control did not help: it trims the path of people
+  // still on shift rather than bringing finished ones back.
+  //
+  // With a date, the same rows are returned for that WORK DATE whether or not
+  // the day was closed, and the path covers the whole day.
+  const dateParam = searchParams.get('date');
+  const reviewDate = dateParam && /^\d{4}-\d{2}-\d{2}$/.test(dateParam) ? dateParam : null;
+
   const includePathParam = searchParams.get('include_path');
   const includePath =
     includePathParam == null
@@ -169,8 +183,16 @@ export async function GET(request: NextRequest) {
      -- The open session IS the definition of "on shift": clocked in, not yet
      -- clocked out. Matching on work_date instead would drop anyone still on an
      -- overnight shift once the 07:00 boundary moved the date on.
+     -- Reviewing a finished day, the ACTIVE session is the wrong one to attach
+     -- (there may be none, or one from a later day). Take the session that
+     -- covers this attendance instead.
      LEFT JOIN live_tracking_sessions s
-       ON s.employee_id = a.employee_id AND s.is_active = TRUE
+       ON ${reviewDate
+            ? `s.id = (SELECT s2.id FROM live_tracking_sessions s2
+                        WHERE s2.employee_id = a.employee_id
+                          AND s2.started_at_utc >= a.clock_in_utc
+                        ORDER BY s2.started_at_utc ASC LIMIT 1)`
+            : 's.employee_id = a.employee_id AND s.is_active = TRUE'}
      -- The work site this employee is scheduled to mark attendance at, so the
      -- Overview can name the place instead of only showing raw coordinates.
      LEFT JOIN employee_schedules es
@@ -199,12 +221,17 @@ export async function GET(request: NextRequest) {
          LIMIT 1
        )
      WHERE a.clock_in_utc IS NOT NULL
-       AND a.clock_out_utc IS NULL
+       ${reviewDate ? 'AND a.work_date = ?' : 'AND a.clock_out_utc IS NULL'}
        AND ${conditions.join(' AND ')}
      ORDER BY p.tracked_at_utc IS NULL, p.tracked_at_utc DESC, a.clock_in_utc DESC`,
     // The two schedule-date params come first: that subquery appears before the
     // accuracy-ordered point lookup in the statement.
-    [getWorkDateIST(), getWorkDateIST(), MAX_ACCURACY_M, ...params],
+    [
+      reviewDate ?? getWorkDateIST(), reviewDate ?? getWorkDateIST(),
+      MAX_ACCURACY_M,
+      ...(reviewDate ? [reviewDate] : []),
+      ...params,
+    ],
   );
 
   if (!rows.length) {
@@ -225,19 +252,34 @@ export async function GET(request: NextRequest) {
   // session_id is NULL for them. Left in, those would build `IN (NULL)` — and
   // if NOBODY has a session, `IN ()`, which is a syntax error that would take
   // the whole page down rather than showing it with empty paths.
+  const employeeIds = Array.from(new Set(rows.map(r => r.employee_id)));
   const sessionIds = Array.from(new Set(rows.map(r => r.session_id).filter((id): id is number => id != null)));
-  if (!sessionIds.length) {
+  // In review mode a row with no session still has points to show, so the
+  // early return only applies to live mode.
+  if (!reviewDate && !sessionIds.length) {
     return NextResponse.json<ApiResponse<{ sessions: LiveRow[] }>>({
       success: true,
       data: { sessions: rows.map(row => ({ ...row, path: [], recorded_path: [], recorded_count: 0 })) },
     });
   }
-  const placeholders = sessionIds.map(() => '?').join(',');
+  const keyIds = reviewDate ? employeeIds : sessionIds;
+  const keyCol = reviewDate ? 'employee_id' : 'session_id';
+  const placeholders = keyIds.map(() => '?').join(',');
   const pointConditions: string[] = [
-    `session_id IN (${placeholders})`,
+    `${keyCol} IN (${placeholders})`,
     '(accuracy_meters IS NULL OR accuracy_meters <= ?)',
   ];
-  const pointParams: unknown[] = [...sessionIds, MAX_ACCURACY_M];
+  const pointParams: unknown[] = [...keyIds, MAX_ACCURACY_M];
+  // Bound a reviewed day to the work day itself (07:00 to 07:00), or a session
+  // spanning midnight would drag in the neighbouring day's movement. An
+  // explicit range from the caller still wins.
+  if (reviewDate && !fromUtc && !toUtc) {
+    pointConditions.push('tracked_at_utc >= ?', 'tracked_at_utc <= ?');
+    pointParams.push(
+      toMySQLDatetime(workDayStartUtc(reviewDate)),
+      toMySQLDatetime(workDayEndUtc(reviewDate)),
+    );
+  }
   if (fromUtc) {
     pointConditions.push('tracked_at_utc >= ?');
     pointParams.push(fromUtc);
@@ -249,13 +291,14 @@ export async function GET(request: NextRequest) {
   const pointRows = await query<LivePointRow>(
     `SELECT
        session_id,
+       employee_id,
        tracked_at_utc,
        latitude,
        longitude,
        accuracy_meters
      FROM live_tracking_points
      WHERE ${pointConditions.join(' AND ')}
-     ORDER BY session_id ASC, tracked_at_utc ASC, id ASC`,
+     ORDER BY ${keyCol} ASC, tracked_at_utc ASC, id ASC`,
     pointParams,
   );
 
@@ -268,13 +311,16 @@ export async function GET(request: NextRequest) {
       longitude: Number(point.longitude),
       accuracy_meters: point.accuracy_meters != null ? Number(point.accuracy_meters) : null,
     };
-    const existing = rawBySession.get(point.session_id);
+    const key = reviewDate ? point.employee_id : point.session_id;
+    if (key == null) continue;
+    const existing = rawBySession.get(key);
     if (existing) existing.push(normalized);
-    else rawBySession.set(point.session_id, [normalized]);
+    else rawBySession.set(key, [normalized]);
   }
 
   const sessionsWithPath = rows.map(row => {
-    const raw = (row.session_id != null ? rawBySession.get(row.session_id) : undefined) ?? [];
+    const key = reviewDate ? row.employee_id : row.session_id;
+    const raw = (key != null ? rawBySession.get(key) : undefined) ?? [];
     return {
       ...row,
       path: cleanPath(raw),

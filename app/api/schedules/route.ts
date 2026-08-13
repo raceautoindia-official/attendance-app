@@ -11,8 +11,8 @@ import type { ApiResponse, Shift } from '@/lib/types';
 const ShiftSchema = z.object({
   name: z.string().min(1).max(100),
   type: z.enum(['fixed', 'flexible', 'rotating', 'custom']),
-  start_time: z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/, 'start_time must be HH:MM or HH:MM:SS').nullable().optional(),
-  end_time: z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/, 'end_time must be HH:MM or HH:MM:SS').nullable().optional(),
+  start_time: z.string().regex(/^([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/, 'start_time must be HH:MM or HH:MM:SS').nullable().optional(),
+  end_time: z.string().regex(/^([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/, 'end_time must be HH:MM or HH:MM:SS').nullable().optional(),
   required_hours: z.number().min(0.5).max(24).nullable().optional(),
   grace_minutes: z.number().int().min(0).max(60).default(10),
   working_days: z.array(z.string()).min(1, 'At least one working day required'),

@@ -7,11 +7,27 @@ import type { ApiResponse, Shift } from '@/lib/types';
 
 type Params = { params: Promise<{ id: string }> };
 
+// A cleared time box arrives as "", which is "no start time" — not a badly
+// formatted one. Without this, clearing a shift's start time answered
+// "start_time must be HH:MM", which describes the wrong problem.
+const blankToNull = (v: unknown) => (typeof v === 'string' && v.trim() === '' ? null : v);
+
 const UpdateShiftSchema = z.object({
   name: z.string().min(1).max(100).optional(),
-  start_time: z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/).nullable().optional(),
-  end_time: z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/).nullable().optional(),
-  required_hours: z.number().min(0.5).max(24).nullable().optional(),
+  // type was NOT here, so the Type dropdown in the edit form was silently
+  // discarded: a shift could not be changed from fixed to flexible, and the
+  // control looked like it had worked. It decides whether lateness is measured
+  // at all, so it is exactly the field an edit needs to reach.
+  type: z.enum(['fixed', 'flexible', 'rotating', 'custom']).optional(),
+  start_time: z.preprocess(
+    blankToNull,
+    z.string().regex(/^([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/, 'start_time must be HH:MM or HH:MM:SS').nullable().optional(),
+  ),
+  end_time: z.preprocess(
+    blankToNull,
+    z.string().regex(/^([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/, 'end_time must be HH:MM or HH:MM:SS').nullable().optional(),
+  ),
+  required_hours: z.preprocess(blankToNull, z.number().min(0.5).max(24).nullable().optional()),
   grace_minutes: z.number().int().min(0).max(60).optional(),
   working_days: z.array(z.string()).min(1).optional(),
   rotation_config: z.array(z.object({
@@ -70,12 +86,54 @@ export async function PUT(request: NextRequest, context: Params) {
     );
   }
 
+  // Validate the shift the edit would LEAVE BEHIND, not just the fields sent.
+  //
+  // A PUT here is a partial update, so "is this shift coherent?" cannot be
+  // answered from the patch alone: switching a flexible shift to fixed without
+  // sending times would have stored a fixed shift with no start time, and
+  // everything that measures lateness would then have nothing to measure
+  // against. Merging first also produces the useful message ("start_time is
+  // required for fixed shifts") instead of a format complaint about "".
+  const existingDays = typeof existing.working_days === 'string'
+    ? (() => { try { return JSON.parse(existing.working_days as unknown as string); } catch { return []; } })()
+    : existing.working_days;
+  const merged = {
+    type: parsed.data.type ?? existing.type,
+    start_time: parsed.data.start_time !== undefined ? parsed.data.start_time : existing.start_time,
+    end_time: parsed.data.end_time !== undefined ? parsed.data.end_time : existing.end_time,
+    required_hours: parsed.data.required_hours !== undefined
+      ? parsed.data.required_hours
+      : existing.required_hours,
+    rotation_config: parsed.data.rotation_config !== undefined
+      ? parsed.data.rotation_config
+      : existing.rotation_config,
+    working_days: parsed.data.working_days ?? existingDays,
+  };
+
+  const complaint =
+    merged.type === 'fixed' && !merged.start_time
+      ? 'start_time is required for fixed shifts'
+      : merged.type === 'fixed' && !merged.end_time
+        ? 'end_time is required for fixed shifts'
+        : merged.type === 'flexible' && !merged.required_hours
+          ? 'required_hours is required for flexible shifts'
+          : merged.type === 'rotating'
+            && (!merged.rotation_config || (merged.rotation_config as unknown[]).length === 0)
+            ? 'rotation_config is required for rotating shifts'
+            : !merged.working_days || (merged.working_days as unknown[]).length === 0
+              ? 'At least one working day required'
+              : null;
+  if (complaint) {
+    return NextResponse.json<ApiResponse>({ success: false, error: complaint }, { status: 400 });
+  }
+
   const setClauses: string[] = [];
   const params: unknown[] = [];
 
   const apply = (col: string, val: unknown) => { setClauses.push(`${col} = ?`); params.push(val); };
 
   if (parsed.data.name !== undefined) apply('name', parsed.data.name);
+  if (parsed.data.type !== undefined) apply('type', parsed.data.type);
   if (parsed.data.start_time !== undefined) apply('start_time', parsed.data.start_time);
   if (parsed.data.end_time !== undefined) apply('end_time', parsed.data.end_time);
   if (parsed.data.required_hours !== undefined) apply('required_hours', parsed.data.required_hours);

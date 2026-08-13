@@ -126,9 +126,19 @@ export default function LiveTrackingPanel() {
   const [liveRangePreset, setLiveRangePreset] = useState<LiveRangePreset>('2h');
   const [customFromLocal, setCustomFromLocal] = useState('');
   const [customToLocal, setCustomToLocal] = useState('');
+  // REVIEWING A FINISHED DAY. Empty = live.
+  //
+  // Live only ever lists people who are clocked in RIGHT NOW, so once everybody
+  // has gone home the page is empty and the day cannot be looked at. With a
+  // date it lists that day's people whether or not they clocked out, and draws
+  // the whole day's path.
+  const [reviewDate, setReviewDate] = useState('');
 
   const liveRange = useMemo(() => {
     const now = new Date();
+    // Reviewing a day, the server bounds the points to that work day. Sending a
+    // "last 2 hours" window as well would cut the morning off it.
+    if (reviewDate) return { fromUtc: null, toUtc: null };
     if (liveRangePreset === 'custom') {
       const fromDate = customFromLocal ? new Date(customFromLocal) : null;
       const toDate = customToLocal ? new Date(customToLocal) : null;
@@ -142,19 +152,23 @@ export default function LiveTrackingPanel() {
     };
     const from = new Date(now.getTime() - minutesMap[liveRangePreset] * 60_000);
     return { fromUtc: from.toISOString(), toUtc: now.toISOString() };
-  }, [liveRangePreset, customFromLocal, customToLocal]);
+  }, [liveRangePreset, customFromLocal, customToLocal, reviewDate]);
 
   const { data: liveData, isLoading: liveLoading } = useQuery({
-    queryKey: ['live-tracking', 'live-admin', liveRange.fromUtc, liveRange.toUtc],
+    queryKey: ['live-tracking', 'live-admin', liveRange.fromUtc, liveRange.toUtc, reviewDate],
     queryFn: async () => {
       const params = new URLSearchParams();
+      if (reviewDate) params.set('date', reviewDate);
       if (liveRange.fromUtc) params.set('from_utc', liveRange.fromUtc);
       if (liveRange.toUtc) params.set('to_utc', liveRange.toUtc);
       const query = params.toString();
       const res = await fetch(`/api/live-tracking/live${query ? `?${query}` : ''}`);
       return res.json() as Promise<ApiResponse<{ sessions: LiveTrackingLiveRow[] }>>;
     },
-    refetchInterval: 5_000,
+    // A finished day does not change, so stop polling it. Left at 5s, reviewing
+    // yesterday would re-run the whole day's path query twelve times a minute
+    // for as long as the tab stayed open.
+    refetchInterval: reviewDate ? false : 5_000,
   });
 
   const liveSessions = useMemo(
@@ -360,10 +374,28 @@ else if(ll.length===1){map.setView(ll[0],17);}
               <option key={opt.id} value={opt.id}>{opt.label}</option>
             ))}
           </select>
+          <label className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+            Review day
+            <input
+              type="date"
+              value={reviewDate}
+              onChange={e => setReviewDate(e.target.value)}
+              className="text-xs rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1"
+            />
+          </label>
+          {reviewDate && (
+            <button
+              onClick={() => setReviewDate('')}
+              className="text-xs rounded-md border border-slate-300 dark:border-slate-700 px-2 py-1 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+            >
+              Back to live
+            </button>
+          )}
           <select
             value={liveRangePreset}
             onChange={e => setLiveRangePreset(e.target.value as LiveRangePreset)}
-            className="text-xs rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1"
+            disabled={!!reviewDate}
+            className="text-xs rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 disabled:opacity-40"
           >
             <option value="30m">Last 30 min</option>
             <option value="2h">Last 2 hours</option>
