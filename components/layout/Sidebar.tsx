@@ -45,7 +45,9 @@ const NAV = [
   {
     label: 'Notifications',
     href: '/notifications',
-    // Shows the number of off-site clock-ins nobody has looked at yet.
+    // How many things are waiting on a decision: off-site clock-ins nobody has
+    // looked at, plus pending permission requests. Permissions has no badge of
+    // its own, so a request sat there unseen until somebody opened the page.
     badge: true,
     icon: (
       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
