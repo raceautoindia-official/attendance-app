@@ -39,6 +39,7 @@ import {
 import { notifyPermissionUpdates, PermissionUpdate } from '../notifications/permissionUpdates';
 import { startInboxPoller, stopInboxPoller } from '../notifications/inboxPoller';
 import DatePicker from './DatePicker';
+import TimePicker from './TimePicker';
 import { requestIgnoreBatteryOptimization, openAppSettings } from '../location/batteryOptimization';
 import ConsentModal from './ConsentModal';
 import { colors } from '../theme';
@@ -325,42 +326,28 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       ? permDate
       : d.toLocaleDateString('en-IN', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
   })();
-  const [permStart, setPermStart] = useState('');
-  const [permEnd, setPermEnd] = useState('');
-  // Times are entered in 12-hour form with an AM/PM toggle — the form used to
-  // demand HH:MM in 24-hour, and "remove the 24h apply time" was a literal user
-  // request: staff think "2:30 pm", not "14:30". The server still receives
-  // 24-hour values; only the typing changed.
+  // Times are PICKED on a clock face, not typed. They used to be a text field
+  // plus an AM/PM toggle, propped up by a rule that guessed PM for an hour of
+  // 1–7 — a guess that existed only because typing let people enter times they
+  // did not mean. A dial cannot produce "25:99", cannot be left half-finished,
+  // and is how a time is set on a phone everywhere else.
   //
-  // Defaults: From = AM, To = PM, matching an ordinary working day. Typing an
-  // hour of 1–7 flips that field to PM automatically (nobody asks for 3 AM
-  // permission), unless the person has tapped the toggle themselves — an
-  // explicit choice always wins over a guess.
-  const [permStartAmPm, setPermStartAmPm] = useState<'AM' | 'PM'>('AM');
-  const [permEndAmPm, setPermEndAmPm] = useState<'AM' | 'PM'>('PM');
-  const permAmPmTouched = useRef<{ start: boolean; end: boolean }>({ start: false, end: false });
+  // Held as 24-hour "HH:MM", which is what the server takes; the dial is the
+  // only thing that speaks AM/PM.
+  const [permStart24, setPermStart24] = useState<string | null>(null);
+  const [permEnd24, setPermEnd24] = useState<string | null>(null);
+  const [permTimeOpen, setPermTimeOpen] = useState<'start' | 'end' | null>(null);
 
-  const onPermTime = (field: 'start' | 'end', text: string) => {
-    (field === 'start' ? setPermStart : setPermEnd)(text);
-    if (permAmPmTouched.current[field]) return;
-    const h = Number(text.trim().match(/^(\d{1,2})/)?.[1]);
-    if (h >= 1 && h <= 7) (field === 'start' ? setPermStartAmPm : setPermEndAmPm)('PM');
-    else if (h >= 8 && h <= 11) (field === 'start' ? setPermStartAmPm : setPermEndAmPm)('AM');
+  /** "14:30" → "2:30 PM" for the button face. */
+  const timeLabel = (hhmm: string | null): string => {
+    if (!hhmm) return 'Tap to choose';
+    const m = /^(\d{2}):(\d{2})$/.exec(hhmm);
+    if (!m) return 'Tap to choose';
+    const h = Number(m[1]);
+    const suffix = h < 12 ? 'AM' : 'PM';
+    const h12 = h % 12 === 0 ? 12 : h % 12;
+    return `${h12}:${m[2]} ${suffix}`;
   };
-
-  /** "h:mm" + AM/PM → "HH:MM" 24-hour, or null when malformed. */
-  const to24 = (value: string, ampm: 'AM' | 'PM'): string | null => {
-    const m = value.trim().match(/^(\d{1,2}):(\d{2})$/);
-    if (!m) return null;
-    let h = Number(m[1]);
-    const min = Number(m[2]);
-    if (h < 1 || h > 12 || min > 59) return null;
-    if (ampm === 'PM' && h !== 12) h += 12;
-    if (ampm === 'AM' && h === 12) h = 0;
-    return `${String(h).padStart(2, '0')}:${m[2]}`;
-  };
-  const permStart24 = to24(permStart, permStartAmPm);
-  const permEnd24 = to24(permEnd, permEndAmPm);
   const [permReason, setPermReason] = useState('');
   const [permError, setPermError] = useState<string | null>(null);
   const [permBusy, setPermBusy] = useState(false);
@@ -847,7 +834,7 @@ If you are working away from the site today, ask your `
       return;
     }
     if (!permStart24 || !permEnd24) {
-      setPermError('Enter times like 2:30 and pick AM or PM');
+      setPermError('Choose a From and a To time');
       return;
     }
     const minutes = spanMinutes(permStart24, permEnd24);
@@ -886,8 +873,8 @@ If you are working away from the site today, ask your `
         },
       });
       setPermFormOpen(false);
-      setPermStart('');
-      setPermEnd('');
+      setPermStart24(null);
+      setPermEnd24(null);
       setPermReason('');
       toast('Permission sent for approval ✓');
       await loadPermissions();
@@ -1254,6 +1241,26 @@ If you are working away from the site today, ask your `
               <TouchableOpacity style={styles.permInput} onPress={() => setPermDateOpen(true)}>
                 <Text style={styles.permDateText}>{permDateLabel}</Text>
               </TouchableOpacity>
+              {/* Applying for a future day has always been allowed — the
+                  calendar has no upper bound and the server takes up to 90 days
+                  ahead — but it was hidden behind opening the calendar and
+                  knowing to look. Tomorrow is the one people actually want, so
+                  it is one tap. */}
+              <View style={styles.permQuickRow}>
+                {([['Today', 0], ['Tomorrow', 1]] as const).map(([label, offset]) => {
+                  const ymd = istCalendarYmd(new Date(Date.now() + offset * 86_400_000));
+                  const on = permDate === ymd;
+                  return (
+                    <TouchableOpacity
+                      key={label}
+                      style={[styles.permQuickBtn, on && styles.permQuickBtnOn]}
+                      onPress={() => setPermDate(ymd)}
+                    >
+                      <Text style={[styles.permQuickText, on && styles.permQuickTextOn]}>{label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
               <DatePicker
                 visible={permDateOpen}
                 value={permDate}
@@ -1261,56 +1268,38 @@ If you are working away from the site today, ask your `
                 onPick={setPermDate}
                 onClose={() => setPermDateOpen(false)}
               />
+              {/* Tap to open the clock. Nothing here is typed, so there is no
+                  half-entered time to validate and no AM/PM to forget. */}
               <View style={styles.permTimeRow}>
                 <View style={styles.permTimeCol}>
                   <Text style={styles.permFieldLabel}>From</Text>
-                  <View style={styles.permTimeInputRow}>
-                    <TextInput
-                      style={[styles.permInput, styles.permTimeInput]}
-                      value={permStart}
-                      onChangeText={t => onPermTime('start', t)}
-                      placeholder="10:00"
-                      placeholderTextColor={colors.textFaint}
-                      keyboardType="numbers-and-punctuation"
-                    />
-                    <View style={styles.permAmPmGroup}>
-                      {(['AM', 'PM'] as const).map(ap => (
-                        <TouchableOpacity
-                          key={ap}
-                          style={[styles.permAmPmBtn, permStartAmPm === ap && styles.permAmPmBtnOn]}
-                          onPress={() => { permAmPmTouched.current.start = true; setPermStartAmPm(ap); }}
-                        >
-                          <Text style={[styles.permAmPmText, permStartAmPm === ap && styles.permAmPmTextOn]}>{ap}</Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  </View>
+                  <TouchableOpacity style={styles.permInput} onPress={() => setPermTimeOpen('start')}>
+                    <Text style={permStart24 ? styles.permDateText : styles.permTimePlaceholder}>
+                      {timeLabel(permStart24)}
+                    </Text>
+                  </TouchableOpacity>
                 </View>
                 <View style={styles.permTimeCol}>
                   <Text style={styles.permFieldLabel}>To</Text>
-                  <View style={styles.permTimeInputRow}>
-                    <TextInput
-                      style={[styles.permInput, styles.permTimeInput]}
-                      value={permEnd}
-                      onChangeText={t => onPermTime('end', t)}
-                      placeholder="12:00"
-                      placeholderTextColor={colors.textFaint}
-                      keyboardType="numbers-and-punctuation"
-                    />
-                    <View style={styles.permAmPmGroup}>
-                      {(['AM', 'PM'] as const).map(ap => (
-                        <TouchableOpacity
-                          key={ap}
-                          style={[styles.permAmPmBtn, permEndAmPm === ap && styles.permAmPmBtnOn]}
-                          onPress={() => { permAmPmTouched.current.end = true; setPermEndAmPm(ap); }}
-                        >
-                          <Text style={[styles.permAmPmText, permEndAmPm === ap && styles.permAmPmTextOn]}>{ap}</Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  </View>
+                  <TouchableOpacity style={styles.permInput} onPress={() => setPermTimeOpen('end')}>
+                    <Text style={permEnd24 ? styles.permDateText : styles.permTimePlaceholder}>
+                      {timeLabel(permEnd24)}
+                    </Text>
+                  </TouchableOpacity>
                 </View>
               </View>
+              <TimePicker
+                visible={permTimeOpen !== null}
+                title={permTimeOpen === 'end' ? 'To' : 'From'}
+                // Opening "To" with the start time already showing saves the
+                // usual case: an hour or two later on the same dial.
+                value={(permTimeOpen === 'end' ? permEnd24 ?? permStart24 : permStart24) ?? ''}
+                onPick={hhmm => {
+                  if (permTimeOpen === 'end') setPermEnd24(hhmm);
+                  else setPermStart24(hhmm);
+                }}
+                onClose={() => setPermTimeOpen(null)}
+              />
               {permStart24 != null && permEnd24 != null && spanMinutes(permStart24, permEnd24) !== null && (
                 <Text style={styles.permDuration}>
                   Duration: {minutesToHours(spanMinutes(permStart24, permEnd24))}
@@ -1607,16 +1596,15 @@ const styles = StyleSheet.create({
   sessionList: { marginTop: 12, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 10, gap: 4 },
   sessionRow: { color: colors.textMuted, fontSize: 13 },
   permDateText: { color: colors.text, fontSize: 14, paddingVertical: 2 },
-  permTimeInputRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  permTimeInput: { flex: 1 },
-  permAmPmGroup: {
-    flexDirection: 'column', borderRadius: 8, overflow: 'hidden',
-    borderWidth: 1, borderColor: colors.borderInput,
+  permTimePlaceholder: { color: colors.textFaint, fontSize: 14, paddingVertical: 2 },
+  permQuickRow: { flexDirection: 'row', gap: 8, marginTop: 8, marginBottom: 4 },
+  permQuickBtn: {
+    paddingVertical: 5, paddingHorizontal: 12, borderRadius: 999,
+    borderWidth: 1, borderColor: colors.borderInput, backgroundColor: colors.bg,
   },
-  permAmPmBtn: { paddingHorizontal: 8, paddingVertical: 4, backgroundColor: colors.bg },
-  permAmPmBtnOn: { backgroundColor: colors.brand },
-  permAmPmText: { color: colors.textMuted, fontSize: 11, fontWeight: '700' },
-  permAmPmTextOn: { color: '#ffffff' },
+  permQuickBtnOn: { backgroundColor: colors.brand, borderColor: colors.brand },
+  permQuickText: { color: colors.textMuted, fontSize: 12, fontWeight: '600' },
+  permQuickTextOn: { color: '#ffffff' },
   permDuration: { color: colors.textLabel, fontSize: 13, marginBottom: 12 },
   permRow: {
     flexDirection: 'row',
