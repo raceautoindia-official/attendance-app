@@ -322,49 +322,65 @@ interface OutOfFenceClockInData {
   /** How far outside the fence they were, in metres. */
   distanceM: number | null;
   radiusM: number;
-  reason: string;
+  /** The fix's own reported accuracy, when the phone sent one. A refusal at
+   *  60 m on a fix accurate to ±80 m is a different conversation from one at
+   *  4 km, and the admin should not have to guess which they are having. */
+  accuracyM: number | null;
+  /** True when the fence had already ended this day once — they are trying to
+   *  get back on the clock from where it clocked them out. */
+  afterFenceClosure: boolean;
   latitude: number;
   longitude: number;
-  clockedInAt: Date;
+  attemptedAt: Date;
 }
 
 /**
- * An employee clocked in away from their work site and said why.
+ * An employee tried to clock in away from their work site and was REFUSED.
  *
- * This is the one alert an admin has to actually read: the fence was not
- * enforced, on that person's own say-so, and the only thing standing behind it
- * is the sentence they typed. The map link is included because "outside the
- * fence" means nothing without knowing whether they were 40 metres away or in
- * another town.
+ * This used to announce the opposite — that the fence had been waived because
+ * the employee typed a reason. There is no waiver any more, so the alert now
+ * reports the attempt: somebody is not at work, believes they should be on the
+ * clock, and cannot be. The admin hears it the same morning rather than finding
+ * an unexplained missing day later.
+ *
+ * The map link is included because "outside the fence" means nothing without
+ * knowing whether they were 40 metres away or in another town — and the fix
+ * accuracy is there because the first one is sometimes just a bad GPS reading.
  */
 export async function sendOutOfFenceClockInAlert(
   adminEmail: string,
   payload: OutOfFenceClockInData,
 ): Promise<void> {
-  const at = format(payload.clockedInAt, 'dd MMM yyyy, hh:mm a');
+  const at = format(payload.attemptedAt, 'dd MMM yyyy, hh:mm a');
   const away = payload.distanceM != null ? `${payload.distanceM} m away` : 'outside the fence';
   await send(
     adminEmail,
-    `Off-site clock-in: ${payload.employeeName} (${payload.empId})`,
+    `Clock-in refused (off-site): ${payload.employeeName} (${payload.empId})`,
     `
       <p>Hi,</p>
-      <p><strong>${payload.employeeName} (${payload.empId})</strong> clocked in
+      <p><strong>${payload.employeeName} (${payload.empId})</strong> tried to clock in
       <strong>${away}</strong> from
       ${payload.locationName ? `<strong>${payload.locationName}</strong>` : 'their work location'}
-      (fence is ${payload.radiusM} m), giving this reason:</p>
-      <blockquote style="margin:8px 0;padding:8px 12px;border-left:3px solid #2563eb;background:#f8fafc">
-        ${payload.reason}
-      </blockquote>
+      (fence is ${payload.radiusM} m). <strong>They were refused</strong> — they are not
+      on the clock.</p>
+      ${payload.afterFenceClosure
+        ? '<p>This was after the fence had already ended their day for leaving the site.</p>'
+        : ''}
       <ul>
-        <li><strong>Clocked in:</strong> ${at}</li>
+        <li><strong>Tried at:</strong> ${at}</li>
         <li><strong>Where:</strong>
           <a href="https://www.google.com/maps?q=${payload.latitude},${payload.longitude}">
             ${payload.latitude.toFixed(6)}, ${payload.longitude.toFixed(6)}
-          </a>
-        </li>
+          </a></li>
+        ${payload.accuracyM != null
+          ? `<li><strong>Fix accuracy:</strong> ±${Math.round(payload.accuracyM)} m</li>`
+          : ''}
       </ul>
-      <p>Their attendance is marked <strong>outside</strong> for the day. If this was not
-      approved, review it in Checkin Records.</p>
+      <p>If they are genuinely working away today, approve an <strong>on-duty</strong>
+      request for them — that is the only thing that lets a clock-in through from
+      outside the site.</p>
+      <p style="color:#64748b;font-size:13px">Sent once per person per day, however many
+      times they try.</p>
     `,
   );
 }

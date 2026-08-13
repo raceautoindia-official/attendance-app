@@ -45,11 +45,11 @@ const ClockInSchema = z.object({
   // lib/locationTrust.ts. Absent on older builds, which are simply not checked.
   is_mocked: z.boolean().optional(),
   accuracy_m: z.number().nullable().optional(),
-  // Why this employee is clocking in from OUTSIDE their work site. Absent on
-  // the first attempt: the phone only asks for one after the server has
-  // refused with code 'outside_fence', so nobody is prompted for a reason they
-  // do not need. Long enough to be an explanation, not a keystroke.
-  out_of_fence_reason: z.string().trim().min(5).max(500).optional(),
+  // out_of_fence_reason used to live here: the phone asked why, after a refusal,
+  // and the sentence got the employee in. It is gone. Outside the fence is
+  // refused, and the only exception is an on-duty window a manager approved in
+  // advance. Zod strips unknown keys, so the APKs still sending one are simply
+  // ignored rather than rejected.
 });
 
 // ---------------------------------------------------------------------------
@@ -325,52 +325,118 @@ export async function POST(request: NextRequest) {
       ? await activeOnDuty(auth.id, workDate, formatInTimeZone(new Date(), TIMEZONE, 'HH:mm:ss'))
       : null;
 
-    // THE FENCE ALREADY ENDED THIS DAY ONCE.
+    // OUTSIDE THE FENCE IS REFUSED. There is no way through it.
     //
-    // Being away from the site with a reason is for a day that starts away —
-    // a delivery, a customer visit. It must not undo an away-from-site
-    // clock-out: leave the site, take the four warnings, get clocked out, then
-    // type five characters and be back on the clock from the same spot. The
-    // watchdog would close it again, they would re-open it again, and the
-    // fence would mean nothing at all.
+    // There used to be: the employee typed a sentence and was let in, with the
+    // day marked as an exception and an admin told. That was asked for, and
+    // then it was watched being used to walk straight back onto the clock from
+    // the spot the fence had just closed the day at. A fence an employee can
+    // open by writing in a box is a fence in name only, so the box is gone.
     //
-    // Checked BEFORE the reason prompt, so the phone never offers a box whose
-    // answer is going to be refused.
-    if (geofenceStatus === 'outside' && !onDuty && existing?.id) {
-      const closure = await lastFenceClosure(existing.id);
-      if (closure) {
-        const away = Math.round(haversineDistance(lat, lng, schedule.loc_lat, schedule.loc_lng));
-        return NextResponse.json<ApiResponse>(
-          {
-            success: false,
-            code: 'fence_closed_day',
-            error: `Your day was closed automatically when you left ${schedule.loc_name ?? 'your work location'}`
-              + `. You are ${Number.isFinite(away) ? `${away} m` : 'still'} away — return to within ${effectiveRadius} m`
-              + ' to clock in again, or ask your manager to approve on-duty work.',
-            location_name: schedule.loc_name ?? null,
-            radius_m: effectiveRadius,
-            distance_m: Number.isFinite(away) ? away : null,
-          },
-          { status: 403 },
-        );
-      }
-    }
-
-    // Outside the fence WITHOUT a reason is still refused — but the refusal now
-    // says so in a form the phone can act on. Previously an employee genuinely
-    // away on work (a delivery, a customer visit) could do nothing at all, and
-    // no record was kept that they had even tried.
+    // The one remaining exception is not the employee's to grant: an APPROVED
+    // on-duty window, agreed by a manager in advance (see `onDuty` above). The
+    // watchdog already honours it — an approved day away is not ended for being
+    // away — and clock-in now matches, because a rule enforced at one end and
+    // not the other is how this whole class of bug happens.
     //
     // `code` is what the app keys on. Matching on the message text would break
     // the moment the wording changed, and the wording carries a distance that
     // has to change.
-    if (geofenceStatus === 'outside' && !onDuty && !parsed.data.out_of_fence_reason) {
+    if (geofenceStatus === 'outside' && !onDuty) {
       const away = Math.round(haversineDistance(lat, lng, schedule.loc_lat, schedule.loc_lng));
+      // Was this day already ended BY the fence? It changes what they are told,
+      // and it is worth knowing on the audit entry. Looked up once.
+      const closure = existing?.id ? await lastFenceClosure(existing.id) : null;
+
+      // The refusal itself is recorded. Refusing silently would mean an
+      // employee could try from three kilometres away, all day, and leave no
+      // trace — and the admin's first sign of trouble would be a missing day
+      // with no explanation in it. It is written before the response so a
+      // failure here cannot be mistaken for a successful clock-in.
+      //
+      // `accuracy_m` is kept deliberately: when somebody insists they were
+      // standing at the gate, it is the difference between a bad fix and a
+      // bad excuse.
+      try {
+        await insertAuditLog({
+          action: 'clock_in_refused_outside_fence',
+          entity: 'employee',
+          entity_id: auth.id,
+          performed_by: auth.id,
+          details: {
+            employee_id: auth.id,
+            work_date: workDate,
+            location: schedule.loc_name ?? null,
+            radius_m: effectiveRadius,
+            distance_m: Number.isFinite(away) ? away : null,
+            accuracy_m: parsed.data.accuracy_m ?? null,
+            latitude: lat,
+            longitude: lng,
+            // Which refusal this was: the fence had already ended their day
+            // once, or they simply were not at the site.
+            after_fence_closure: !!closure,
+          },
+          ip_address: ip,
+        });
+
+        // Tell an admin — ONCE per person per day, however many times they try.
+        // Somebody standing outside believing they are at work is worth hearing
+        // about the same morning rather than discovering as an unexplained
+        // missing day at month end. The count is taken AFTER the insert above,
+        // so the first refusal sees exactly 1 and later ones see more; a phone
+        // retrying a slow request cannot mail the admin twice.
+        const refusalsToday = await queryOne<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM audit_log
+            WHERE action = 'clock_in_refused_outside_fence'
+              AND entity = 'employee' AND entity_id = ?
+              AND JSON_UNQUOTE(JSON_EXTRACT(details, '$.work_date')) = ?`,
+          [auth.id, workDate],
+        );
+        if (Number(refusalsToday?.n ?? 0) <= 1) {
+          const admins = await query<{ email: string | null }>(
+            `SELECT DISTINCT email FROM employees
+              WHERE is_active = TRUE AND role IN ('super_admin', 'manager') AND email IS NOT NULL`,
+          );
+          const me = await queryOne<{ name: string; emp_id: string }>(
+            'SELECT name, emp_id FROM employees WHERE id = ?', [auth.id]);
+          // Fire-and-forget: the refusal must not wait on a mail server. The
+          // audit entry above is the delivery that matters; send() swallows its
+          // own failures.
+          void Promise.all(
+            admins
+              .map(a => a.email)
+              .filter((e): e is string => !!e)
+              .map(email =>
+                sendOutOfFenceClockInAlert(email, {
+                  employeeName: me?.name ?? `Employee ${auth.id}`,
+                  empId: me?.emp_id ?? String(auth.id),
+                  locationName: schedule.loc_name ?? null,
+                  distanceM: Number.isFinite(away) ? away : null,
+                  radiusM: effectiveRadius,
+                  accuracyM: parsed.data.accuracy_m ?? null,
+                  afterFenceClosure: !!closure,
+                  latitude: lat,
+                  longitude: lng,
+                  attemptedAt: new Date(),
+                })),
+          );
+        }
+      } catch { /* an audit failure must not turn a refusal into something else */ }
+
+      // A day the fence itself closed gets the reason it was closed, not a bare
+      // "you are outside" — the employee is standing where the app clocked them
+      // out and deserves to be told that is why.
       return NextResponse.json<ApiResponse>(
         {
           success: false,
-          code: 'outside_fence',
-          error: `You are outside ${schedule.loc_name ?? 'your work location'} — move within ${effectiveRadius} m to clock in`,
+          code: closure ? 'fence_closed_day' : 'outside_fence',
+          error: closure
+            ? `Your day was closed automatically when you left ${schedule.loc_name ?? 'your work location'}`
+              + `. You are ${Number.isFinite(away) ? `${away} m` : 'still'} away — return to within ${effectiveRadius} m`
+              + ' to clock in again.'
+            : `You are outside ${schedule.loc_name ?? 'your work location'}`
+              + `${Number.isFinite(away) ? ` by ${away} m` : ''}`
+              + ` — move within ${effectiveRadius} m to clock in.`,
           location_name: schedule.loc_name ?? null,
           radius_m: effectiveRadius,
           distance_m: Number.isFinite(away) ? away : null,
@@ -380,11 +446,13 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // A reason only means anything when they really are outside a real fence.
-  // Sending one from inside the site, or with no fence at all, must not record
-  // an exception that never happened.
-  const outOfFenceReason =
-    geofenceStatus === 'outside' ? (parsed.data.out_of_fence_reason ?? null) : null;
+  // Always null now: a clock-in cannot be excused from outside the fence any
+  // more, so no new row ever carries a reason. It is still WRITTEN, on every
+  // clock-in, precisely because it is always null — an attendance row is reused
+  // all day, and an old reason left over from a session recorded under the
+  // previous rule must be cleared rather than inherited by today's work.
+  // Historical rows keep theirs; the column and its review screens stay.
+  const outOfFenceReason: string | null = null;
 
   // 5. Determine attendance status
   const nowUtc = new Date();
@@ -524,72 +592,12 @@ export async function POST(request: NextRequest) {
     ip_address: ip,
   });
 
-  // 7.2 Tell an admin when the fence was waived.
-  //
-  // The fence was not enforced, on the employee's own say-so, and the only thing
-  // standing behind it is the sentence they typed — so this is the one event an
-  // admin has to actually see. It is written to the audit log FIRST and emailed
-  // second: email has been misconfigured for weeks on this deployment, and a
-  // notification that exists only in a failed SMTP call is no notification.
-  //
-  // Nothing here may break the clock-in. The employee has already been recorded
-  // as present; failing their attendance because an alert could not be sent
-  // would punish them for an admin's mail settings.
-  if (outOfFenceReason) {
-    const awayM = schedule?.loc_lat != null && schedule?.loc_lng != null
-      ? Math.round(haversineDistance(lat, lng, schedule.loc_lat, schedule.loc_lng))
-      : null;
-    try {
-      await insertAuditLog({
-        action: 'clock_in_outside_fence',
-        entity: 'attendance',
-        entity_id: insertId,
-        performed_by: auth.id,
-        details: {
-          employee_id: auth.id,
-          work_date: workDate,
-          reason: outOfFenceReason,
-          location: schedule?.loc_name ?? null,
-          radius_m: schedule?.loc_radius != null ? Number(schedule.loc_radius) : null,
-          distance_m: awayM,
-          latitude: lat,
-          longitude: lng,
-        },
-        ip_address: ip,
-      });
-
-      const admins = await query<{ email: string | null }>(
-        `SELECT DISTINCT email FROM employees
-          WHERE is_active = TRUE AND role IN ('super_admin', 'manager') AND email IS NOT NULL`,
-      );
-      const me = await queryOne<{ name: string; emp_id: string }>(
-        'SELECT name, emp_id FROM employees WHERE id = ?', [auth.id]);
-      // Fire-and-forget, deliberately. The employee's clock-in must never wait
-      // on a mail server — with the current dead SMTP host this fails fast,
-      // but a real (or slow) SMTP would add its seconds to every off-site
-      // clock-in. The audit entry above is the delivery that matters; send()
-      // already swallows its own failures.
-      void Promise.all(
-        admins
-          .map(a => a.email)
-          .filter((e): e is string => !!e)
-          .map(email =>
-            sendOutOfFenceClockInAlert(email, {
-              employeeName: me?.name ?? `Employee ${auth.id}`,
-              empId: me?.emp_id ?? String(auth.id),
-              locationName: schedule?.loc_name ?? null,
-              distanceM: awayM,
-              radiusM: Math.max(Number(schedule?.loc_radius ?? 100), MIN_FENCE_RADIUS_M),
-              reason: outOfFenceReason,
-              latitude: lat,
-              longitude: lng,
-              clockedInAt: nowUtc,
-            })),
-      );
-    } catch (err) {
-      console.error('[clock-in] off-site alert failed (attendance was still recorded)', err);
-    }
-  }
+  // The alert that used to sit here told an admin the fence had been WAIVED —
+  // that somebody clocked in off-site on their own say-so. There is no waiver
+  // any more, so there is nothing to announce at this point: a clock-in that
+  // reaches here was either inside the fence, unfenced, or approved on-duty in
+  // advance. The alert now fires on the REFUSAL instead, at the point of
+  // refusal, where the thing worth telling an admin actually happens.
 
   // 7.5 Auto-start live tracking right after successful clock-in.
   // If live-tracking tables are missing in a local/legacy DB, we do not fail clock-in.

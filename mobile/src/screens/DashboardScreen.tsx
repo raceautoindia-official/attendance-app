@@ -288,16 +288,6 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   // Google Play prominent-disclosure consent. null = not yet loaded.
   const [hasConsent, setHasConsent] = useState<boolean | null>(null);
   const [consentVisible, setConsentVisible] = useState(false);
-  // Set when the server refuses a clock-in with code 'outside_fence'. Holding
-  // the server's own numbers — the site, its radius, how far out — means the
-  // prompt tells the employee exactly what it is asking them to explain.
-  const [fenceRefusal, setFenceRefusal] = useState<{
-    message: string;
-    locationName: string | null;
-    distanceM: number | null;
-    radiusM: number | null;
-  } | null>(null);
-  const [reasonText, setReasonText] = useState('');
   // Which action the consent modal should continue with after acceptance.
   const consentActionRef = useRef<'in' | 'out'>('in');
   // True once /today has actually answered — effects that stop/start the
@@ -709,14 +699,14 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     else await performClockOut();
   };
 
-  const performClockIn = async (outOfFenceReason?: string) => {
+  const performClockIn = async () => {
     setBusy(true);
     setError(null);
     try {
       const coords = await getCoords();
       await apiFetch('/api/attendance/clock-in', {
         method: 'POST',
-        body: outOfFenceReason ? { ...coords, out_of_fence_reason: outOfFenceReason } : coords,
+        body: coords,
       });
       // Only start location tracking if the admin enabled it for this employee.
       if (trackingEnabled) {
@@ -734,35 +724,30 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         }
       }
       refresh();
-      toast(outOfFenceReason ? 'Clocked in — your manager has been notified' : 'Clocked in successfully ✓');
+      toast('Clocked in successfully ✓');
     } catch (e) {
-      // Away from the work site. Being refused outright is right for someone
-      // trying it on and wrong for the ordinary case — a delivery, a customer
-      // visit — where the employee could previously do nothing at all. Ask why,
-      // and send it: the day is still recorded as outside the fence and an
-      // admin is told, so this is an exception on the record, not a way round it.
+      // Away from the work site — refused, with no way through it from here.
+      // A reason box used to open at this point and let them in; it is gone,
+      // because it was being used to step straight back onto the clock from
+      // the spot the fence had just closed the day at.
       //
-      // Only offered once per attempt: `outOfFenceReason` is already set on the
-      // retry, so a second refusal is shown as an error instead of looping.
-      // The fence already ended this day once, and they are still away from the
-      // site. No reason box: the answer would be refused, and offering it reads
-      // as "type something and you are back on the clock". Shown as an alert
-      // rather than a toast because it asks them to do something — walk back —
-      // and a toast is gone before they have read it.
-      if (e instanceof ApiError && e.code === 'fence_closed_day') {
+      // Shown as an alert rather than a toast because it asks them to DO
+      // something — walk back to the site — and a toast is gone before they
+      // have finished reading it. The server's message carries the site, the
+      // radius and how far out they are, so it says how far there is to walk.
+      if (e instanceof ApiError
+          && (e.code === 'outside_fence' || e.code === 'fence_closed_day')) {
         setBusy(false);
-        Alert.alert('Come back to the site to clock in', e.message, [{ text: 'OK' }]);
-        return;
-      }
-      if (!outOfFenceReason && e instanceof ApiError && e.code === 'outside_fence') {
-        setBusy(false);
-        setFenceRefusal({
-          message: e.message,
-          locationName: (e.info?.location_name as string | null) ?? null,
-          distanceM: (e.info?.distance_m as number | null) ?? null,
-          radiusM: (e.info?.radius_m as number | undefined) ?? null,
-        });
-        setReasonText('');
+        Alert.alert(
+          e.code === 'fence_closed_day'
+            ? 'Come back to the site to clock in'
+            : 'You are not at your work site',
+          `${e.message}
+
+If you are working away from the site today, ask your `
+            + 'manager to approve on-duty work for you.',
+          [{ text: 'OK' }],
+        );
         return;
       }
       const msg = e instanceof Error ? e.message : 'Clock-in failed.';
@@ -771,16 +756,6 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     } finally {
       setBusy(false);
     }
-  };
-
-  const submitOutOfFenceReason = async () => {
-    const reason = reasonText.trim();
-    if (reason.length < 5) {
-      setError('Please say why you are clocking in from here — at least a few words.');
-      return;
-    }
-    setFenceRefusal(null);
-    await performClockIn(reason);
   };
 
   // Consent must precede ALL location access — clock-out also reads GPS, so a
@@ -1064,51 +1039,6 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         }}
       />
 
-      {/* Clocking in away from the work site. The refusal already told us the
-          site, its radius and how far out they are, so the prompt can say what
-          it is asking about rather than "you are outside". */}
-      <Modal visible={!!fenceRefusal} transparent animationType="fade" onRequestClose={() => setFenceRefusal(null)}>
-        <View style={styles.reasonBackdrop}>
-          <View style={styles.reasonCard}>
-            <Text style={styles.reasonTitle}>You are away from your work site</Text>
-            <Text style={styles.reasonBody}>
-              {fenceRefusal?.distanceM != null && fenceRefusal?.radiusM != null
-                ? `You are about ${fenceRefusal.distanceM} m from ${fenceRefusal.locationName ?? 'your work location'}, which has a ${fenceRefusal.radiusM} m boundary.`
-                : fenceRefusal?.message}
-            </Text>
-            <Text style={styles.reasonBody}>
-              You can still clock in — tell us why. Your manager is notified and the
-              day is recorded as off-site.
-            </Text>
-            <TextInput
-              style={styles.reasonInput}
-              placeholder="e.g. Customer visit at Ambattur"
-              placeholderTextColor={colors.textFaint}
-              value={reasonText}
-              onChangeText={setReasonText}
-              multiline
-              numberOfLines={3}
-              maxLength={500}
-              autoFocus
-            />
-            <View style={styles.reasonActions}>
-              <TouchableOpacity
-                style={styles.reasonCancel}
-                onPress={() => { setFenceRefusal(null); setReasonText(''); }}
-              >
-                <Text style={styles.reasonCancelText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.reasonSubmit, reasonText.trim().length < 5 && styles.reasonSubmitOff]}
-                disabled={reasonText.trim().length < 5}
-                onPress={() => { void submitOutOfFenceReason(); }}
-              >
-                <Text style={styles.reasonSubmitText}>Clock in anyway</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
       <View style={styles.header}>
         <View style={styles.brandRow}>
           <View style={styles.logo}>
@@ -1136,8 +1066,10 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         <Text style={styles.clock}>{timeStr}</Text>
 
         {/* How far from the work site, refreshed with the 20s position poll.
-            When the fence is armed, being outside means clock-in needs a
-            reason — say so BEFORE the button refuses, not after. */}
+            When the fence is armed, being outside means clock-in will be
+            REFUSED — say so before they tap, not after, and say how far there
+            is to walk. It used to promise a reason box; there is no longer one
+            to promise. */}
         {fenceLocation && liveCoords && (() => {
           const toRad = (d: number) => (d * Math.PI) / 180;
           const dLat = toRad(fenceLocation.latitude - liveCoords.lat);
@@ -1152,7 +1084,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
               <Text style={[styles.fenceBannerText, inside ? styles.fenceBannerTextIn : styles.fenceBannerTextOut]}>
                 {inside
                   ? `✓ At your work site — ${distText} from centre (limit ${fenceLocation.radius_meters} m)`
-                  : `⚠ Away from your work site — ${distText} away. Clocking in from here needs a reason.`}
+                  : `⚠ Away from your work site — ${distText} away. You cannot clock in from here.`}
               </Text>
             </View>
           );
@@ -1531,30 +1463,6 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
 }
 
 const styles = StyleSheet.create({
-  // Away-from-site reason prompt.
-  reasonBackdrop: {
-    flex: 1, backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'center', paddingHorizontal: 20,
-  },
-  reasonCard: {
-    backgroundColor: colors.card, borderRadius: 14, padding: 20,
-    borderWidth: 1, borderColor: colors.border,
-  },
-  reasonTitle: { color: colors.text, fontSize: 17, fontWeight: '700', marginBottom: 10 },
-  reasonBody: { color: colors.textMuted, fontSize: 13, lineHeight: 19, marginBottom: 10 },
-  reasonInput: {
-    backgroundColor: colors.bg, borderWidth: 1, borderColor: colors.borderInput,
-    borderRadius: 10, color: colors.text, paddingHorizontal: 12, paddingVertical: 10,
-    fontSize: 14, minHeight: 76, textAlignVertical: 'top', marginTop: 4, marginBottom: 16,
-  },
-  reasonActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10 },
-  reasonCancel: { paddingVertical: 10, paddingHorizontal: 16, borderRadius: 10 },
-  reasonCancelText: { color: colors.textMuted, fontSize: 14, fontWeight: '600' },
-  reasonSubmit: {
-    backgroundColor: colors.brand, paddingVertical: 10, paddingHorizontal: 16, borderRadius: 10,
-  },
-  reasonSubmitOff: { opacity: 0.45 },
-  reasonSubmitText: { color: '#ffffff', fontSize: 14, fontWeight: '700' },
   container: { flex: 1, backgroundColor: colors.bg },
   center: { flex: 1, backgroundColor: colors.bg, justifyContent: 'center', alignItems: 'center' },
   header: {
