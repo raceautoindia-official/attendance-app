@@ -14,6 +14,37 @@ import Card from '@/components/ui/Card';
 import { formatDateOnly } from '@/lib/date';
 import type { Employee, ApiResponse, AttendanceRecord } from '@/lib/types';
 
+/** One employee, one day — the day-wise report's row. */
+interface DailyRow {
+  employee_id: number;
+  employee_name: string;
+  emp_id: string;
+  date: string;
+  /** Mon, Tue, … */
+  day: string;
+  check_in_utc: string | null;
+  check_out_utc: string | null;
+  break_minutes: number | null;
+  worked_minutes: number | null;
+  /** null when the day has no start time to be late against. */
+  late_minutes: number | null;
+  overtime_minutes: number;
+  permission_minutes: number;
+  leave_type: string | null;
+  /** Includes 'weekly_off', which is not an attendance status. */
+  day_status: string;
+  work_update: string | null;
+}
+
+function toIST(d: string | null): string {
+  if (!d) return '—';
+  const parsed = new Date(d);
+  if (Number.isNaN(parsed.getTime())) return '—';
+  return parsed.toLocaleTimeString('en-IN', {
+    timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true,
+  });
+}
+
 interface SummaryRow {
   id: number;
   emp_id: string;
@@ -113,6 +144,22 @@ export default function ReportsPage() {
   const [page, setPage] = useState(1);
   const [exporting, setExporting] = useState<'csv' | 'pdf' | null>(null);
   const [drillDown, setDrillDown] = useState<DrillDown | null>(null);
+  const [reportView, setReportView] = useState<'summary' | 'daily'>('summary');
+
+  // DAY BY DAY, per employee. The summary answers "how was the month"; this
+  // answers "what happened on the 14th", which is the question asked when a
+  // figure in the summary looks wrong.
+  const { data: dailyData, isLoading: dailyLoading } = useQuery({
+    queryKey: ['reports', 'daily', { fromDate, toDate, employeeId }],
+    queryFn: async () => {
+      const params = new URLSearchParams({ from_date: fromDate, to_date: toDate });
+      if (employeeId) params.set('employee_id', employeeId);
+      const res = await fetch(`/api/reports/daily?${params}`);
+      return res.json() as Promise<ApiResponse<{ rows: DailyRow[]; truncated: boolean }>>;
+    },
+    enabled: reportView === 'daily',
+  });
+  const dailyRows = dailyData?.data?.rows ?? [];
 
   const { data: empData } = useQuery({
     queryKey: ['employees', 'all'],
@@ -236,6 +283,22 @@ export default function ReportsPage() {
 
   return (
     <div className="space-y-4">
+      <div className="flex gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 p-1 w-fit">
+        {([['summary', 'Summary'], ['daily', 'Day-wise']] as const).map(([k, label]) => (
+          <button
+            key={k}
+            onClick={() => setReportView(k)}
+            className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
+              reportView === k
+                ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-sm'
+                : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       {/* Filters */}
       <Card>
         <div className="flex flex-wrap gap-4 items-end">
@@ -290,7 +353,143 @@ export default function ReportsPage() {
       </Card>
 
       {/* Summary table */}
-      {isLoading ? (
+      {reportView === 'daily' && (
+        dailyLoading ? (
+          <div className="flex justify-center py-12"><Spinner /></div>
+        ) : (
+          <>
+            {dailyData?.data?.truncated && (
+              <p className="text-xs text-amber-600 dark:text-amber-400">
+                Too many rows to show at once — narrow the dates or pick one employee.
+              </p>
+            )}
+            <Table
+              columns={[
+                {
+                  key: 'employee_name',
+                  header: 'Employee',
+                  render: r => (
+                    <div>
+                      <p className="font-medium text-slate-800 dark:text-slate-200">{(r as DailyRow).employee_name}</p>
+                      <p className="text-xs text-slate-400">{(r as DailyRow).emp_id}</p>
+                    </div>
+                  ),
+                },
+                { key: 'date', header: 'Date', render: r => formatDateOnly((r as DailyRow).date) },
+                {
+                  key: 'day',
+                  header: 'Day',
+                  render: r => <span className="text-slate-500 dark:text-slate-400">{(r as DailyRow).day}</span>,
+                },
+                {
+                  key: 'check_in_utc',
+                  header: 'Check-in',
+                  render: r => <span className="tabular-nums">{toIST((r as DailyRow).check_in_utc)}</span>,
+                },
+                {
+                  key: 'check_out_utc',
+                  header: 'Check-out',
+                  render: r => <span className="tabular-nums">{toIST((r as DailyRow).check_out_utc)}</span>,
+                },
+                {
+                  key: 'break_minutes',
+                  header: 'Break',
+                  render: r => {
+                    const m = (r as DailyRow).break_minutes;
+                    return m ? <span className="tabular-nums">{minutesToHours(m)}</span>
+                      : <span className="text-slate-400">—</span>;
+                  },
+                },
+                {
+                  key: 'worked_minutes',
+                  header: 'Total Hours',
+                  render: r => {
+                    const m = (r as DailyRow).worked_minutes;
+                    return m == null ? <span className="text-slate-400">—</span>
+                      : <span className="tabular-nums font-medium">{minutesToHours(m)}</span>;
+                  },
+                },
+                {
+                  key: 'late_minutes',
+                  header: 'Late',
+                  render: r => {
+                    const m = (r as DailyRow).late_minutes;
+                    // null and 0 differ: null is "no start time to be late
+                    // against", 0 is "they made it".
+                    if (m == null) return <span className="text-slate-400">—</span>;
+                    if (m === 0) return <span className="text-slate-400">On time</span>;
+                    return <span className="tabular-nums text-amber-600 dark:text-amber-400">{minutesToHours(m)}</span>;
+                  },
+                },
+                {
+                  key: 'overtime_minutes',
+                  header: 'Overtime',
+                  render: r => {
+                    const m = (r as DailyRow).overtime_minutes;
+                    return m > 0
+                      ? <span className="tabular-nums text-blue-600 dark:text-blue-400">+{minutesToHours(m)}</span>
+                      : <span className="text-slate-400">—</span>;
+                  },
+                },
+                {
+                  key: 'permission_minutes',
+                  header: 'Permission',
+                  render: r => {
+                    const m = (r as DailyRow).permission_minutes;
+                    return m > 0
+                      ? <span className="tabular-nums text-blue-600 dark:text-blue-400">{minutesToHours(m)}</span>
+                      : <span className="text-slate-400">—</span>;
+                  },
+                },
+                {
+                  key: 'leave_type',
+                  header: 'Leave',
+                  render: r => {
+                    const t = (r as DailyRow).leave_type;
+                    return t ? <Badge variant={t === 'holiday' ? 'neutral' : 'info'}>{t}</Badge>
+                      : <span className="text-slate-400">—</span>;
+                  },
+                },
+                {
+                  key: 'day_status',
+                  header: 'Status',
+                  render: r => {
+                    const st = (r as DailyRow).day_status;
+                    if (st === 'weekly_off') return <Badge variant="neutral">weekly off</Badge>;
+                    const tone = st === 'present' ? 'success'
+                      : st === 'late' || st === 'early_departure' ? 'warning'
+                        : st === 'absent' ? 'danger' : 'info';
+                    return <Badge variant={tone}>{st.replace('_', ' ')}</Badge>;
+                  },
+                },
+                {
+                  key: 'work_update',
+                  header: 'Work Update',
+                  render: r => {
+                    const t = (r as DailyRow).work_update;
+                    // What they said they did that day. It existed only on the
+                    // Overview, for today, and fell out of view once the day
+                    // turned over.
+                    if (!t) return <span className="text-slate-400">—</span>;
+                    return (
+                      <span
+                        className="text-xs text-slate-700 dark:text-slate-300 block max-w-xs truncate"
+                        title={t}
+                      >
+                        {t}
+                      </span>
+                    );
+                  },
+                },
+              ]}
+              data={dailyRows as object[]}
+              emptyMessage="No days in the selected period."
+            />
+          </>
+        )
+      )}
+
+      {reportView === 'summary' && (isLoading ? (
         <div className="flex justify-center py-12"><Spinner /></div>
       ) : (
         <>
@@ -637,7 +836,7 @@ export default function ReportsPage() {
             <Pagination page={page} totalPages={pagination.totalPages} onPageChange={setPage} />
           )}
         </>
-      )}
+      ))}
 
       {/* Which days sit behind an Absent / Leave count */}
       <Modal
