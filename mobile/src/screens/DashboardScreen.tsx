@@ -1169,10 +1169,14 @@ If you are working away from the site today, ask your `
             // the day-wise report.
             return (
               <View style={styles.sessionList}>
+                {/* A title, because a bare pair of times is not self-
+                    explanatory — somebody looking at their own day could not
+                    tell what the rows were counting. */}
+                <Text style={styles.sessionHeading}>Clock In / Clock Out</Text>
                 {sessions.map((sess, i) => (
                   <Text key={`${sess.in_utc}-${i}`} style={styles.sessionRow}>
                     <Text style={styles.sessionTime}>{timeOnly(sess.in_utc)}</Text>
-                    {'  to  '}
+                    <Text style={styles.sessionJoin}>{'   to   '}</Text>
                     <Text style={styles.sessionTime}>
                       {sess.out_utc ? timeOnly(sess.out_utc) : 'still in'}
                     </Text>
@@ -1638,9 +1642,15 @@ const styles = StyleSheet.create({
   fenceBannerText: { fontSize: 13, lineHeight: 18 },
   fenceBannerTextIn: { color: '#86efac' },
   fenceBannerTextOut: { color: '#fca5a5' },
-  sessionList: { marginTop: 12, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 10, gap: 6 },
-  sessionRow: { color: colors.textMuted, fontSize: 13, flexShrink: 1 },
-  sessionTime: { color: colors.text, fontWeight: '600' },
+  sessionList: { marginTop: 12, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 10, gap: 7 },
+  sessionHeading: {
+    color: colors.textLabel, fontSize: 12, fontWeight: '700',
+    letterSpacing: 0.4, textTransform: 'uppercase', marginBottom: 3,
+  },
+  sessionRow: { fontSize: 15, flexShrink: 1 },
+  // The times carry the meaning, so they carry the weight.
+  sessionTime: { color: colors.text, fontSize: 15, fontWeight: '700' },
+  sessionJoin: { color: colors.textFaint, fontSize: 13, fontWeight: '500' },
   permDateText: { color: colors.text, fontSize: 14, paddingVertical: 2 },
   permTimePlaceholder: { color: colors.textFaint, fontSize: 14, paddingVertical: 2 },
   permQuickRow: { flexDirection: 'row', gap: 8, marginTop: 8, marginBottom: 4 },
