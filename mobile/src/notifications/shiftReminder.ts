@@ -1,5 +1,6 @@
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
+import { getState, setState } from '../storage/state';
 
 // Show shift reminders even while the app is open in the foreground.
 Notifications.setNotificationHandler({
@@ -13,6 +14,8 @@ Notifications.setNotificationHandler({
 });
 
 const CHANNEL_ID = 'shift-reminders';
+/** Identifiers this module scheduled, so cancelling touches only its own. */
+const IDS_KEY = 'shift_reminder_ids';
 // Always 9 working hours counted from the actual clock-in — the reminder is
 // personal to each employee's own start time, never a fixed wall-clock time.
 const SHIFT_HOURS = 9;
@@ -45,10 +48,11 @@ export async function scheduleShiftEndReminders(clockInUtc: string): Promise<voi
 
   const shiftEndMs = clockInMs + SHIFT_HOURS * 60 * 60 * 1000;
 
+  const ids: string[] = [];
   for (const offsetMin of REMINDER_OFFSETS_MIN) {
     const fireAt = new Date(shiftEndMs + offsetMin * 60 * 1000);
     if (fireAt.getTime() <= Date.now() + 5000) continue; // already past
-    await Notifications.scheduleNotificationAsync({
+    const id = await Notifications.scheduleNotificationAsync({
       content: {
         title: offsetMin === 0 ? 'Shift time is over' : 'Reminder: please clock out',
         body:
@@ -63,13 +67,27 @@ export async function scheduleShiftEndReminders(clockInUtc: string): Promise<voi
         channelId: CHANNEL_ID,
       },
     });
+    ids.push(id);
   }
+  await setState(IDS_KEY, JSON.stringify(ids));
 }
 
-/** Cancels all pending shift reminders (on clock-out and on logout). */
+/**
+ * Cancels this module's pending shift reminders (on clock-out and on logout).
+ *
+ * BY IDENTIFIER, not cancelAllScheduledNotificationsAsync(). Cancelling
+ * everything is how one feature's cleanup silently disables another's — the
+ * morning clock-in reminders are scheduled by a different module, and a
+ * clock-out would have swept them all away.
+ */
 export async function cancelShiftEndReminders(): Promise<void> {
   try {
-    await Notifications.cancelAllScheduledNotificationsAsync();
+    const raw = await getState(IDS_KEY);
+    const ids = raw ? (JSON.parse(raw) as string[]) : [];
+    for (const id of ids) {
+      await Notifications.cancelScheduledNotificationAsync(id).catch(() => {});
+    }
+    await setState(IDS_KEY, '[]');
   } catch {
     // never block clock-out/logout on notification cleanup
   }

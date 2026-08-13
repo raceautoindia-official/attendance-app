@@ -49,11 +49,37 @@ const transporter = nodemailer.createTransport({
 // failures never propagate to the caller and never break clock-in/out.
 // ---------------------------------------------------------------------------
 
+// Say it once, not once per email. Every alert in this file routes through
+// send(), so an unconfigured server would otherwise print the same line for
+// every late arrival, every off-site refusal and every auto clock-out.
+let warnedUnconfigured = false;
+
 async function send(
   to: string,
   subject: string,
   html: string,
 ): Promise<void> {
+  // NOTHING IS CONFIGURED. Worth its own message: without it the failure
+  // surfaced as whatever nodemailer says about an undefined host ("getaddrinfo
+  // ENOTFOUND undefined"), which reads like a network fault rather than a
+  // setting nobody has filled in. Every alert this app sends — late arrivals,
+  // off-site refusals, auto clock-outs, PIN resets — is silently going nowhere
+  // until one of these is set.
+  if (!ses && !process.env.SMTP_HOST) {
+    if (!warnedUnconfigured) {
+      warnedUnconfigured = true;
+      console.error(
+        '[mailer] NO EMAIL IS CONFIGURED — nothing this app tries to send will arrive.\n'
+        + '         Set either SES_REGION + SES_ACCESS_KEY_ID + SES_SECRET_ACCESS_KEY,\n'
+        + '         or SMTP_HOST + SMTP_PORT + SMTP_USER + SMTP_PASSWORD,\n'
+        + '         plus SMTP_FROM (a verified sender address).\n'
+        + '         Check it with: node scripts/check-smtp.js you@example.com',
+      );
+    }
+    console.error(`[mailer] dropped (no transport): "${subject}" -> ${to}`);
+    return;
+  }
+
   try {
     if (ses) {
       await ses.send(new SendEmailCommand({

@@ -31,6 +31,11 @@ import {
 } from '../location/geofenceAuto';
 import { startLocationWatch, stopLocationWatch, checkLocationAndWarn } from '../location/locationWatch';
 import { scheduleShiftEndReminders, cancelShiftEndReminders } from '../notifications/shiftReminder';
+import {
+  scheduleClockInReminders,
+  cancelClockInReminders,
+  REMINDER_HOUR,
+} from '../notifications/clockInReminder';
 import { notifyPermissionUpdates, PermissionUpdate } from '../notifications/permissionUpdates';
 import { startInboxPoller, stopInboxPoller } from '../notifications/inboxPoller';
 import DatePicker from './DatePicker';
@@ -76,6 +81,8 @@ interface Shift {
   start_time?: string;
   end_time?: string;
   required_hours?: number;
+  /** "Mon".."Sat" — used so the morning reminder skips their day off. */
+  working_days?: string[];
 }
 
 interface PermissionRow {
@@ -639,6 +646,25 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     }
   }, [attendance?.clock_in_utc, clockedIn, clockedOut, loading]);
 
+  // MORNING REMINDER — "you have not clocked in yet", each working day.
+  //
+  // Armed whenever they are not currently on the clock and dropped the moment
+  // they are, so nobody is nagged about a day they have already started. It is
+  // re-armed on the next app open, which is also what puts tomorrow's back
+  // after today's clock-out.
+  //
+  // Their own working days are passed through so it stays quiet on their day
+  // off; with no roster on the phone it reminds every morning, which is the
+  // honest default when there is nothing to read.
+  useEffect(() => {
+    if (loading || hasConsent !== true) return;
+    if (clockedIn && !clockedOut) {
+      void cancelClockInReminders();
+    } else {
+      void scheduleClockInReminders(shift?.working_days ?? null);
+    }
+  }, [clockedIn, clockedOut, loading, hasConsent, shift?.working_days]);
+
   // Auto attendance: after the day's first MANUAL clock-in the phone watches
   // the work-site geofence. LEAVING clocks out — for everyone with a fence, so
   // nobody stays on the clock after walking off site. RETURNING clocks back in
@@ -1164,6 +1190,14 @@ If you are working away from the site today, ask your `
               )}
             </TouchableOpacity>
           )}
+          {/* Say the reminder exists. A notification nobody was told to expect
+              reads as the app misbehaving the first time it appears. */}
+          {!clockedIn && (
+            <Text style={styles.reminderNote}>
+              We&apos;ll remind you at {REMINDER_HOUR > 12 ? REMINDER_HOUR - 12 : REMINDER_HOUR}
+              :00 {REMINDER_HOUR >= 12 ? 'pm' : 'am'} if you have not clocked in.
+            </Text>
+          )}
           {clockedIn && !clockedOut && (
             <TouchableOpacity style={styles.action} onPress={handleClockOut} disabled={busy} activeOpacity={0.8}>
               {busy ? <ActivityIndicator color={colors.text} /> : <Text style={styles.actionText}>⏻  Clock Out</Text>}
@@ -1505,6 +1539,7 @@ const styles = StyleSheet.create({
   action: { borderWidth: 1, borderColor: colors.borderInput, borderRadius: 12, paddingVertical: 16, alignItems: 'center', marginTop: 20 },
   actionText: { color: colors.text, fontSize: 16, fontWeight: '600' },
   done: { color: colors.greenText, textAlign: 'center', marginTop: 20, fontSize: 15, fontWeight: '600' },
+  reminderNote: { color: colors.textFaint, textAlign: 'center', marginTop: 10, fontSize: 12 },
   textarea: {
     borderWidth: 1,
     borderColor: colors.borderInput,
