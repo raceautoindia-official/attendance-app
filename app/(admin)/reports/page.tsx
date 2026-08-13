@@ -29,6 +29,10 @@ interface SummaryRow {
   total_minutes_credited: number;
   /** Minutes worked beyond the rostered day */
   total_overtime_minutes?: number;
+  /** On-site or off-site — whether this employee is fenced at all. */
+  work_mode?: string;
+  /** Days in the period on which they posted a work update. */
+  daily_updates_count?: number;
   /**
    * This employee's rostered minutes per day (both shifts, if two). Null when
    * they have no schedule, and also when their shifts work different weekdays
@@ -383,6 +387,34 @@ export default function ReportsPage() {
                     <p className="text-xs text-slate-400">{(r as SummaryRow).emp_id}</p>
                   </div>
                 ),
+              },
+              {
+                key: 'work_mode',
+                header: 'Work Status',
+                render: r => {
+                  const off = (r as SummaryRow).work_mode === 'off_site';
+                  return (
+                    <Badge variant={off ? 'warning' : 'info'}>
+                      {off ? 'Off-site' : 'On-site'}
+                    </Badge>
+                  );
+                },
+              },
+              {
+                key: 'daily_updates_count',
+                header: 'Work Updates',
+                render: r => {
+                  const n = (r as SummaryRow).daily_updates_count ?? 0;
+                  // Days they wrote something, not the text: one row covers a
+                  // whole period, so there is no single update to show. The
+                  // text itself is on the CSV, day by day.
+                  if (!n) return <span className="text-slate-400">—</span>;
+                  return (
+                    <span className="tabular-nums text-slate-700 dark:text-slate-300">
+                      {n} {n === 1 ? 'day' : 'days'}
+                    </span>
+                  );
+                },
               },
               {
                 key: 'total_days_present',

@@ -18,11 +18,21 @@ import {
   shiftsForEmployees,
   totalShiftMinutes,
 } from '@/lib/shifts';
+import {
+  hasWorkModeColumns,
+  workModeSelect,
+  hasDailyUpdatesTable,
+  dailyUpdateSelect,
+} from '@/lib/employeeDetails';
 import type { AttendanceRecord } from '@/lib/types';
 
 interface AttendanceRow extends AttendanceRecord {
   employee_name: string;
   employee_emp_id: string;
+  /** On-site or off-site — the employee's work status, not the day's. */
+  work_mode: string | null;
+  /** What they wrote about the day's work, if anything. */
+  daily_update: string | null;
 }
 
 function escapeCsvField(value: string | number | null | undefined): string {
@@ -68,11 +78,15 @@ export async function GET(request: NextRequest) {
     params.push(employeeFilterId);
   }
 
-  const [permissionsAvailable, hasType] = await Promise.all([hasPermissionTable(), hasOnDutyColumn()]);
+  const [permissionsAvailable, hasType, workModeCols, updatesTable] = await Promise.all([
+    hasPermissionTable(), hasOnDutyColumn(), hasWorkModeColumns(), hasDailyUpdatesTable(),
+  ]);
   const rows = await query<AttendanceRow>(
     `SELECT a.*,
             e.name   AS employee_name,
             e.emp_id AS employee_emp_id,
+            ${workModeSelect(workModeCols)},
+            ${dailyUpdateSelect(updatesTable, 'a.employee_id', 'a.work_date')} AS daily_update,
             ${permissionMinutesSelect(permissionsAvailable, 'a.employee_id', 'a.work_date', hasType)} AS permission_minutes,
             ${dayRequiredMinutesSelect('a.employee_id', 'a.work_date')} AS required_minutes
      FROM attendance a
@@ -192,6 +206,8 @@ export async function GET(request: NextRequest) {
     'Status',
     'Auth Method',
     'Geofence Status',
+    'Work Status',
+    'Daily Work Update',
   ];
 
   const csvLines: string[] = [
@@ -259,6 +275,8 @@ export async function GET(request: NextRequest) {
         escapeCsvField(row.status),
         escapeCsvField(row.auth_method ?? ''),
         escapeCsvField(row.geofence_status ?? ''),
+        escapeCsvField(row.work_mode === 'off_site' ? 'Off-site' : 'On-site'),
+        escapeCsvField(row.daily_update ?? ''),
       ].join(','),
     );
   }

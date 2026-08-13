@@ -18,12 +18,17 @@ import {
   totalShiftMinutes,
   workingWeekdays,
 } from '@/lib/shifts';
+import { hasWorkModeColumns, workModeSelect, hasDailyUpdatesTable } from '@/lib/employeeDetails';
 import type { ApiResponse } from '@/lib/types';
 
 interface EmployeeSummary {
   id: number;
   emp_id: string;
   name: string;
+  /** On-site or off-site — whether this employee is fenced at all. */
+  work_mode: string;
+  /** How many days in the period they posted a work update. */
+  daily_updates_count: number;
   total_days_present: number;
   total_days_late: number;
   total_days_absent: number;
@@ -95,9 +100,11 @@ export async function GET(request: NextRequest) {
   // permission tops a short day back up, it never inflates one past the shift.
   // On-duty rows are excluded throughout: that is work being clocked, not time
   // off, so it neither tops up hours nor appears as permission taken.
-  const [permissionsAvailable, hasType] = await Promise.all([
+  const [permissionsAvailable, hasType, workModeCols, updatesTable] = await Promise.all([
     hasPermissionTable(),
     hasOnDutyColumn(),
+    hasWorkModeColumns(),
+    hasDailyUpdatesTable(),
   ]);
   const permissionJoin = permissionsAvailable
     ? `LEFT JOIN (
@@ -132,6 +139,14 @@ export async function GET(request: NextRequest) {
          e.id,
          e.emp_id,
          e.name,
+         ${workModeSelect(workModeCols)},
+         -- Days they said something about their work, over the period. The text
+         -- itself is per-day and belongs on the CSV's day rows; a period summary
+         -- can only honestly carry a count.
+         ${updatesTable ? `(SELECT COUNT(DISTINCT dwu.work_date)
+              FROM daily_work_updates dwu
+             WHERE dwu.employee_id = e.id
+               AND dwu.work_date BETWEEN ? AND ?)` : '0'} AS daily_updates_count,
          COALESCE(SUM(CASE WHEN a.status = 'present' THEN 1 ELSE 0 END), 0)            AS total_days_present,
          COALESCE(SUM(CASE WHEN a.status = 'late'    THEN 1 ELSE 0 END), 0)            AS total_days_late,
          COALESCE(SUM(CASE WHEN a.status = 'absent'  THEN 1 ELSE 0 END), 0)            AS total_days_absent,
@@ -186,6 +201,7 @@ export async function GET(request: NextRequest) {
        ORDER BY e.name ASC
        LIMIT ? OFFSET ?`,
       [
+        ...(updatesTable ? [fromDate, toDate] : []),  // daily-updates count
         fromDate, toDate,                 // leave-days subquery
         ...totalPermissionParams,         // approved-permission subquery
         fromDate, toDate,                 // attendance join

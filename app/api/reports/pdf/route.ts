@@ -20,11 +20,21 @@ import {
   shiftsForEmployees,
   totalShiftMinutes,
 } from '@/lib/shifts';
+import {
+  hasWorkModeColumns,
+  workModeSelect,
+  hasDailyUpdatesTable,
+  dailyUpdateSelect,
+} from '@/lib/employeeDetails';
 import type { AttendanceRecord } from '@/lib/types';
 
 interface AttendanceRow extends AttendanceRecord {
   employee_name: string;
   employee_emp_id: string;
+  /** On-site or off-site — the employee's work status, not the day's. */
+  work_mode: string | null;
+  /** What they wrote about the day's work, if anything. */
+  daily_update: string | null;
 }
 
 interface EmployeeTotals {
@@ -39,6 +49,10 @@ interface EmployeeTotals {
   permissionMinutes: number;
   /** Worked minutes topped up by permission, capped at the shift length per day */
   creditedMinutes: number;
+  /** On-site or off-site — a property of the employee, not of any one day. */
+  workMode: string;
+  /** Distinct dates they posted a work update on. */
+  updateDays: Set<string>;
 }
 
 function hm(minutes: number): string {
@@ -79,11 +93,15 @@ export async function GET(request: NextRequest) {
     params.push(employeeFilterId);
   }
 
-  const [permissionsAvailable, hasType] = await Promise.all([hasPermissionTable(), hasOnDutyColumn()]);
+  const [permissionsAvailable, hasType, workModeCols, updatesTable] = await Promise.all([
+    hasPermissionTable(), hasOnDutyColumn(), hasWorkModeColumns(), hasDailyUpdatesTable(),
+  ]);
   const rows = await query<AttendanceRow>(
     `SELECT a.*,
             e.name   AS employee_name,
             e.emp_id AS employee_emp_id,
+            ${workModeSelect(workModeCols)},
+            ${dailyUpdateSelect(updatesTable, 'a.employee_id', 'a.work_date')} AS daily_update,
             ${permissionMinutesSelect(permissionsAvailable, 'a.employee_id', 'a.work_date', hasType)} AS permission_minutes,
             ${dayRequiredMinutesSelect('a.employee_id', 'a.work_date')} AS required_minutes
      FROM attendance a
@@ -133,6 +151,8 @@ export async function GET(request: NextRequest) {
         emp_id: row.employee_emp_id,
         present: 0, late: 0, absent: 0, leave: 0, minutes: 0,
         permissionMinutes: 0, creditedMinutes: 0,
+        workMode: row.work_mode === 'off_site' ? 'Off-site' : 'On-site',
+        updateDays: new Set<string>(),
       });
     }
     const s = summaryMap.get(row.employee_id)!;
@@ -141,6 +161,9 @@ export async function GET(request: NextRequest) {
     else if (row.status === 'absent') s.absent++;
     else if (row.status === 'leave' || row.status === 'holiday') s.leave++;
     if (row.total_minutes) s.minutes += row.total_minutes;
+    // Days they wrote something about their work. A Set because an employee can
+    // post more than one update for a date and it is still one day.
+    if (row.daily_update) s.updateDays.add(String(row.work_date));
     s.permissionMinutes += Number(row.permission_minutes ?? 0);
     s.creditedMinutes += creditedMinutes(
       row.total_minutes,
@@ -252,12 +275,14 @@ export async function GET(request: NextRequest) {
     hm(s.minutes),
     hm(s.permissionMinutes),
     hm(s.creditedMinutes),
+    s.workMode,
+    s.updateDays.size ? String(s.updateDays.size) : '—',
   ]);
 
   autoTable(doc, {
     head: [[
       'Employee', 'ID', 'Present', 'Late', 'Absent', 'Leave',
-      'Worked Hours', 'Permission', 'Credited Hours',
+      'Worked Hours', 'Permission', 'Credited Hours', 'Work Status', 'Updates',
     ]],
     body: summaryBody,
     startY: 48,
@@ -322,6 +347,8 @@ export async function GET(request: NextRequest) {
       row.status,
       row.auth_method ?? '—',
       row.geofence_status ?? '—',
+      row.work_mode === 'off_site' ? 'Off-site' : 'On-site',
+      row.daily_update ?? '—',
     ];
   });
 
@@ -329,6 +356,7 @@ export async function GET(request: NextRequest) {
     head: [[
       'Date', 'Employee', 'ID', 'In (IST)', 'Out (IST)', 'Hours',
       'Permission', 'Credited', 'Status', 'Auth', 'Geofence',
+      'Work Status', 'Daily Work Update',
     ]],
     body: detailBody,
     startY: detailStartY,
