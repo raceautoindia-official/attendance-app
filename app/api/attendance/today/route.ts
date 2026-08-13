@@ -267,7 +267,16 @@ export async function GET(request: NextRequest) {
           // (a quick out-and-in, or anything racing), and created_at alone
           // leaves their order undefined — a shuffled reversal once put a
           // clock-out BEFORE its clock-in and both sessions read as open.
-          const rows = await query<{ created_at: string | Date; action: string; details: string | null }>(
+          const rows = await query<{
+            created_at: string | Date;
+            action: string;
+            // mysql2 hands a JSON column back ALREADY PARSED on this pool, and
+            // as text on others. Typed as both, because assuming text is what
+            // broke this: JSON.parse() on an object throws, the throw was
+            // swallowed, and every session closed by the fence came out
+            // labelled 'manual'.
+            details: string | Record<string, unknown> | null;
+          }>(
             `SELECT id, created_at, action, details FROM audit_log
              WHERE created_at >= ? AND created_at < ?
                AND JSON_EXTRACT(details, '$.employee_id') = ?
@@ -279,7 +288,11 @@ export async function GET(request: NextRequest) {
           const sessions: TodayResponse['today_sessions'] = [];
           for (const r of rows) {
             let d: Record<string, unknown> = {};
-            try { d = r.details ? JSON.parse(r.details) : {}; } catch { /* pair without */ }
+            if (typeof r.details === 'string') {
+              try { d = JSON.parse(r.details) as Record<string, unknown>; } catch { /* pair without */ }
+            } else if (r.details && typeof r.details === 'object') {
+              d = r.details as Record<string, unknown>;
+            }
             const at = new Date(r.created_at).toISOString();
             if (r.action === 'clock_in') {
               sessions.push({ in_utc: at, out_utc: null, out_kind: null });

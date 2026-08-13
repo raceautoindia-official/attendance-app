@@ -85,9 +85,13 @@ export default function App() {
     );
   }
 
+  // translucent + transparent so the status bar sits OVER the app's own dark
+  // background instead of a system-drawn strip. The app draws edge to edge
+  // (edgeToEdgeEnabled=true, and Android 15 enforces it), so the header pads
+  // itself down past the status bar — see STATUS_BAR_PAD in DashboardScreen.
   return (
     <>
-      <StatusBar barStyle="light-content" />
+      <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
       {!authed ? (
         <LoginScreen onLoggedIn={onLoggedIn} />
       ) : !unlocked ? (

@@ -46,7 +46,26 @@ import { colors } from '../theme';
 
 const CONSENT_KEY = 'location_consent_v1';
 
-const STATUS_BAR_PAD = Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 : 0;
+// How far down the header has to start to clear the status bar.
+//
+// The app draws EDGE TO EDGE (edgeToEdgeEnabled=true, and Android 15 enforces
+// it), so content begins at y=0 — underneath the clock and the battery icon.
+// This was StatusBar.currentHeight alone, which reported too little on the
+// phone in the bug report: the title, the logo and Sign out all sat under the
+// status bar.
+//
+// A FLOOR is applied rather than trusting that number. Where currentHeight is
+// right (24–48dp on most phones, more with a camera cutout) the real value
+// wins; where it under-reports, 36 still clears an ordinary status bar.
+//
+// react-native-safe-area-context would measure this properly and was tried —
+// it compiles C++ through CMake, and the object paths under this project's
+// directory exceed the 260-character Windows path limit, so it cannot be built
+// on the machine that produces these APKs. Not worth moving the repository for
+// one padding value.
+const STATUS_BAR_PAD = Platform.OS === 'android'
+  ? Math.max(StatusBar.currentHeight ?? 0, 36)
+  : 0;
 const TZ = 'Asia/Kolkata'; // all dates/times shown in IST, matching the web app
 
 interface TodaySession {
@@ -1121,21 +1140,52 @@ If you are working away from the site today, ask your `
             </View>
           </View>
 
-          {/* Every session of the day, not only the current one — the whole
-              point of recording everything is being able to SEE everything. */}
-          {todaySessions.length > 1 && (
-            <View style={styles.sessionList}>
-              {todaySessions.map((sess, i) => (
-                <Text key={`${sess.in_utc}-${i}`} style={styles.sessionRow}>
-                  {i + 1}.  {timeOnly(sess.in_utc)} – {sess.out_utc ? timeOnly(sess.out_utc) : 'now'}
-                  {sess.out_kind === 'left_site' ? '  ·  left site'
-                    : sess.out_kind === 'watchdog' ? '  ·  away from site'
-                    : sess.out_kind === 'location_off' ? '  ·  location off'
-                    : ''}
+          {/* EVERY clock-in and clock-out of the day, always — not only once
+              there are two of them.
+
+              It used to appear at length > 1, so the first session of the day
+              was invisible and the list arrived out of nowhere on the second.
+              The row above shows the day's FIRST in and LAST out, which is a
+              summary; this is the record, and the record is the point.
+
+              Falls back to the attendance row when the audit log has no
+              sessions to pair (an older day, or entries that failed to write):
+              a clock-in that happened must never show an empty list. */}
+          {(() => {
+            const sessions = todaySessions.length
+              ? todaySessions
+              : attendance?.clock_in_utc
+                ? [{
+                    in_utc: attendance.first_clock_in_utc ?? attendance.clock_in_utc,
+                    out_utc: attendance.clock_out_utc ?? null,
+                    out_kind: null as string | null,
+                  }]
+                : [];
+            if (!sessions.length) return null;
+            return (
+              <View style={styles.sessionList}>
+                <Text style={styles.sessionHeading}>
+                  {sessions.length === 1 ? 'Today’s session' : `All ${sessions.length} sessions today`}
                 </Text>
-              ))}
-            </View>
-          )}
+                {sessions.map((sess, i) => (
+                  <View key={`${sess.in_utc}-${i}`} style={styles.sessionItem}>
+                    <Text style={styles.sessionNum}>{i + 1}</Text>
+                    <Text style={styles.sessionRow}>
+                      <Text style={styles.sessionTime}>{timeOnly(sess.in_utc)}</Text>
+                      {'  →  '}
+                      <Text style={styles.sessionTime}>
+                        {sess.out_utc ? timeOnly(sess.out_utc) : 'still in'}
+                      </Text>
+                      {sess.out_kind === 'left_site' ? '   left site'
+                        : sess.out_kind === 'watchdog' ? '   away from site'
+                        : sess.out_kind === 'location_off' ? '   location off'
+                        : ''}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            );
+          })()}
 
           {todayPermissionMinutes > 0 && (
             <Text style={styles.permissionNote}>
@@ -1172,7 +1222,7 @@ If you are working away from the site today, ask your `
             <TouchableOpacity style={styles.action} onPress={handleClockIn} disabled={busy} activeOpacity={0.8}>
               {busy ? <ActivityIndicator color={colors.text} /> : (
                 <Text style={styles.actionText}>
-                  {clockedOut ? '⏻  Clock In Again' : '⏻  Clock In'}
+                  {clockedOut ? '→  Clock In Again' : '→  Clock In'}
                 </Text>
               )}
             </TouchableOpacity>
@@ -1187,7 +1237,7 @@ If you are working away from the site today, ask your `
           )}
           {clockedIn && !clockedOut && (
             <TouchableOpacity style={styles.action} onPress={handleClockOut} disabled={busy} activeOpacity={0.8}>
-              {busy ? <ActivityIndicator color={colors.text} /> : <Text style={styles.actionText}>⏻  Clock Out</Text>}
+              {busy ? <ActivityIndicator color={colors.text} /> : <Text style={styles.actionText}>←  Clock Out</Text>}
             </TouchableOpacity>
           )}
           {clockedIn && clockedOut && !multiSession && <Text style={styles.done}>Attendance completed for today ✓</Text>}
@@ -1593,8 +1643,19 @@ const styles = StyleSheet.create({
   fenceBannerText: { fontSize: 13, lineHeight: 18 },
   fenceBannerTextIn: { color: '#86efac' },
   fenceBannerTextOut: { color: '#fca5a5' },
-  sessionList: { marginTop: 12, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 10, gap: 4 },
-  sessionRow: { color: colors.textMuted, fontSize: 13 },
+  sessionList: { marginTop: 12, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 10, gap: 6 },
+  sessionHeading: {
+    color: colors.textFaint, fontSize: 11, fontWeight: '700',
+    letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 2,
+  },
+  sessionItem: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  sessionNum: {
+    width: 20, height: 20, borderRadius: 10, backgroundColor: colors.bg,
+    color: colors.textMuted, fontSize: 11, fontWeight: '700',
+    textAlign: 'center', lineHeight: 20, overflow: 'hidden',
+  },
+  sessionRow: { color: colors.textMuted, fontSize: 13, flexShrink: 1 },
+  sessionTime: { color: colors.text, fontWeight: '600' },
   permDateText: { color: colors.text, fontSize: 14, paddingVertical: 2 },
   permTimePlaceholder: { color: colors.textFaint, fontSize: 14, paddingVertical: 2 },
   permQuickRow: { flexDirection: 'row', gap: 8, marginTop: 8, marginBottom: 4 },
