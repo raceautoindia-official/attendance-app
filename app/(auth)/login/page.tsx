@@ -135,25 +135,30 @@ export default function LoginPage() {
 
   return (
     <div className="w-full max-w-sm space-y-6">
-      <div className="flex items-center justify-between">
+      {/* The theme toggle floats to the right rather than sharing a row with
+          the logo. The lockup is SQUARE and stacks a mark over the name over
+          the tagline, so it only becomes readable at a size that would dwarf a
+          toggle sitting beside it — at the 44px a row allowed, the tagline was
+          about three pixels tall. Centred and given its own space, it reads. */}
+      <div className="relative flex justify-center pt-1">
         {/* The logo carries the name and the tagline, so there is no text
             beside it — a wordmark next to the word repeats itself.
-            eslint-disable-next-line @next/next/no-img-element — a brand mark of
-            a known size, needed before hydration; next/image buys nothing here.
             If the file is missing it falls back to the name in text rather than
             leaving a broken-image icon on the sign-in screen. */}
         {logoBroken ? (
-          <span className="text-xl font-bold text-slate-900 dark:text-slate-100">WorkLens</span>
+          <span className="text-3xl font-bold text-slate-900 dark:text-slate-100">WorkLens</span>
         ) : (
           // eslint-disable-next-line @next/next/no-img-element
           <img
             src="/brand/worklens-logo.png"
             alt="WorkLens"
-            className="h-11 w-auto"
+            className="h-36 w-auto sm:h-40"
             onError={() => setLogoBroken(true)}
           />
         )}
-        <ThemeToggle />
+        <div className="absolute right-0 top-0">
+          <ThemeToggle />
+        </div>
       </div>
 
       <Card>
