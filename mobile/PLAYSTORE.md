@@ -2,7 +2,7 @@
 
 Everything the app needed in code is already done (v1.1.0): prominent-disclosure
 consent screen before any location access, privacy policy at
-https://attendance.raceinnovations.in/privacy, private release signing,
+https://worklens.raceinnovations.in/privacy, private release signing,
 cleartext HTTP disabled. This file is the Play Console side.
 
 ## 0. One-time critical backups
@@ -38,7 +38,7 @@ place again.
   site presence can be verified — tracking stops automatically at clock-out and
   a notification is always visible while it is active. An account issued by the
   company is required; the app cannot be used by the public.
-- **Privacy policy URL:** `https://attendance.raceinnovations.in/privacy`
+- **Privacy policy URL:** `https://worklens.raceinnovations.in/privacy`
 - Graphics needed: app icon 512×512 PNG, feature graphic 1024×500, at least 2
   phone screenshots (dashboard + clock-in screen; take them from any phone).
 - Category: Business. Contact email: raceautoindia@gmail.com.

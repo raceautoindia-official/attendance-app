@@ -11,7 +11,7 @@ node tests/journey.js
 Point them somewhere other than localhost with `TEST_BASE_URL`:
 
 ```bash
-TEST_BASE_URL=https://attendance.raceinnovations.in node tests/journey.js
+TEST_BASE_URL=https://worklens.raceinnovations.in node tests/journey.js
 ```
 
 Every suite restores what it touched, but **run them against staging first**.

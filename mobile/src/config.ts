@@ -5,7 +5,16 @@
 // Production backend — the app connects over the internet (stable, works on
 // mobile data anywhere). For local testing, swap to your PC's LAN IP, e.g.
 // 'http://192.168.1.6:3000'.
-export const API_BASE_URL = 'https://attendance.raceinnovations.in';
+//
+// CHANGING THIS STRANDS EVERY PHONE THAT HAS NOT UPDATED.
+//
+// The address is compiled into the APK, so an employee still on an older
+// build keeps asking for the OLD host forever. Keep the previous name
+// (attendance.raceinnovations.in) resolving to the same server, and listed in
+// nginx's server_name, until every phone is on a build carrying the new one.
+// Retiring the old record is what turns "some people have not updated yet"
+// into "some people cannot clock in".
+export const API_BASE_URL = 'https://worklens.raceinnovations.in';
 
 // How often the background task samples a location fix, in milliseconds.
 //
