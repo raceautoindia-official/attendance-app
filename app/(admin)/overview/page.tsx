@@ -430,9 +430,17 @@ export default function OverviewPage() {
                   // blank until they clock out for the day. The server derives
                   // it; there is no raw total to fall back to here.
                   const m = row.worked_minutes;
+                  // A running total is marked as one. Somebody reading this
+                  // column needs to know whether 2h 10m is what the person has
+                  // worked so far or what they worked in total — the same
+                  // number means different things, and the difference is not
+                  // visible from the number.
                   return (
                     <span className="tabular-nums font-medium text-slate-800 dark:text-slate-200">
                       {minutesToHours(m)}
+                      {row.in_progress && m != null && (
+                        <span className="ml-1 text-xs font-normal text-slate-400">so far</span>
+                      )}
                     </span>
                   );
                 },

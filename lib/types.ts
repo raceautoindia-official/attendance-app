@@ -265,7 +265,12 @@ export interface DayAttendanceRow {
   location_name: string | null;
   location_radius_m: number | null;
   out_of_fence_reason: string | null;
+  /** Minutes worked. While in_progress this is a RUNNING total, counted up to
+   *  now — total_minutes is only written at clock-out, so without it every
+   *  employee currently at work read as having no hours at all. */
   worked_minutes: number | null;
+  /** Still clocked in: worked_minutes is climbing, not a result. */
+  in_progress?: boolean;
   credited_minutes: number | null;
   required_minutes: number | null;
   permission_minutes: number;

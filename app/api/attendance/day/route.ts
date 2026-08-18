@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
-import { getWorkDateIST, overtimeMinutes, lateMinutes, breakMinutes } from '@/lib/attendance';
+import {
+  getWorkDateIST,
+  overtimeMinutes,
+  lateMinutes,
+  breakMinutes,
+  workDayEndUtc,
+} from '@/lib/attendance';
 import { hasSessionColumns, hasOutOfFenceReasonColumn, hasFirstClockInColumn } from '@/lib/employeeDetails';
 import { creditedMinutes, hasPermissionTable, permissionMinutesSelect } from '@/lib/permissions';
 import { dayRequiredMinutesSelect } from '@/lib/shifts';
@@ -143,9 +149,29 @@ export async function GET(request: NextRequest) {
     ],
   );
 
+  // The moment this work day ends. Hours in progress are counted up to "now",
+  // but never past the boundary — a session left open overnight must not keep
+  // climbing into a day it does not belong to.
+  const dayEndsMs = workDayEndUtc(workDate).getTime();
+
   const employees = rows.map(r => {
     const banked = Number(r.banked_minutes ?? 0);
-    const worked = r.total_minutes ?? (banked > 0 ? banked : null);
+
+    // Hours SO FAR for somebody still clocked in.
+    //
+    // total_minutes is only written at clock-out, so a day in progress had
+    // nothing to show and the whole screen read "—" under Total Hours for
+    // everyone actually at work — which looks exactly like a system recording
+    // nothing. The figure is derived the same way the clock-out will derive
+    // it: minutes already banked from completed sessions, plus however long
+    // the open one has been running.
+    const openSince = r.clock_in_utc && !r.clock_out_utc ? new Date(r.clock_in_utc) : null;
+    const runningMinutes = openSince
+      ? Math.max(0, Math.round((Math.min(Date.now(), dayEndsMs) - openSince.getTime()) / 60_000))
+      : 0;
+
+    const worked = r.total_minutes
+      ?? (openSince ? banked + runningMinutes : (banked > 0 ? banked : null));
     const firstIn = r.first_clock_in_utc ?? r.clock_in_utc;
     const permission = Number(r.permission_minutes ?? 0);
     const required = r.required_minutes == null ? undefined : Number(r.required_minutes);
@@ -176,6 +202,8 @@ export async function GET(request: NextRequest) {
       location_radius_m: r.location_radius_m == null ? null : Number(r.location_radius_m),
       out_of_fence_reason: r.out_of_fence_reason ?? null,
       worked_minutes: worked,
+      // Still on the clock: worked_minutes is a running total, not a result.
+      in_progress: !!openSince,
       credited_minutes: creditedMinutes(worked, permission, required),
       required_minutes: required ?? null,
       permission_minutes: permission,
