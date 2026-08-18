@@ -1,6 +1,6 @@
-import { query, insertAuditLog } from '@/lib/db';
+import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { getWorkDateIST, workDayEndUtc, toMySQLDatetime } from '@/lib/attendance';
-import { hasSessionColumns, hasWorkModeColumns } from '@/lib/employeeDetails';
+import { hasSessionColumns } from '@/lib/employeeDetails';
 import { AUTO_CLOSE_MAX_MINUTES } from '@/lib/constants';
 import { dayRequiredMinutesSelect } from '@/lib/shifts';
 
@@ -129,10 +129,7 @@ export async function closeOpenSessions(
     whereParams.push(employeeId);
   }
 
-  const [sessionCols, workModeCols] = await Promise.all([
-    hasSessionColumns(),
-    hasWorkModeColumns(),
-  ]);
+  const sessionCols = await hasSessionColumns();
 
   // Every employee is settled the same way now — minutes banked from completed
   // sessions plus however long the still-open one really ran. Multi-session
@@ -143,55 +140,111 @@ export async function closeOpenSessions(
   // Capture WHICH rows will be closed before touching them, so every auto-close
   // can be traced back to a named employee and day afterwards. Without this the
   // whole nightly run left a single "count: 47" line.
-  const pending = await query<{ id: number; work_date: string }>(
-    `SELECT a.id, DATE_FORMAT(a.work_date, '%Y-%m-%d') AS work_date
+  //
+  // required_minutes comes along because it is the fallback below: a day with no
+  // tracking at all is settled at a normal day's length, not at elapsed time.
+  const pending = await query<{
+    id: number;
+    employee_id: number;
+    work_date: string;
+    clock_in_utc: Date;
+    required_minutes: number | null;
+  }>(
+    `SELECT a.id, a.employee_id,
+            DATE_FORMAT(a.work_date, '%Y-%m-%d') AS work_date,
+            a.clock_in_utc,
+            ${dayRequiredMinutesSelect('a.employee_id', 'a.work_date')} AS required_minutes
      FROM attendance a
      WHERE ${aliasedConditions.join(' AND ')}`,
     [...whereParams],
   );
 
-  // Every day is settled at the time actually worked, up to the moment that day
-  // ended. Each distinct work_date has its own boundary instant, so group by it
-  // rather than assuming one cut-off for the whole batch.
+  // ---------------------------------------------------------------------------
+  // What a forgotten clock-out is worth.
   //
-  // The clock-out never runs past the boundary (someone who forgot to clock out
-  // is not credited into the following day), and never before the clock-in
-  // (GREATEST guards a row whose clock-in somehow sits after its own boundary).
-  const byDate = new Map<string, number[]>();
-  for (const p of pending) {
-    const list = byDate.get(p.work_date);
-    if (list) list.push(p.id); else byDate.set(p.work_date, [p.id]);
-  }
-
+  // This used to credit elapsed time to the day's 07:00 boundary. For somebody
+  // who genuinely worked late that is exactly right; for somebody who simply
+  // walked out without tapping the button it produced TWENTY-HOUR DAYS, which
+  // is what the reports were showing. Elapsed time is not worked time, and a
+  // figure that absurd discredits every honest figure beside it.
+  //
+  // So the day is settled at the last EVIDENCE the person was at work:
+  //
+  //   1. their last live-tracking fix — the phone was reporting from the site
+  //      until it stopped, and that moment is a real observation;
+  //   2. failing that, a normal day's length for them — the reading that says
+  //      "they worked their day and forgot to tap", which is what actually
+  //      happens. Never past the boundary.
+  //   3. failing even a roster, the boundary, held to AUTO_CLOSE_MAX_HOURS if
+  //      one is configured.
+  //
+  // Which one was used is recorded on the audit entry, so a figure can always
+  // be traced to the evidence behind it rather than argued about.
+  //
+  // A real clock-out always wins: every UPDATE still guards on clock_out_utc
+  // IS NULL.
+  // ---------------------------------------------------------------------------
+  const basisById = new Map<number, string>();
   let closed = 0;
-  for (const [workDate, ids] of byDate) {
-    const boundary = toMySQLDatetime(workDayEndUtc(workDate));
-    // A day still in progress (only possible with includeToday) is settled at
-    // "now" instead — its boundary has not arrived yet.
-    const cutoff = `LEAST(?, UTC_TIMESTAMP())`;
-    // Elapsed time to the cut-off, optionally held to AUTO_CLOSE_MAX_MINUTES so
-    // a forgotten clock-out cannot be credited as a twenty-hour day.
-    const elapsed = `GREATEST(0, TIMESTAMPDIFF(MINUTE, a.clock_in_utc, ${cutoff}))`;
-    const workedExpr = AUTO_CLOSE_MAX_MINUTES == null
-      ? elapsed
-      : `LEAST(${elapsed}, ${AUTO_CLOSE_MAX_MINUTES})`;
-    const bankedExpr = sessionCols ? 'a.banked_minutes + ' : '';
 
+  for (const p of pending) {
+    const clockIn = new Date(p.clock_in_utc);
+    // A day still in progress (only possible with includeToday) is settled at
+    // "now" — its boundary has not arrived yet.
+    const ceiling = new Date(Math.min(workDayEndUtc(p.work_date).getTime(), Date.now()));
+
+    const lastFix = await queryOne<{ at: Date | string | null }>(
+      `SELECT MAX(tracked_at_utc) AS at
+         FROM live_tracking_points
+        WHERE employee_id = ?
+          AND tracked_at_utc >= ?
+          AND tracked_at_utc <= ?`,
+      [p.employee_id, toMySQLDatetime(clockIn), toMySQLDatetime(ceiling)],
+    ).catch(() => null);   // tracking tables absent in a legacy DB
+
+    let endAt: Date;
+    let basis: string;
+    if (lastFix?.at) {
+      endAt = new Date(lastFix.at);
+      basis = 'last_tracked_position';
+    } else {
+      const required = Number(p.required_minutes ?? 0);
+      if (required > 0) {
+        endAt = new Date(clockIn.getTime() + required * 60_000);
+        basis = 'scheduled_day_length';
+      } else {
+        endAt = ceiling;
+        basis = 'day_boundary';
+      }
+    }
+
+    // Never credited into the day that follows.
+    if (endAt.getTime() > ceiling.getTime()) {
+      endAt = ceiling;
+      basis = 'day_boundary';
+    }
+    if (AUTO_CLOSE_MAX_MINUTES != null) {
+      const cap = new Date(clockIn.getTime() + AUTO_CLOSE_MAX_MINUTES * 60_000);
+      if (cap.getTime() < endAt.getTime()) {
+        endAt = cap;
+        basis = 'capped_at_max_hours';
+      }
+    }
+    // Guards a row whose clock-in somehow sits after its own boundary.
+    if (endAt.getTime() < clockIn.getTime()) endAt = clockIn;
+
+    const worked = Math.max(0, Math.round((endAt.getTime() - clockIn.getTime()) / 60_000));
     const result = await query<{ affectedRows?: number }>(
-      `UPDATE attendance a
-       SET a.clock_out_utc = ${AUTO_CLOSE_MAX_MINUTES == null
-            ? `GREATEST(a.clock_in_utc, ${cutoff})`
-            // With a ceiling the clock-out must match the credited time, or the
-            // stored times would contradict the stored total.
-            : `DATE_ADD(a.clock_in_utc, INTERVAL ${workedExpr} MINUTE)`},
-           a.total_minutes = ${bankedExpr}${workedExpr}
-       WHERE a.id IN (${ids.map(() => '?').join(',')})
-         AND a.clock_out_utc IS NULL`,
-      // Two placeholders: one in the clock_out expression, one in the worked
-      // minutes expression. A third would shift the id list and match nothing.
-      [boundary, boundary, ...ids],
+      `UPDATE attendance
+          SET clock_out_utc = ?,
+              total_minutes = ${sessionCols ? 'banked_minutes + ' : ''}?
+        WHERE id = ? AND clock_out_utc IS NULL`,
+      [toMySQLDatetime(endAt), worked, p.id],
     );
-    closed += (result as unknown as { affectedRows: number }).affectedRows ?? 0;
+    if (((result as unknown as { affectedRows: number }).affectedRows ?? 0) > 0) {
+      closed++;
+      basisById.set(p.id, basis);
+    }
   }
 
   const touchedIds = pending.map(p => p.id);
@@ -234,9 +287,10 @@ export async function closeOpenSessions(
           employee_name: r.name,
           work_date: r.work_date,
           reason: 'never_clocked_out',
-          // Every day is now settled at the hours really worked, up to the
-          // moment the work day ended — never a nominal shift length.
-          basis: 'actual_time_to_day_boundary',
+          // WHICH evidence produced this figure: a real tracked position, a
+          // normal day's length, the boundary, or a configured ceiling. Without
+          // it a credited total can only be argued about.
+          basis: basisById.get(r.id) ?? 'unchanged',
           day_ended_at_utc: workDayEndUtc(r.work_date).toISOString(),
           clock_in_utc: r.clock_in_utc,
           clock_out_utc: r.clock_out_utc,

@@ -106,6 +106,48 @@ ORDER BY fixes_today ASC, e.name ASC;
 
 
 -- -----------------------------------------------------------------------------
+-- 3b. Days that were CUT SHORT — "I worked till 19:10, it says I left at 17:45".
+--
+--     Same rule, softer symptom. The phone kept reporting, but the last fix
+--     that landed INSIDE the fence was at 17:45; everything after it was either
+--     missing or read as outside. Credit stops at the last confirmed moment.
+--
+--     Compare credited_to_ist against last_fix_ist below:
+--
+--       last fix ≈ credited_to      → the phone genuinely stopped reporting
+--                                     (battery optimisation, app swiped away,
+--                                     "Allow all the time" not granted)
+--       last fix ≫ credited_to      → fixes kept arriving but landed OUTSIDE
+--                                     the fence. The radius is too tight for
+--                                     the GPS error indoors — widen the site
+--                                     radius rather than blaming the phone.
+-- -----------------------------------------------------------------------------
+SELECT e.emp_id,
+       e.name,
+       DATE_FORMAT(a.work_date, '%Y-%m-%d')                        AS work_date,
+       CONVERT_TZ(a.clock_in_utc,  '+00:00', '+05:30')             AS clock_in_ist,
+       CONVERT_TZ(a.clock_out_utc, '+00:00', '+05:30')             AS credited_to_ist,
+       a.total_minutes,
+       l.radius_meters                                             AS fence_m,
+       CONVERT_TZ(MAX(ltp.tracked_at_utc), '+00:00', '+05:30')     AS last_fix_ist,
+       TIMESTAMPDIFF(MINUTE, a.clock_out_utc, MAX(ltp.tracked_at_utc)) AS minutes_lost
+FROM attendance a
+JOIN employees e ON e.id = a.employee_id
+LEFT JOIN employee_schedules es ON es.employee_id = e.id
+  AND es.effective_from <= a.work_date
+  AND (es.effective_to IS NULL OR es.effective_to >= a.work_date)
+LEFT JOIN locations l ON l.id = es.location_id
+LEFT JOIN live_tracking_points ltp ON ltp.employee_id = a.employee_id
+  AND ltp.tracked_at_utc >= a.clock_in_utc
+WHERE a.work_date >= DATE_SUB(@today, INTERVAL 7 DAY)
+  AND a.clock_out_utc IS NOT NULL
+GROUP BY a.id, e.emp_id, e.name, a.work_date, a.clock_in_utc, a.clock_out_utc,
+         a.total_minutes, l.radius_meters
+HAVING minutes_lost >= 15
+ORDER BY minutes_lost DESC;
+
+
+-- -----------------------------------------------------------------------------
 -- 4. STOP IT — disarm the fences until the phones are proven to report.
 --
 --    The watchdog only ever looks at schedules with geofencing_enabled = TRUE.
