@@ -22,6 +22,7 @@ import { shiftForClockIn, type DayShift } from '@/lib/shifts';
 import { assessLocation } from '@/lib/locationTrust';
 import { activeOnDuty } from '@/lib/permissions';
 import { lastFenceClosure } from '@/lib/fenceClosure';
+import { closeOpenSessions } from '@/lib/closeSessions';
 import { checkDevice } from '@/lib/deviceBinding';
 import { sendOutOfFenceClockInAlert } from '@/lib/mailer';
 import type {
@@ -167,15 +168,56 @@ export async function POST(request: NextRequest) {
   //    This is robust to server clock/timezone skew: if the clock drifts, the
   //    work_date written earlier may differ from "today", but the open session
   //    is still detected here and matched by clock-out.
-  const openSession = await queryOne<{ id: number }>(
-    `SELECT id FROM attendance
+  //
+  //    That deliberate lack of a date bound has a second, unintended reach: a
+  //    session left open on an EARLIER day blocks this morning's clock-in too.
+  //    The employee sees "Already clocked in" over a Today card reading "-" for
+  //    clock in, clock out and hours — the app is describing yesterday while
+  //    showing today, so there is nothing on screen to act on and no way to
+  //    clock out of a day that has already been settled.
+  //
+  //    Yesterday is not this morning's problem. A day that has ENDED is settled
+  //    here, on the spot, exactly as the end-of-day sweep would settle it —
+  //    same credit, same audit entry — and the clock-in carries on. The sweep
+  //    still runs; this only means a sweep that was missed (server restarted
+  //    over the boundary, database briefly unreachable) costs somebody an
+  //    argument with their phone at 9am instead of a day's attendance.
+  const findOpenSession = () => queryOne<{
+    id: number;
+    work_date: string;
+    clock_in_utc: Date;
+  }>(
+    `SELECT id, DATE_FORMAT(work_date, '%Y-%m-%d') AS work_date, clock_in_utc
+     FROM attendance
      WHERE employee_id = ? AND clock_in_utc IS NOT NULL AND clock_out_utc IS NULL
+     ORDER BY work_date DESC
      LIMIT 1`,
     [auth.id],
   );
+
+  let openSession = await findOpenSession();
+  if (openSession && openSession.work_date < workDate) {
+    // Settles every ended day this employee has left open, not just the newest.
+    await closeOpenSessions({ employeeId: auth.id }).catch(() => 0);
+    openSession = await findOpenSession();
+  }
   if (openSession) {
+    // Say WHEN. "Already clocked in" against an empty card is the message that
+    // sent this to support in the first place; the time is the one fact that
+    // makes it actionable — either they remember clocking in, or they know to
+    // report a session that is not theirs.
+    const since = formatInTimeZone(new Date(openSession.clock_in_utc), TIMEZONE, 'h:mm a');
     return NextResponse.json<ApiResponse>(
-      { success: false, error: 'Already clocked in' },
+      {
+        success: false,
+        error: openSession.work_date === workDate
+          ? `Already clocked in at ${since}. Clock out first.`
+          // A day that has not ended cannot be settled, and one dated ahead of
+          // today means the clock is wrong somewhere. Neither is the employee's
+          // to fix, so name the day and point them at someone who can.
+          : `A session from ${openSession.work_date} (clocked in ${since}) is still open. ` +
+            'Ask your administrator to close it.',
+      },
       { status: 409 },
     );
   }

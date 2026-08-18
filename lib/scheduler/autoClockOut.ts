@@ -110,6 +110,10 @@ async function runEndOfDay(label: string): Promise<void> {
     const closed = await closeOpenSessions(); // previous-day open sessions → 9h
     if (closed > 0) {
       console.log(`[end-of-day] ${label}: auto clocked-out ${closed} session(s)`);
+    } else if (label === 'startup catch-up') {
+      // Proof the very first run reached the database and found the backlog
+      // empty — the one sweep worth confirming even when it does nothing.
+      console.log(`[end-of-day] ${label}: no sessions left open from an earlier day`);
     }
   } catch (err) {
     console.error(`[end-of-day] ${label}: auto clock-out failed (will retry next sweep) — ${describeError(err)}`);
@@ -141,6 +145,16 @@ async function runEndOfDay(label: string): Promise<void> {
 export function startAutoClockOutScheduler(): void {
   if (started) return; // guard against double-registration in one process
   started = true;
+
+  // Say so, once. A sweep with nothing to do prints nothing, so "running and
+  // idle" and "never started" look identical in pm2 — and the difference is
+  // whether anyone still clocked in from yesterday gets settled tonight or
+  // walks into "Already clocked in" tomorrow morning. One line at boot is what
+  // makes that answerable from the logs instead of from the database.
+  console.log(
+    `[end-of-day] scheduler started — settling sweep every ${SWEEP_INTERVAL_MS / 60000} min, ` +
+    `live monitor every ${MONITOR_INTERVAL_MS / 60000} min`,
+  );
 
   // Catch-up shortly after startup (covers a server that was down at midnight).
   setTimeout(() => { void runEndOfDay('startup catch-up'); }, STARTUP_DELAY_MS);
