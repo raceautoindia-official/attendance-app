@@ -54,6 +54,22 @@ interface TodayResponse {
   multi_session?: boolean;
   /** Approved out-of-office duty covering right now, if any. */
   on_duty_now?: { start_time: string; end_time: string; reason: string | null } | null;
+  /**
+   * The fence the server says applies to this employee RIGHT NOW, or null when
+   * geofencing has been switched off for them.
+   *
+   * The dashboard already stops monitoring when this goes away, but only while
+   * the screen is mounted. These background paths judged from the fence stored
+   * on the device and never asked again — so an admin disarming geofencing
+   * disarmed the server and left every phone still enforcing, warning and
+   * clocking people out from a fence that no longer existed. During an incident
+   * that is precisely when the switch has just been thrown and precisely when
+   * it must be obeyed.
+   *
+   * undefined (an older server that does not send the field) is NOT a disarm.
+   * Only an explicit null is.
+   */
+  location?: { latitude: number; longitude: number; radius_meters: number } | null;
 }
 
 interface Fence {
@@ -293,6 +309,14 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }) => {
   const today = await fetchToday();
   if (!today) return;
 
+  // Geofencing switched off for this employee → tear the fence down and do
+  // nothing else. An exit event that arrives after the switch was thrown must
+  // not end anybody's day.
+  if (today.location === null) {
+    await stopGeofenceAutoMode();
+    return;
+  }
+
   // Fresh day / no clocked-in record → this monitoring is stale.
   if (!today.attendance?.clock_in_utc) {
     await stopGeofenceAutoMode();
@@ -374,6 +398,13 @@ export async function reconcileGeofenceAttendance(): Promise<void> {
 
   const today = await fetchToday();
   if (!today) return;
+  // Same disarm check as the event handler: this runs from the periodic
+  // location watch, so it is what actually reaches a phone whose owner has not
+  // opened the app since the switch was thrown.
+  if (today.location === null) {
+    await stopGeofenceAutoMode();
+    return;
+  }
   if (!today.attendance?.clock_in_utc) {
     await stopGeofenceAutoMode();
     return;
