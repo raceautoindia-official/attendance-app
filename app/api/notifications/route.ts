@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
+import { readJsonColumn } from '@/lib/jsonColumn';
 import { requireAuth } from '@/lib/auth';
 import { haversineDistance } from '@/lib/geo';
 import { getWorkDateIST, previousWorkDate } from '@/lib/attendance';
@@ -208,14 +209,7 @@ export async function GET(request: NextRequest) {
   );
 
   for (const r of refused) {
-    // mysql2 hands a JSON column back as an object on some server versions and
-    // as a string on others.
-    let d: Record<string, unknown> = {};
-    if (typeof r.details === 'string') {
-      try { d = JSON.parse(r.details) as Record<string, unknown>; } catch { d = {}; }
-    } else if (r.details && typeof r.details === 'object') {
-      d = r.details as Record<string, unknown>;
-    }
+    const d = readJsonColumn(r.details);
     const num = (v: unknown) => (typeof v === 'number' ? v : null);
     items.push({
       id: `refused-${r.id}`,

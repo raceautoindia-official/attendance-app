@@ -102,12 +102,21 @@ export default function AttendancePage() {
   // One employee's whole day, told in order — every clock event, warning,
   // exception and decision between the 07:00 boundaries.
   const [dayView, setDayView] = useState<{ employeeId: number; date: string; name: string } | null>(null);
-  const { data: timelineData, isLoading: timelineLoading } = useQuery({
+  const { data: timelineData, isLoading: timelineLoading, error: timelineError } = useQuery({
     queryKey: ['timeline', dayView?.employeeId, dayView?.date],
     enabled: !!dayView,
     queryFn: async () => {
       const res = await fetch(`/api/employees/${dayView!.employeeId}/timeline?date=${dayView!.date}`);
-      return res.json() as Promise<ApiResponse<TimelineData>>;
+      // A 500 from a route handler is not JSON, so res.json() throws and the
+      // reason is lost — which is how a missing migration reached production
+      // reading only "Could not load the day". Say what the server said.
+      const body = await res.text();
+      let json: ApiResponse<TimelineData> | null = null;
+      try { json = JSON.parse(body) as ApiResponse<TimelineData>; } catch { /* not JSON */ }
+      if (!res.ok || !json?.success) {
+        throw new Error(json?.error ?? `Server error ${res.status}`);
+      }
+      return json;
     },
   });
   const qc = useQueryClient();
@@ -451,7 +460,14 @@ export default function AttendancePage() {
             )}
           </div>
         ) : (
-          <p className="py-4 text-sm text-red-500">Could not load the day.</p>
+          <div className="py-4">
+            <p className="text-sm text-red-500">Could not load the day.</p>
+            {timelineError instanceof Error && (
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                {timelineError.message}
+              </p>
+            )}
+          </div>
         )}
       </Modal>
     </div>

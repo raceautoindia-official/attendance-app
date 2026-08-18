@@ -1,4 +1,5 @@
 import { queryOne } from '@/lib/db';
+import { readJsonColumn } from '@/lib/jsonColumn';
 
 /**
  * Did the geofence end this attendance row's last session?
@@ -41,17 +42,11 @@ export async function lastFenceClosure(
     return { action: row.action, reason: 'geofence_exit' };
   }
 
-  // mysql2 hands a JSON column back as an object on some server versions and as
-  // a string on others. Both are read, and a malformed one is treated as "no
-  // reason recorded" rather than throwing inside a clock-in.
-  let details: Record<string, unknown> | null = null;
-  if (typeof row.details === 'string') {
-    try { details = JSON.parse(row.details) as Record<string, unknown>; } catch { details = null; }
-  } else if (row.details && typeof row.details === 'object') {
-    details = row.details as Record<string, unknown>;
-  }
+  // Both shapes read, and a malformed one treated as "no reason recorded"
+  // rather than throwing inside a clock-in — see readJsonColumn.
+  const details = readJsonColumn(row.details);
 
-  const reason = typeof details?.reason === 'string' ? details.reason : null;
+  const reason = typeof details.reason === 'string' ? details.reason : null;
   return reason === 'geofence_exit' || reason === 'location_off'
     ? { action: row.action, reason }
     : null;

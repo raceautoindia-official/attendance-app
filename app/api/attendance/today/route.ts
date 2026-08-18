@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
+import { readJsonColumn } from '@/lib/jsonColumn';
 import { requireAuth } from '@/lib/auth';
 import { getWorkDateIST, workDayEndUtc, previousWorkDate, toMySQLDatetime, overtimeMinutes } from '@/lib/attendance';
 import { hasWorkModeColumns } from '@/lib/employeeDetails';
@@ -270,11 +271,9 @@ export async function GET(request: NextRequest) {
           const rows = await query<{
             created_at: string | Date;
             action: string;
-            // mysql2 hands a JSON column back ALREADY PARSED on this pool, and
-            // as text on others. Typed as both, because assuming text is what
-            // broke this: JSON.parse() on an object throws, the throw was
-            // swallowed, and every session closed by the fence came out
-            // labelled 'manual'.
+            // Typed as both, because assuming text is what broke this: every
+            // session closed by the fence came out labelled 'manual'. Read
+            // through readJsonColumn.
             details: string | Record<string, unknown> | null;
           }>(
             `SELECT id, created_at, action, details FROM audit_log
@@ -287,12 +286,7 @@ export async function GET(request: NextRequest) {
           rows.reverse();
           const sessions: TodayResponse['today_sessions'] = [];
           for (const r of rows) {
-            let d: Record<string, unknown> = {};
-            if (typeof r.details === 'string') {
-              try { d = JSON.parse(r.details) as Record<string, unknown>; } catch { /* pair without */ }
-            } else if (r.details && typeof r.details === 'object') {
-              d = r.details as Record<string, unknown>;
-            }
+            const d = readJsonColumn(r.details);
             const at = new Date(r.created_at).toISOString();
             if (r.action === 'clock_in') {
               sessions.push({ in_utc: at, out_utc: null, out_kind: null });

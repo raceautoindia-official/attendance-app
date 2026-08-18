@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
+import { readJsonColumn } from '@/lib/jsonColumn';
 import { requireAuth } from '@/lib/auth';
-import { canAccessEmployee } from '@/lib/employeeDetails';
+import {
+  canAccessEmployee,
+  hasSessionColumns,
+  hasOutOfFenceReasonColumn,
+  hasOutOfFenceReviewColumns,
+} from '@/lib/employeeDetails';
 import { getWorkDateIST, workDayEndUtc, previousWorkDate, toMySQLDatetime } from '@/lib/attendance';
 import type { ApiResponse } from '@/lib/types';
 
@@ -110,7 +116,13 @@ export async function GET(request: NextRequest, context: { params: Promise<{ id:
   // Everything the audit log saw for this person in the window. employee_id is
   // carried in details on every attendance-adjacent action precisely so one
   // filter can pull a person's whole trail.
-  const auditRows = await query<{ created_at: string; action: string; details: string | null }>(
+  const auditRows = await query<{
+    created_at: string;
+    action: string;
+    // Both shapes — see readJsonColumn. Typed as string only, this parsed as
+    // nothing at all and every event lost its reason line and its map pin.
+    details: string | Record<string, unknown> | null;
+  }>(
     `SELECT created_at, action, details
      FROM audit_log
      WHERE created_at >= ? AND created_at < ?
@@ -131,8 +143,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ id:
   for (const row of auditRows) {
     const narrate = AUDIT_NARRATION[row.action];
     if (!narrate) continue;
-    let details: Record<string, unknown> = {};
-    try { details = row.details ? JSON.parse(row.details) : {}; } catch { /* narrated without */ }
+    const details = readJsonColumn(row.details);
     const { title, detail } = narrate(details);
     events.push({
       at_utc: new Date(row.created_at).toISOString(),
@@ -147,10 +158,23 @@ export async function GET(request: NextRequest, context: { params: Promise<{ id:
   // The attendance row carries the day's verdict even when no audit event does
   // (e.g. a holiday row), and the tracking summary says whether the phone was
   // alive between the events.
+  //
+  // Every optional column is guarded the way the rest of the app guards them.
+  // Naming one bare took the WHOLE endpoint down with ER_BAD_FIELD_ERROR on a
+  // database where that migration had not run — the modal said only "Could not
+  // load the day", so a missing migration looked like a broken feature. A day
+  // whose extras are unavailable should still show its clock-in and clock-out.
+  const [sessionCols, reasonCol, reviewCols] = await Promise.all([
+    hasSessionColumns(),
+    hasOutOfFenceReasonColumn(),
+    hasOutOfFenceReviewColumns(),
+  ]);
   const attendance = await queryOne<Record<string, unknown>>(
     `SELECT DATE_FORMAT(work_date, '%Y-%m-%d') AS work_date, clock_in_utc, clock_out_utc,
-            total_minutes, banked_minutes, session_count, status, geofence_status,
-            out_of_fence_reason, out_of_fence_status
+            total_minutes, status, geofence_status,
+            ${sessionCols ? 'banked_minutes, session_count' : '0 AS banked_minutes, 1 AS session_count'},
+            ${reasonCol ? 'out_of_fence_reason' : 'NULL AS out_of_fence_reason'},
+            ${reviewCols ? 'out_of_fence_status' : 'NULL AS out_of_fence_status'}
      FROM attendance WHERE employee_id = ? AND work_date = ?`,
     [employeeId, workDate],
   );
