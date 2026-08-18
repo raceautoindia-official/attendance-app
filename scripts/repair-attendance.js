@@ -82,6 +82,10 @@ const valueOf = (name, fallback) => {
 const dryRun = has('--dry-run');
 const confirmed = has('--confirm');
 const reopenToday = has('--reopen-today');
+const disarmFences = has('--disarm-fences');
+/** Narrow to named employees: --emp=RACE001,RACE008,RACE020 */
+const empFilter = valueOf('emp', '')
+  .split(',').map(s => s.trim()).filter(Boolean);
 
 if (!dryRun && !confirmed) {
   console.error(
@@ -89,8 +93,13 @@ if (!dryRun && !confirmed) {
     '  node scripts/repair-attendance.js --dry-run        what would change, changes nothing\n' +
     '  node scripts/repair-attendance.js --confirm        restate the days\n' +
     '  node scripts/repair-attendance.js --reopen-today --confirm\n' +
-    '                                                     give back a day closed at zero today\n\n' +
-    'Options: --from=YYYY-MM-DD  --to=YYYY-MM-DD  (default: the last 60 days)\n',
+    '                                                     give back a day the system closed today\n\n' +
+    'Options:\n' +
+    '  --from=YYYY-MM-DD --to=YYYY-MM-DD   history range (default: the last 60 days)\n' +
+    '  --emp=RACE001,RACE008               only these employees\n' +
+    '  --disarm-fences                     with --reopen-today: switch geofencing off in the\n' +
+    '                                      same breath, so the watchdog cannot simply close\n' +
+    '                                      them again within the grace period\n',
   );
   process.exit(2);
 }
@@ -131,33 +140,64 @@ const hm = (m) => (m == null ? '—' : `${Math.floor(m / 60)}h ${String(m % 60).
   // still clocked in, hours counting from their real arrival.
   // -------------------------------------------------------------------------
   if (reopenToday) {
+    // Any row the SYSTEM closed today, not only the ones that came out at
+    // exactly zero — 08:57 to 09:00 is the same fault with three minutes of
+    // tracking behind it. The sweep never settles a day still in progress, so a
+    // system clock-out dated today is premature by definition; what it is
+    // worth can only be judged once the day has actually ended.
+    const empSql = empFilter.length
+      ? `AND e.emp_id IN (${empFilter.map(() => '?').join(',')})` : '';
     const [rows] = await c.query(
       `SELECT a.id, e.emp_id, e.name,
-              a.clock_in_utc, a.clock_out_utc, a.total_minutes
+              a.clock_in_utc, a.clock_out_utc, a.total_minutes,
+              MAX(al.action) AS closed_by,
+              MAX(JSON_UNQUOTE(JSON_EXTRACT(al.details, '$.reason'))) AS reason
          FROM attendance a
          JOIN employees e ON e.id = a.employee_id
          JOIN audit_log al ON al.entity = 'attendance' AND al.entity_id = a.id
           AND al.action IN ('geofence_auto_clockout', 'session_auto_closed')
         WHERE a.work_date = ?
           AND a.clock_out_utc IS NOT NULL
-          AND COALESCE(a.total_minutes, 0) = 0
+          ${empSql}
         GROUP BY a.id, e.emp_id, e.name, a.clock_in_utc, a.clock_out_utc, a.total_minutes`,
-      [today],
+      [today, ...empFilter],
     );
 
     if (!rows.length) {
-      console.log(`No zero-minute days closed by the system today (${today}).`);
+      console.log(
+        `Nothing to reopen: no day on ${today} was closed by the system` +
+        `${empFilter.length ? ` for ${empFilter.join(', ')}` : ''}.`);
       await c.end();
       process.exit(0);
     }
 
-    console.log(`\n${rows.length} zero-minute day(s) today (${today}):\n`);
+    console.log(`\n${rows.length} day(s) closed by the system today (${today}):\n`);
+    console.log('  EMP        NAME                     CLOCKED IN         CLOSED AT          CREDITED  WHY');
+    console.log('  ' + '-'.repeat(100));
     for (const r of rows) {
-      console.log(`  ${String(r.emp_id).padEnd(10)} ${String(r.name).padEnd(24)} ` +
-                  `clocked in ${hhmm(r.clock_in_utc)}  →  closed at ${hhmm(r.clock_out_utc)}  (0m)`);
+      console.log(
+        `  ${String(r.emp_id).padEnd(10)} ${String(r.name).slice(0, 24).padEnd(24)} ` +
+        `${hhmm(r.clock_in_utc)}  ${hhmm(r.clock_out_utc)}  ${hm(r.total_minutes).padEnd(9)} ` +
+        `${r.reason ?? r.closed_by}`);
     }
-    console.log('\nReopening clears the clock-out. They stay clocked in and their hours\n' +
-                'count from their real arrival.\n');
+    console.log(
+      '\nReopening clears the clock-out. Each person is clocked in again, hours\n' +
+      'counting from their real arrival, and can use the app normally — a day\n' +
+      'with a clock-out reads as COMPLETE, which is what locked them out.\n');
+
+    // The watchdog closed them once and will close them again within the grace
+    // period unless the fences are disarmed. Never let the repair quietly undo
+    // itself: either disarm in the same breath, or say plainly that it will.
+    const [[armed]] = await c.query(
+      `SELECT COUNT(*) AS n FROM employee_schedules WHERE geofencing_enabled = TRUE`);
+    if (Number(armed.n) > 0 && !disarmFences) {
+      console.log(
+        `WARNING: ${armed.n} schedule(s) still have geofencing enabled. If the phones are\n` +
+        'still not reporting, the watchdog will close these again within\n' +
+        `GEOFENCE_PRESENCE_GRACE_MIN (default 30) minutes and you will be back here.\n` +
+        'Add --disarm-fences to switch geofencing off at the same time; re-arm from\n' +
+        'database/enable_auto_logout.sql once the phones are proven to report.\n');
+    }
 
     if (dryRun) {
       console.log('Dry run — nothing was changed.');
@@ -165,17 +205,17 @@ const hm = (m) => (m == null ? '—' : `${Math.floor(m / 60)}h ${String(m % 60).
       process.exit(0);
     }
 
-    // The watchdog closed them once and will close them again within the grace
-    // period unless the fences are disarmed first. Say so rather than letting
-    // the repair quietly undo itself.
-    const [[armed]] = await c.query(
-      `SELECT COUNT(*) AS n FROM employee_schedules WHERE geofencing_enabled = TRUE`);
-    if (Number(armed.n) > 0) {
-      console.log(
-        `WARNING: ${armed.n} schedule(s) still have geofencing enabled. If the phones\n` +
-        'are still not reporting, the watchdog will close these again within\n' +
-        'GEOFENCE_PRESENCE_GRACE_MIN (default 30 minutes). See section 4 of\n' +
-        'database/zero_hour_clockouts.sql to disarm the fences first.\n');
+    if (disarmFences && Number(armed.n) > 0) {
+      await c.query('UPDATE employee_schedules SET geofencing_enabled = FALSE WHERE geofencing_enabled = TRUE');
+      await c.query(
+        `INSERT INTO audit_log (action, entity, entity_id, performed_by, details, created_at)
+         VALUES ('geofencing_disarmed', 'employee_schedules', NULL, NULL, ?, UTC_TIMESTAMP())`,
+        [JSON.stringify({
+          schedules: Number(armed.n),
+          reason: 'phones_not_confirming_presence',
+          repaired_by: 'scripts/repair-attendance.js',
+        })]);
+      console.log(`Disarmed geofencing on ${armed.n} schedule(s).`);
     }
 
     for (const r of rows) {
@@ -191,13 +231,17 @@ const hm = (m) => (m == null ? '—' : `${Math.floor(m / 60)}h ${String(m % 60).
         [r.id, JSON.stringify({
           emp_id: r.emp_id,
           work_date: today,
-          reason: 'closed_at_zero_minutes_by_system',
+          reason: 'premature_system_clock_out',
+          closed_originally_by: r.closed_by,
+          closed_originally_because: r.reason,
           previous_clock_out_utc: r.clock_out_utc,
           previous_total_minutes: r.total_minutes,
           repaired_by: 'scripts/repair-attendance.js',
         })]);
     }
-    console.log(`Reopened ${rows.length} day(s).`);
+    console.log(
+      `Reopened ${rows.length} day(s). Each carries an 'attendance_reopened' audit entry\n` +
+      'with the clock-out that was removed and why it was there.');
     await c.end();
     process.exit(0);
   }
