@@ -14,20 +14,28 @@
 -- clock-out puts them back where they were — still clocked in, hours counting
 -- from their real arrival — and tonight's sweep settles the day properly.
 --
--- Edit the two variables below, then run the whole file. Steps 1 and 5 only
--- look; steps 2-4 change things and are meant to be run together.
--- =============================================================================
+-- ---------------------------------------------------------------------------
+-- TO USE THIS: edit @work_date once, and the employee list in ALL THREE
+-- statements below (search for RACE001).
+--
+-- The list is repeated deliberately. Holding it in a variable and matching with
+-- FIND_IN_SET fails on a server whose connection collation differs from the
+-- table's:
+--
+--   ERROR 1267 (HY000): Illegal mix of collations
+--   (utf8mb4_unicode_ci,IMPLICIT) and (utf8mb4_0900_ai_ci,IMPLICIT)
+--
+-- A user variable has the SAME coercibility as a column, so neither side can
+-- yield and MySQL refuses. A string literal is more coercible than a column, so
+-- the column's collation always wins and the comparison simply works — on every
+-- server, whatever it was installed with. Three edits beat an error at the
+-- prompt with the day half repaired.
+-- ---------------------------------------------------------------------------
 
 SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;
 
--- ---- WHAT TO CORRECT --------------------------------------------------------
+-- Safe: work_date is a DATE, so no collation is involved in this comparison.
 SET @work_date := '2026-08-18';
-SET @employees := 'RACE001,RACE008,RACE020';   -- comma separated, no spaces
--- -----------------------------------------------------------------------------
-
--- FIND_IN_SET wants a plain list; this is how one variable stands in for an IN
--- clause without building the SQL by hand.
-SET @emp_list := REPLACE(@employees, ' ', '');
 
 
 -- -----------------------------------------------------------------------------
@@ -35,19 +43,19 @@ SET @emp_list := REPLACE(@employees, ' ', '');
 -- -----------------------------------------------------------------------------
 SELECT e.emp_id,
        e.name,
-       DATE_FORMAT(a.work_date, '%Y-%m-%d')                 AS work_date,
-       CONVERT_TZ(a.clock_in_utc,  '+00:00', '+05:30')      AS clock_in_ist,
-       CONVERT_TZ(a.clock_out_utc, '+00:00', '+05:30')      AS closed_at_ist,
-       a.total_minutes                                      AS credited_minutes,
+       DATE_FORMAT(a.work_date, '%Y-%m-%d')                    AS work_date,
+       CONVERT_TZ(a.clock_in_utc,  '+00:00', '+05:30')         AS clock_in_ist,
+       CONVERT_TZ(a.clock_out_utc, '+00:00', '+05:30')         AS closed_at_ist,
+       a.total_minutes                                         AS credited_minutes,
        a.status,
-       MAX(al.action)                                       AS closed_by,
+       MAX(al.action)                                          AS closed_by,
        MAX(JSON_UNQUOTE(JSON_EXTRACT(al.details, '$.reason'))) AS why
 FROM attendance a
 JOIN employees e ON e.id = a.employee_id
 LEFT JOIN audit_log al ON al.entity = 'attendance' AND al.entity_id = a.id
      AND al.action IN ('geofence_auto_clockout', 'session_auto_closed')
 WHERE a.work_date = @work_date
-  AND FIND_IN_SET(e.emp_id, @emp_list)
+  AND e.emp_id IN ('RACE001', 'RACE008', 'RACE020')
   AND a.clock_out_utc IS NOT NULL
 GROUP BY a.id, e.emp_id, e.name, a.work_date, a.clock_in_utc, a.clock_out_utc,
          a.total_minutes, a.status;
@@ -64,8 +72,8 @@ GROUP BY a.id, e.emp_id, e.name, a.work_date, a.clock_in_utc, a.clock_out_utc,
 --    right one while the phones are not reporting at all. Re-arm from
 --    database/enable_auto_logout.sql once they are.
 --
---    COMMENTED OUT because it affects the whole company, not just these three.
---    Uncomment it unless you have already disarmed.
+--    COMMENTED OUT because it affects the whole company, not just the named
+--    employees. Uncomment it unless you have already disarmed.
 -- -----------------------------------------------------------------------------
 -- UPDATE employee_schedules SET geofencing_enabled = FALSE
 --  WHERE geofencing_enabled = TRUE;
@@ -95,7 +103,7 @@ SELECT 'attendance_reopened',
 FROM attendance a
 JOIN employees e ON e.id = a.employee_id
 WHERE a.work_date = @work_date
-  AND FIND_IN_SET(e.emp_id, @emp_list)
+  AND e.emp_id IN ('RACE001', 'RACE008', 'RACE020')
   AND a.clock_out_utc IS NOT NULL;
 
 
@@ -105,6 +113,8 @@ WHERE a.work_date = @work_date
 --    banked_minutes and session_count are deliberately untouched: an employee
 --    who completed an earlier session today has those minutes banked, and
 --    clearing them would throw away real work.
+--
+--    Guarded on clock_out_utc IS NOT NULL, so re-running this is harmless.
 -- -----------------------------------------------------------------------------
 UPDATE attendance a
   JOIN employees e ON e.id = a.employee_id
@@ -113,7 +123,7 @@ UPDATE attendance a
        a.clock_out_lng = NULL,
        a.total_minutes = NULL
  WHERE a.work_date = @work_date
-   AND FIND_IN_SET(e.emp_id, @emp_list)
+   AND e.emp_id IN ('RACE001', 'RACE008', 'RACE020')
    AND a.clock_out_utc IS NOT NULL;
 
 
@@ -130,4 +140,4 @@ SELECT e.emp_id,
 FROM attendance a
 JOIN employees e ON e.id = a.employee_id
 WHERE a.work_date = @work_date
-  AND FIND_IN_SET(e.emp_id, @emp_list);
+  AND e.emp_id IN ('RACE001', 'RACE008', 'RACE020');
