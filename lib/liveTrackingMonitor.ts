@@ -36,12 +36,45 @@ interface StaleSessionRow {
 // long has passed without a single fix placing them inside, the session is
 // closed and credited only up to the last moment their presence was confirmed.
 //
-// This deliberately covers the silent case as well as the obvious one: a phone
-// that stops reporting (app force-stopped, battery pulled, tracking switched
-// off) proves nothing, and used to mean the session simply stayed open until
-// midnight credited a whole shift. Absence of evidence is now treated as
-// absence, not as attendance.
+// This covers the silent case as well as the obvious one: a phone that stops
+// reporting mid-shift proves nothing about where its owner went, and used to
+// mean the session simply stayed open until midnight credited a whole shift.
 const OUTSIDE_LIMIT_MIN = Number(process.env.GEOFENCE_PRESENCE_GRACE_MIN) || 30;
+
+/**
+ * How much CONFIRMED presence there must be before silence can be read as
+ * departure.
+ *
+ * This rule once said "absence of evidence is absence" and acted on it without
+ * qualification. On a fleet where the phones were not reporting at all, that
+ * sentence cost four people their entire day inside one morning:
+ *
+ *     clocked in 09:58, clocked out 09:58, 0h 0m, present
+ *
+ * Every one of them was at work. Their phones produced one fix at the clock-in
+ * and nothing after, so the last confirmed presence WAS the clock-in, the day
+ * closed at the second it opened, and — because the row now had a clock-out —
+ * they could not clock in again either.
+ *
+ * The flaw is not the grace period, it is the inference. "Left the site" and
+ * "this phone never reported" produce identical silence, and only one of them
+ * is the employee's doing. Ending somebody's day requires evidence they were
+ * HERE and then went; a clock-in alone is not that evidence.
+ *
+ * So below this much tracked presence the watchdog reports instead of acting.
+ * The day stays open, an entry goes in the audit log naming the employee and
+ * the silence, and a person decides. A day left open is corrected in a minute
+ * by an admin or settled honestly by the end-of-day sweep; a day wrongly closed
+ * at zero is discovered by the employee, at the worst possible moment.
+ *
+ * GEOFENCE_MIN_TRACKED_MIN overrides it. Zero restores the old behaviour, which
+ * is documented here only so nobody has to guess how it used to work.
+ */
+const MIN_TRACKED_MINUTES = (() => {
+  const raw = process.env.GEOFENCE_MIN_TRACKED_MIN;
+  const n = Number(raw);
+  return raw != null && raw !== '' && Number.isFinite(n) && n >= 0 ? n : 15;
+})();
 
 interface GeofenceCandidateRow {
   attendance_id: number;
@@ -82,6 +115,64 @@ async function lastConfirmedInside(
       c.loc_lat, c.loc_lat, c.loc_lng,
       fence, Math.min(MAX_ACCURACY_ALLOWANCE_M, fence),
     ],
+  );
+}
+
+/**
+ * A phone that is not reporting, recorded as exactly that.
+ *
+ * The employee stays clocked in. This is the whole point: their day is not
+ * endable on this evidence, and the thing that actually needs attention is the
+ * phone — background location permission, battery optimisation, or no route to
+ * the server. Ending the day would hide that behind a plausible-looking
+ * attendance row, which is how the fault survived unnoticed for as long as it
+ * did.
+ *
+ * Once per employee per work day. This runs every few minutes, and an entry per
+ * sweep would bury the log in the same fact three hundred times.
+ */
+async function reportUnverifiablePresence(
+  c: GeofenceCandidateRow,
+  trackedMs: number,
+  silentMs: number,
+): Promise<void> {
+  const workDate = formatInTimeZone(new Date(c.clock_in_utc), TIMEZONE, 'yyyy-MM-dd');
+  const already = await queryOne<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM audit_log
+      WHERE action = 'geofence_presence_unverifiable'
+        AND entity = 'attendance'
+        AND entity_id = ?`,
+    [c.attendance_id],
+  );
+  if (Number(already?.n ?? 0) > 0) return;
+
+  await insertAuditLog({
+    action: 'geofence_presence_unverifiable',
+    entity: 'attendance',
+    entity_id: c.attendance_id,
+    performed_by: null,
+    details: {
+      employee_id: c.employee_id,
+      emp_id: c.emp_id,
+      employee_name: c.employee_name,
+      work_date: workDate,
+      location: c.loc_name,
+      // Everything needed to tell a tracking fault from a real departure.
+      tracked_minutes: Math.round(trackedMs / 60_000),
+      minutes_unconfirmed: Math.round(silentMs / 60_000),
+      minimum_tracked_minutes: MIN_TRACKED_MINUTES,
+      presence_grace_min: OUTSIDE_LIMIT_MIN,
+      outcome: 'left_clocked_in',
+      note: 'Phone never confirmed enough presence to judge a departure. Day left open on purpose.',
+    },
+    ip_address: null,
+  });
+
+  console.warn(
+    `[live-monitor] ${c.emp_id} (${c.employee_name}): phone confirmed only ` +
+    `${Math.round(trackedMs / 60_000)} min inside ${c.loc_name ?? 'site'} then went quiet for ` +
+    `${Math.round(silentMs / 60_000)} min. Day LEFT OPEN — check the phone's location permission, ` +
+    'not the employee.',
   );
 }
 
@@ -147,6 +238,15 @@ async function runGeofenceWatchdog(adminEmails: string[]): Promise<number> {
     const confirmedAt = inside ? new Date(inside.tracked_at_utc) : new Date(c.clock_in_utc);
     const silentMs = Date.now() - confirmedAt.getTime();
     if (silentMs < OUTSIDE_LIMIT_MIN * 60_000) continue; // still vouched for
+
+    // Enough evidence to say they LEFT, or only enough to say their phone went
+    // quiet? See MIN_TRACKED_MINUTES. Below the floor this reports and moves on
+    // rather than ending somebody's day on an inference.
+    const trackedMs = confirmedAt.getTime() - new Date(c.clock_in_utc).getTime();
+    if (trackedMs < MIN_TRACKED_MINUTES * 60_000) {
+      await reportUnverifiablePresence(c, trackedMs, silentMs);
+      continue;
+    }
 
     const reason = inside ? 'left_the_fence' : 'presence_never_confirmed';
     const closeAt = toMySQLDatetime(confirmedAt);
