@@ -92,6 +92,81 @@ export async function POST(request: NextRequest) {
   const workDate = getWorkDateIST();
   const ip = getClientIp(request);
 
+  // -------------------------------------------------------------------------
+  // Should this phone be allowed to end somebody's day?
+  //
+  // There are three independent automatic clock-outs in this system, and the
+  // two on the PHONE answer to nothing on the server:
+  //
+  //   1. the server's geofence watchdog  - obeys employee_schedules
+  //   2. the phone's fence-exit rule     - obeys a fence stored on the device
+  //   3. the phone's location-off rule   - obeys nothing at all
+  //
+  // Switching geofencing off therefore stopped (1) and left (2) and (3) still
+  // ending days. Employees working until 19:00 were reported clocked out at
+  // 17:47 with the fences already disarmed, because old builds were still
+  // enforcing rules the company had withdrawn.
+  //
+  // The decision belongs here, on the server, where it can be changed for
+  // everybody at once instead of waiting for a fleet to update. A refusal is a
+  // 4xx, which every existing build already treats as "the server understood,
+  // stop enforcing" - so this reaches phones that will never be updated again.
+  // -------------------------------------------------------------------------
+  if (parsed.data.auto === true) {
+    const autoReason = parsed.data.reason ?? null;
+    let refuse: string | null = null;
+
+    if (autoReason === 'location_off') {
+      // The weakest evidence there is: it reports that the phone could not get
+      // a fix, which says nothing whatever about where its owner is. Ending a
+      // day on it turns a battery-saver setting into a missing afternoon. The
+      // four warnings still happen; only the clock-out is withheld. Opt back in
+      // with AUTO_CLOCK_OUT_ON_LOCATION_OFF=true.
+      if (process.env.AUTO_CLOCK_OUT_ON_LOCATION_OFF !== 'true') {
+        refuse = 'location_off_enforcement_disabled';
+      }
+    } else if (autoReason === 'geofence_exit') {
+      // The phone judged this against a fence it stored when it last armed. If
+      // geofencing is no longer on for this employee, that fence has been
+      // withdrawn and its verdict goes with it.
+      const fenced = await queryOne<{ n: number }>(
+        `SELECT COUNT(*) AS n
+           FROM employee_schedules es
+          WHERE es.employee_id = ?
+            AND es.geofencing_enabled = TRUE
+            AND es.effective_from <= ?
+            AND (es.effective_to IS NULL OR es.effective_to >= ?)`,
+        [auth.id, workDate, workDate],
+      ).catch(() => null);
+      if (Number(fenced?.n ?? 0) === 0) refuse = 'geofencing_disabled_for_employee';
+    }
+
+    if (refuse) {
+      // Recorded, not silently dropped: a phone repeatedly trying to clock
+      // somebody out is a fault worth seeing - usually location permission or
+      // battery optimisation - and the employee never finds out on their own.
+      await insertAuditLog({
+        action: 'auto_clock_out_refused',
+        entity: 'employee',
+        entity_id: auth.id,
+        performed_by: null,
+        details: {
+          employee_id: auth.id,
+          emp_id: auth.emp_id,
+          work_date: workDate,
+          requested_reason: autoReason,
+          refused_because: refuse,
+          note: 'Day left open. The phone, not the employee, is what needs attention.',
+        },
+        ip_address: ip,
+      });
+      return NextResponse.json<ApiResponse>(
+        { success: false, error: 'Automatic clock-out is not in force for this account' },
+        { status: 409 },
+      );
+    }
+  }
+
   // An unrecognised device is RECORDED on clock-out, not refused.
   //
   // Refusing looked right at first, but the reasoning does not hold: reaching
