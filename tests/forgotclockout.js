@@ -38,6 +38,7 @@ const jiti = createJiti(__filename, {
     '@/lib/attendance': path.join(ROOT, 'lib', 'attendance.ts'),
     '@/lib/constants': path.join(ROOT, 'lib', 'constants.ts'),
     '@/lib/shifts': path.join(ROOT, 'lib', 'shifts.ts'),
+    '@/lib/settlement': path.join(ROOT, 'lib', 'settlement.ts'),
   },
 });
 

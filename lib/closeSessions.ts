@@ -2,6 +2,7 @@ import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { getWorkDateIST, workDayEndUtc, toMySQLDatetime } from '@/lib/attendance';
 import { hasSessionColumns } from '@/lib/employeeDetails';
 import { AUTO_CLOSE_MAX_MINUTES } from '@/lib/constants';
+import { settleSession } from '@/lib/settlement';
 import { dayRequiredMinutesSelect } from '@/lib/shifts';
 
 /**
@@ -202,38 +203,17 @@ export async function closeOpenSessions(
       [p.employee_id, toMySQLDatetime(clockIn), toMySQLDatetime(ceiling)],
     ).catch(() => null);   // tracking tables absent in a legacy DB
 
-    let endAt: Date;
-    let basis: string;
-    if (lastFix?.at) {
-      endAt = new Date(lastFix.at);
-      basis = 'last_tracked_position';
-    } else {
-      const required = Number(p.required_minutes ?? 0);
-      if (required > 0) {
-        endAt = new Date(clockIn.getTime() + required * 60_000);
-        basis = 'scheduled_day_length';
-      } else {
-        endAt = ceiling;
-        basis = 'day_boundary';
-      }
-    }
+    // The one rule, shared with scripts/repair-attendance.js so a day settled
+    // tonight and a day re-settled over history come out identical.
+    const { endAt, minutes: worked, basis } = settleSession({
+      clockIn,
+      boundary: workDayEndUtc(p.work_date),
+      now: ceiling,
+      lastFix: lastFix?.at ? new Date(lastFix.at) : null,
+      requiredMinutes: p.required_minutes,
+      capMinutes: AUTO_CLOSE_MAX_MINUTES,
+    });
 
-    // Never credited into the day that follows.
-    if (endAt.getTime() > ceiling.getTime()) {
-      endAt = ceiling;
-      basis = 'day_boundary';
-    }
-    if (AUTO_CLOSE_MAX_MINUTES != null) {
-      const cap = new Date(clockIn.getTime() + AUTO_CLOSE_MAX_MINUTES * 60_000);
-      if (cap.getTime() < endAt.getTime()) {
-        endAt = cap;
-        basis = 'capped_at_max_hours';
-      }
-    }
-    // Guards a row whose clock-in somehow sits after its own boundary.
-    if (endAt.getTime() < clockIn.getTime()) endAt = clockIn;
-
-    const worked = Math.max(0, Math.round((endAt.getTime() - clockIn.getTime()) / 60_000));
     const result = await query<{ affectedRows?: number }>(
       `UPDATE attendance
           SET clock_out_utc = ?,
