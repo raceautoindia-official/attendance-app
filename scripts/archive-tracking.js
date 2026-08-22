@@ -1,39 +1,45 @@
 #!/usr/bin/env node
 /**
- * Move a week of location history out of the database and into a file.
+ * Move a week of location history to Drive, then remove it from the database.
  *
  * WHY
  *
  * live_tracking_points grows by roughly one row per employee per 30 seconds of
- * every shift — a few hundred thousand rows a week — and it never stops. It is
- * the single largest thing in the database, and because a full dump goes to
- * Drive every two hours, every one of those dumps carries the whole history
- * again. Pruning the table shrinks the database AND twelve backups a day.
+ * every shift, and never stops. It is the largest thing in the database and it
+ * only ever gets larger.
  *
  * WHAT IS LOST, SAID PLAINLY
  *
- * These rows are the map. Once a week is archived, Live Tracking's "review a
- * finished day" draws nothing for it, and the day timeline shows events without
- * their trail. The attendance figures themselves are unaffected — hours live in
- * `attendance`, and a settled day keeps its clock-out and total whatever
- * happens here.
+ * These rows are the map. Once a week has moved, Live Tracking's "review a
+ * finished day" draws nothing for it and day timelines lose their trail. The
+ * attendance figures are untouched — hours, clock-ins and clock-outs live in
+ * `attendance`, not here — but if anyone is ever asked to prove where somebody
+ * was during an archived week, the answer is in the CSV, not in the app.
  *
  * That is why only weeks that ENDED more than --keep-days ago are touched. The
- * settlement rule reads a day's last tracked position when it settles it, so
- * the recent past must stay in the database or days would start settling from a
- * roster instead of from evidence.
+ * settlement rule reads a day's last tracked position when it settles that day,
+ * so the recent past has to stay in the database, or days would begin settling
+ * from a roster instead of from evidence.
  *
- * SAFETY
+ * MOVE, NOT COPY-AND-HOPE
  *
- * Nothing is deleted until the archive has been written, re-read, counted and
- * checksummed. If the verification does not match the database exactly, the
- * week is skipped with its rows intact. Deleting location history cannot be
- * undone from here — only from one of the Drive dumps.
+ * A week is deleted only after ALL of:
+ *   1. the archive is written and gunzipped back;
+ *   2. its row count matches a fresh count from the database — so a row that
+ *      arrived mid-archive skips the week rather than vanishing with it;
+ *   3. Drive has accepted the upload;
+ *   4. Drive's OWN md5, computed from what actually arrived, matches the local
+ *      file. A 200 is not evidence that a file is intact.
+ *
+ * Any one of those failing leaves the week in the database, untouched, to be
+ * retried next Sunday.
  *
  *   node scripts/archive-tracking.js --dry-run
- *   node scripts/archive-tracking.js --dry-run --keep-days=30
  *   node scripts/archive-tracking.js --confirm
  *   node scripts/archive-tracking.js --confirm --week=2026-W33
+ *
+ * Configure the upload with GDRIVE_SERVICE_ACCOUNT_JSON and
+ * GDRIVE_TRACKING_FOLDER_ID (see .env.example).
  */
 
 const fs = require('fs');
@@ -51,6 +57,7 @@ if (fs.existsSync(envPath)) {
 }
 
 const mysql = require(path.join(ROOT, 'node_modules/mysql2/promise'));
+const drive = require('./lib/drive');
 
 const args = process.argv.slice(2);
 const has = (f) => args.includes(f);
@@ -61,17 +68,21 @@ const valueOf = (name, fallback) => {
 
 const dryRun = has('--dry-run');
 const confirmed = has('--confirm');
+// Deliberately awkward to type. Deleting a week whose only other copy is a
+// database dump somebody has to go and find is not a routine operation.
+const skipUpload = has('--delete-without-uploading');
 
 if (!dryRun && !confirmed) {
   console.error(
     'Refusing to guess.\n\n' +
-    '  node scripts/archive-tracking.js --dry-run    what would be archived, changes nothing\n' +
-    '  node scripts/archive-tracking.js --confirm    write the archives, then delete\n\n' +
+    '  node scripts/archive-tracking.js --dry-run    what would move, changes nothing\n' +
+    '  node scripts/archive-tracking.js --confirm    upload to Drive, verify, then delete\n\n' +
     'Options:\n' +
     '  --keep-days=N      leave the last N days in the database (default 21)\n' +
     '  --week=2026-W33    just this one ISO week\n' +
-    '  --out-dir=PATH     where archives are written (default ./backups/tracking,\n' +
-    '                     or TRACKING_ARCHIVE_DIR)\n',
+    '  --out-dir=PATH     local copies (default ./backups/tracking, or TRACKING_ARCHIVE_DIR)\n' +
+    '  --delete-without-uploading   archive locally only. The week then exists in ONE\n' +
+    '                               place, on this server. Not for the weekly run.\n',
   );
   process.exit(2);
 }
@@ -81,17 +92,19 @@ const ONLY_WEEK = valueOf('week', '');
 const OUT_DIR = path.resolve(
   valueOf('out-dir', process.env.TRACKING_ARCHIVE_DIR || path.join(ROOT, 'backups', 'tracking')),
 );
+const FOLDER_ID = process.env.GDRIVE_TRACKING_FOLDER_ID || '';
+const KEY_PATH = process.env.GDRIVE_SERVICE_ACCOUNT_JSON || '';
 
 const DAY_MS = 86400000;
 const COLUMNS = ['id', 'session_id', 'employee_id', 'tracked_at_utc', 'latitude', 'longitude', 'accuracy_meters'];
-const PAGE = 20000;      // rows read per round trip
-const DELETE_BATCH = 5000; // rows per DELETE, so no single statement holds a long lock
+const PAGE = 20000;
+const DELETE_BATCH = 5000;
 const NEWLINE = String.fromCharCode(10);
 
 /** Monday 00:00 UTC of the ISO week containing d. */
 function weekStart(d) {
   const t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  const dow = (t.getUTCDay() + 6) % 7; // Monday = 0
+  const dow = (t.getUTCDay() + 6) % 7;
   t.setUTCDate(t.getUTCDate() - dow);
   return t;
 }
@@ -99,7 +112,7 @@ function weekStart(d) {
 /** ISO year and week number, as "2026-W33". */
 function isoWeekName(monday) {
   const t = new Date(monday.getTime());
-  t.setUTCDate(t.getUTCDate() + 3);           // the Thursday decides the year
+  t.setUTCDate(t.getUTCDate() + 3);
   const year = t.getUTCFullYear();
   const jan4 = new Date(Date.UTC(year, 0, 4));
   const week = 1 + Math.round((t.getTime() - weekStart(jan4).getTime()) / (7 * DAY_MS));
@@ -108,6 +121,7 @@ function isoWeekName(monday) {
 
 const ymd = (d) => d.toISOString().slice(0, 10);
 const sqlTime = (d) => d.toISOString().slice(0, 19).replace('T', ' ');
+const md5 = (buf) => crypto.createHash('md5').update(buf).digest('hex');
 
 (async () => {
   const c = await mysql.createConnection({
@@ -117,7 +131,7 @@ const sqlTime = (d) => d.toISOString().slice(0, 19).replace('T', ' ');
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,
     timezone: '+00:00',
-    dateStrings: true,   // write the archive exactly as MySQL stores it
+    dateStrings: true,
   });
 
   const [[span]] = await c.query(
@@ -125,14 +139,13 @@ const sqlTime = (d) => d.toISOString().slice(0, 19).replace('T', ' ');
     'FROM live_tracking_points',
   );
   if (!Number(span.rows_total)) {
-    console.log('live_tracking_points is empty. Nothing to archive.');
+    console.log('live_tracking_points is empty. Nothing to move.');
     await c.end();
     process.exit(0);
   }
 
   const [[size]] = await c.query(
-    'SELECT ROUND((data_length + index_length) / 1048576) AS mb ' +
-    'FROM INFORMATION_SCHEMA.TABLES ' +
+    'SELECT ROUND((data_length + index_length) / 1048576) AS mb FROM INFORMATION_SCHEMA.TABLES ' +
     "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'live_tracking_points'",
   );
 
@@ -141,14 +154,10 @@ const sqlTime = (d) => d.toISOString().slice(0, 19).replace('T', ' ');
   console.log('  oldest: ' + span.oldest);
   console.log('  newest: ' + span.newest);
 
-  // Weeks that have ENDED more than KEEP_DAYS ago. A week still inside the
-  // window is left alone: the settlement rule reads a day's last tracked
-  // position when it settles that day, so recent history has to stay put.
   const cutoff = new Date(Date.now() - KEEP_DAYS * DAY_MS);
   const weeks = [];
   let cursor = weekStart(new Date(span.oldest.replace(' ', 'T') + 'Z'));
   const lastPoint = new Date(span.newest.replace(' ', 'T') + 'Z');
-
   while (cursor.getTime() <= lastPoint.getTime()) {
     const end = new Date(cursor.getTime() + 7 * DAY_MS);
     const name = isoWeekName(cursor);
@@ -160,13 +169,12 @@ const sqlTime = (d) => d.toISOString().slice(0, 19).replace('T', ' ');
 
   if (!weeks.length) {
     console.log('\nNo complete week has finished more than ' + KEEP_DAYS + ' days ago' +
-                (ONLY_WEEK ? ' matching ' + ONLY_WEEK : '') + '. Nothing to archive.');
+                (ONLY_WEEK ? ' matching ' + ONLY_WEEK : '') + '. Nothing to move.');
     await c.end();
     process.exit(0);
   }
 
   console.log('\nKeeping the last ' + KEEP_DAYS + ' days in the database.');
-  console.log(weeks.length + ' week(s) eligible:\n');
 
   let grandTotal = 0;
   const plan = [];
@@ -179,29 +187,51 @@ const sqlTime = (d) => d.toISOString().slice(0, 19).replace('T', ' ');
     if (!rows) continue;
     grandTotal += rows;
     plan.push({ ...w, rows });
-    console.log('  ' + w.name + '  ' + ymd(w.from) + ' to ' + ymd(new Date(w.to.getTime() - DAY_MS)) +
-                '  ' + rows.toLocaleString().padStart(10) + ' rows');
   }
 
   if (!plan.length) {
-    console.log('  (all eligible weeks are already empty)');
+    console.log('All eligible weeks are already empty. Nothing to move.');
     await c.end();
     process.exit(0);
   }
 
-  console.log('\n  ' + grandTotal.toLocaleString() + ' rows total would leave the database.');
-  console.log('  Archives are written to: ' + OUT_DIR);
-  console.log('\n  What this costs: Live Tracking cannot draw a map for an archived week,');
-  console.log('  and day timelines lose their trail. Hours, clock-ins and clock-outs are');
-  console.log('  untouched — those live in `attendance`, not here.');
+  console.log(plan.length + ' week(s) to move:\n');
+  for (const w of plan) {
+    console.log('  ' + w.name + '  ' + ymd(w.from) + ' to ' + ymd(new Date(w.to.getTime() - DAY_MS)) +
+                '  ' + w.rows.toLocaleString().padStart(10) + ' rows');
+  }
+  console.log('\n  ' + grandTotal.toLocaleString() + ' rows total.');
+  console.log('  Local copies : ' + OUT_DIR);
+  console.log('  Drive folder : ' + (FOLDER_ID || '(GDRIVE_TRACKING_FOLDER_ID not set)'));
+  console.log('\n  What this costs: an archived week can no longer be drawn on the Live');
+  console.log('  Tracking map, and its day timelines lose their trail. Hours, clock-ins');
+  console.log('  and clock-outs are untouched.');
 
   if (dryRun) {
-    console.log('\nDry run — nothing was written and nothing was deleted.');
+    console.log('\nDry run — nothing was written, uploaded or deleted.');
     await c.end();
     process.exit(0);
+  }
+
+  // Authenticate BEFORE writing anything. Discovering that the credentials are
+  // wrong after an hour of archiving helps nobody.
+  let token = null;
+  if (!skipUpload) {
+    const auth = await drive.getAccessToken(KEY_PATH);
+    token = auth.token;
+    console.log('\nDrive: authenticated as ' + auth.email);
+    if (!FOLDER_ID) {
+      console.error('GDRIVE_TRACKING_FOLDER_ID is not set — refusing to delete anything.');
+      await c.end();
+      process.exit(1);
+    }
+  } else {
+    console.log('\n--delete-without-uploading: the archive will exist ONLY on this server.');
   }
 
   fs.mkdirSync(OUT_DIR, { recursive: true });
+  let movedWeeks = 0;
+  let movedRows = 0;
 
   for (const w of plan) {
     const base = 'tracking_' + w.name + '_' + ymd(w.from) + '_to_' +
@@ -209,75 +239,89 @@ const sqlTime = (d) => d.toISOString().slice(0, 19).replace('T', ' ');
     const file = path.join(OUT_DIR, base);
     console.log('\n' + w.name + ' -> ' + base);
 
-    // ---- write ------------------------------------------------------------
+    // ---- 1. write --------------------------------------------------------
     const gzip = zlib.createGzip({ level: 9 });
     const out = fs.createWriteStream(file);
-    const done = new Promise((resolve, reject) => {
+    const finished = new Promise((resolve, reject) => {
       out.on('finish', resolve);
       out.on('error', reject);
       gzip.on('error', reject);
     });
     gzip.pipe(out);
-
     const write = (chunk) => new Promise((resolve) => {
       if (!gzip.write(chunk)) gzip.once('drain', resolve); else resolve();
     });
 
     await write(COLUMNS.join(',') + NEWLINE);
-
     let lastId = 0;
     let written = 0;
     for (;;) {
       const [batch] = await c.query(
         'SELECT ' + COLUMNS.join(', ') + ' FROM live_tracking_points ' +
-        'WHERE tracked_at_utc >= ? AND tracked_at_utc < ? AND id > ? ' +
-        'ORDER BY id LIMIT ' + PAGE,
+        'WHERE tracked_at_utc >= ? AND tracked_at_utc < ? AND id > ? ORDER BY id LIMIT ' + PAGE,
         [sqlTime(w.from), sqlTime(w.to), lastId],
       );
       if (!batch.length) break;
       let buf = '';
       for (const r of batch) {
-        buf += [
-          r.id, r.session_id, r.employee_id, r.tracked_at_utc,
-          r.latitude, r.longitude, r.accuracy_meters == null ? '' : r.accuracy_meters,
-        ].join(',') + NEWLINE;
+        buf += [r.id, r.session_id, r.employee_id, r.tracked_at_utc,
+                r.latitude, r.longitude, r.accuracy_meters == null ? '' : r.accuracy_meters]
+          .join(',') + NEWLINE;
         lastId = r.id;
       }
       await write(buf);
       written += batch.length;
-      process.stdout.write('  written ' + written.toLocaleString() + ' / ' +
-                           w.rows.toLocaleString() + '\r');
+      process.stdout.write('  written ' + written.toLocaleString() + ' / ' + w.rows.toLocaleString() + '\r');
     }
     gzip.end();
-    await done;
+    await finished;
     console.log('  written ' + written.toLocaleString() + ' / ' + w.rows.toLocaleString());
 
-    // ---- verify, before anything is destroyed -----------------------------
-    const raw = zlib.gunzipSync(fs.readFileSync(file)).toString('utf8');
-    const lines = raw.split(NEWLINE).filter(l => l.length > 0);
-    const dataRows = lines.length - 1;               // minus the header
-    const sha = crypto.createHash('sha256')
-      .update(fs.readFileSync(file)).digest('hex');
-    const bytes = fs.statSync(file).size;
+    // ---- 2. verify locally, against a FRESH database count ----------------
+    const bytes = fs.readFileSync(file);
+    const dataRows = zlib.gunzipSync(bytes).toString('utf8')
+      .split(NEWLINE).filter(l => l.length > 0).length - 1;
+    const localMd5 = md5(bytes);
+    const sha = crypto.createHash('sha256').update(bytes).digest('hex');
 
-    // Re-count from the DATABASE, not from the loop, so a row inserted while
-    // the archive was being written is caught rather than silently deleted.
     const [[recount]] = await c.query(
       'SELECT COUNT(*) AS n FROM live_tracking_points WHERE tracked_at_utc >= ? AND tracked_at_utc < ?',
       [sqlTime(w.from), sqlTime(w.to)],
     );
-
     console.log('  archive: ' + dataRows.toLocaleString() + ' rows, ' +
-                (bytes / 1048576).toFixed(1) + ' MB, sha256 ' + sha.slice(0, 16));
+                (bytes.length / 1048576).toFixed(1) + ' MB, md5 ' + localMd5.slice(0, 12));
 
     if (dataRows !== Number(recount.n)) {
-      console.log('  MISMATCH: database now holds ' + Number(recount.n).toLocaleString() +
+      console.log('  MISMATCH: the database now holds ' + Number(recount.n).toLocaleString() +
                   ' rows for this week, the archive holds ' + dataRows.toLocaleString() + '.');
-      console.log('  SKIPPED — nothing deleted. Re-run when the week is quiet.');
+      console.log('  SKIPPED — nothing deleted.');
       continue;
     }
 
-    // ---- delete, in batches ----------------------------------------------
+    // ---- 3. upload, and read it back --------------------------------------
+    let driveId = null;
+    if (!skipUpload) {
+      const up = await drive.uploadFile({ token, folderId: FOLDER_ID, filePath: file, name: base })
+        .catch(err => { console.log('  UPLOAD FAILED: ' + err.message); return null; });
+      if (!up) { console.log('  SKIPPED — nothing deleted.'); continue; }
+
+      const back = await drive.getFile(token, up.id)
+        .catch(err => { console.log('  READ-BACK FAILED: ' + err.message); return null; });
+      if (!back) { console.log('  SKIPPED — nothing deleted.'); continue; }
+
+      // Google's md5 is computed from what arrived. Matching it is the only
+      // proof that the copy in Drive is the file we wrote.
+      if (back.md5Checksum !== localMd5 || Number(back.size) !== bytes.length) {
+        console.log('  DRIVE COPY DOES NOT MATCH: size ' + back.size + ' vs ' + bytes.length +
+                    ', md5 ' + back.md5Checksum + ' vs ' + localMd5);
+        console.log('  SKIPPED — nothing deleted.');
+        continue;
+      }
+      driveId = up.id;
+      console.log('  drive  : uploaded and verified, id ' + driveId);
+    }
+
+    // ---- 4. only now, delete ---------------------------------------------
     let deleted = 0;
     for (;;) {
       const [res] = await c.query(
@@ -290,6 +334,8 @@ const sqlTime = (d) => d.toISOString().slice(0, 19).replace('T', ' ');
       if (n < DELETE_BATCH) break;
     }
     console.log('  deleted ' + deleted.toLocaleString() + ' rows');
+    movedWeeks++;
+    movedRows += deleted;
 
     await c.query(
       'INSERT INTO audit_log (action, entity, entity_id, performed_by, details, created_at) ' +
@@ -301,16 +347,20 @@ const sqlTime = (d) => d.toISOString().slice(0, 19).replace('T', ' ');
         rows_archived: dataRows,
         rows_deleted: deleted,
         file: base,
-        bytes,
+        bytes: bytes.length,
+        md5: localMd5,
         sha256: sha,
+        drive_file_id: driveId,
         keep_days: KEEP_DAYS,
-        note: 'Location history for this week now exists ONLY in this file.',
+        note: driveId
+          ? 'Location history for this week now lives in Drive and in the local copy.'
+          : 'Uploaded nowhere. This week exists ONLY in the local archive file.',
       })],
     );
   }
 
-  console.log('\nDone. Upload ' + OUT_DIR + ' to Drive alongside the database dumps,');
-  console.log('and check the file is there before the next run removes another week.');
+  console.log('\n' + movedWeeks + ' week(s), ' + movedRows.toLocaleString() +
+              ' rows moved out of the database.');
   await c.end();
   process.exit(0);
 })().catch(e => {
