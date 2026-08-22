@@ -131,6 +131,54 @@ const basisOf = () => db.auditEntries()
   check('never produces a negative day',
     minutesOf() >= 0, `${minutesOf()} minutes`);
 
+  // -------------------------------------------------------------------
+  console.log('');
+  console.log('One fix six seconds after the clock-in - the reported case');
+  // -------------------------------------------------------------------
+  // RACE008, 2026-08-19. Her phone sent ONE point six seconds after she
+  // clocked in and nothing for the rest of the day. Read literally, her last
+  // tracked position was 08:10:30, so the day settled at zero:
+  //
+  //   clock_in 08:10:24 -> clock_out 08:10:30, credited 0,
+  //   basis last_tracked_position
+  //
+  // Six seconds of tracking says the app started. It does not say when she
+  // went home, and it must not be read as if it did.
+  db.reset();
+  db.setPending(row(540));
+  db.setLastFix(new Date(CLOCK_IN.getTime() + 6000));
+
+  await closeOpenSessions();
+  check('a normal day is credited, not six seconds',
+    minutesOf() === 540, minutesOf() + ' minutes');
+  check('and the tracking is not cited as the reason',
+    basisOf() === 'scheduled_day_length', basisOf());
+
+  // -------------------------------------------------------------------
+  console.log('');
+  console.log('Fourteen minutes of tracking, then silence');
+  // -------------------------------------------------------------------
+  db.reset();
+  db.setPending(row(540));
+  db.setLastFix(new Date(CLOCK_IN.getTime() + 14 * 60_000));
+
+  await closeOpenSessions();
+  check('still below the floor, so still a normal day',
+    minutesOf() === 540, minutesOf() + ' minutes');
+
+  // -------------------------------------------------------------------
+  console.log('');
+  console.log('Twenty minutes of tracking, then silence');
+  // -------------------------------------------------------------------
+  db.reset();
+  db.setPending(row(540));
+  db.setLastFix(new Date(CLOCK_IN.getTime() + 20 * 60_000));
+
+  await closeOpenSessions();
+  check('above the floor: the tracking is believed',
+    minutesOf() === 20 && basisOf() === 'last_tracked_position',
+    minutesOf() + ' minutes, basis ' + basisOf());
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch(e => {

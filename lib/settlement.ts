@@ -12,6 +12,34 @@
 // it can be tested exhaustively and re-run over the past without surprises.
 // ---------------------------------------------------------------------------
 
+/**
+ * How much tracking there must be before it counts as evidence of when
+ * somebody left.
+ *
+ * "Their last fix" sounds like the best evidence available, and usually is —
+ * but only if the phone was actually reporting. Subhashree's phone sent ONE
+ * point, six seconds after she clocked in, and nothing for the rest of the
+ * day. Read literally, her last tracked position was 08:10:30 and her day was
+ * worth zero minutes:
+ *
+ *     clock_in 08:10:24 -> clock_out 08:10:30, credited 0, basis
+ *     last_tracked_position
+ *
+ * That is the same mistake the geofence watchdog made — treating a phone that
+ * stopped reporting as an employee who stopped working — arriving by a
+ * different route. A handful of seconds of tracking says the app started, not
+ * when the person went home.
+ *
+ * Below this, the fixes are ignored and the day falls through to a normal
+ * day's length, which is what the evidence actually supports.
+ * SETTLE_MIN_TRACKED_MIN overrides it; 0 restores the old literal reading.
+ */
+const MIN_TRACKED_MINUTES = (() => {
+  const raw = process.env.SETTLE_MIN_TRACKED_MIN;
+  const n = Number(raw);
+  return raw != null && raw !== '' && Number.isFinite(n) && n >= 0 ? n : 15;
+})();
+
 /** Where the credited time came from. Recorded on every audit entry. */
 export type SettlementBasis =
   /** A real live-tracking fix: the phone reported from site until it stopped. */
@@ -69,7 +97,10 @@ export function settleSession(input: SettlementInput): Settlement {
   let endAt: Date;
   let basis: SettlementBasis;
 
-  if (lastFix && lastFix.getTime() > clockIn.getTime()) {
+  // A fix only counts as "when they left" if the phone tracked for long enough
+  // to be saying anything. See MIN_TRACKED_MINUTES.
+  const trackedMs = lastFix ? lastFix.getTime() - clockIn.getTime() : 0;
+  if (lastFix && trackedMs >= MIN_TRACKED_MINUTES * 60_000) {
     endAt = new Date(lastFix.getTime());
     basis = 'last_tracked_position';
   } else {
