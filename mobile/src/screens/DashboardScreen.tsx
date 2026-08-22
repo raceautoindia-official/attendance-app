@@ -254,16 +254,30 @@ function toast(msg: string): void {
 }
 
 export interface FixPayload {
-  latitude: number;
-  longitude: number;
+  /** null when the phone could not get a fix — see getCoords(allowUnknown). */
+  latitude: number | null;
+  longitude: number | null;
   /** Android reports when a fix came from a mock-location provider. */
   is_mocked?: boolean;
   accuracy_m?: number | null;
 }
 
-async function getCoords(): Promise<FixPayload> {
+/**
+ * Where the phone thinks it is, or an honest admission that it does not know.
+ *
+ * @param allowUnknown  Return null coordinates instead of throwing when no fix
+ *                      can be had. TRUE for clock-out, FALSE for clock-in: a
+ *                      clock-in is judged against a fence and needs a position;
+ *                      a clock-out only ends the employee's own day.
+ */
+async function getCoords(
+  { allowUnknown = false }: { allowUnknown?: boolean } = {},
+): Promise<FixPayload> {
   const perm = await Location.requestForegroundPermissionsAsync();
-  if (perm.status !== 'granted') throw new Error('Location permission is required.');
+  if (perm.status !== 'granted') {
+    if (!allowUnknown) throw new Error('Location permission is required.');
+    return { latitude: null, longitude: null, is_mocked: false, accuracy_m: null };
+  }
   // Clock-in must feel instant, and a fresh GPS lock is the one thing that
   // cannot be made instant — cold, indoors, it takes 5–30 seconds, and it has
   // NO timeout, which is exactly the "clock in takes time" complaint. So:
@@ -283,8 +297,37 @@ async function getCoords(): Promise<FixPayload> {
       new Promise<null>(resolve => setTimeout(() => resolve(null), 8_000)),
     ]);
     if (!pos) {
-      pos = (await Location.getLastKnownPositionAsync({ maxAge: 600_000 })) ?? (await fresh);
+      // Any older fix will do at this point — its own accuracy travels with it,
+      // so the server judges it honestly rather than trusting it blindly.
+      pos = await Location.getLastKnownPositionAsync({ maxAge: 600_000 });
     }
+    if (!pos) {
+      // Last resort: keep waiting for the lock, but NOT for ever.
+      //
+      // This used to be a bare `await fresh`, with no timeout at all. On a
+      // phone that never gets a lock — indoors, location switched off, GPS
+      // hardware unable to fix — that promise simply never settles, so tapping
+      // Clock Out span the button until the employee gave up and went home
+      // with the day still open. That day then reached the next morning as an
+      // unclosed session, which is the other half of the reports.
+      //
+      // Twenty more seconds, then answer honestly.
+      pos = await Promise.race([
+        fresh,
+        new Promise<null>(resolve => setTimeout(() => resolve(null), 20_000)),
+      ]);
+    }
+  }
+
+  if (!pos) {
+    if (!allowUnknown) {
+      throw new Error(
+        'Could not get your location. Move outside or into an open area, check that ' +
+        'Location is switched on, and try again.',
+      );
+    }
+    // Clocking out matters more than knowing where from.
+    return { latitude: null, longitude: null, is_mocked: false, accuracy_m: null };
   }
   // `mocked` is set by Android when the fix came from a fake-GPS app. Pass it
   // through rather than deciding here — the server records the attempt.
@@ -805,7 +848,9 @@ If you are working away from the site today, ask your `
     setBusy(true);
     setError(null);
     try {
-      const coords = await getCoords();
+      // allowUnknown: a phone that cannot see where it is must still be able to
+      // end its owner's day. The alternative is the day staying open all night.
+      const coords = await getCoords({ allowUnknown: true });
       await apiFetch('/api/attendance/clock-out', { method: 'POST', body: coords });
       await stopBackgroundTracking();
       // Manual clock-out means done for the day — end geofence auto mode and

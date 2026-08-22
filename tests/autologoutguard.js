@@ -109,6 +109,24 @@ const dayEnded = () => db.attendanceUpdates().length > 0;
   check('is never touched by any of this', res.status === 200, `${res.status}`);
   check('and their day ends as asked', dayEnded(), 'no attendance UPDATE');
 
+  // -------------------------------------------------------------------
+  console.log('');
+  console.log('Tapping Clock Out on a phone that cannot get a fix');
+  // -------------------------------------------------------------------
+  // The button used to spin for ever here: getCoords had no timeout on its
+  // last resort, and the server refused a clock-out with no coordinates
+  // anyway. Between them, an employee whose phone could not lock GPS simply
+  // could not end their day - it stayed open until the next morning settled
+  // it, which is where the long days came from.
+  db.reset();
+  db.setFenced(1);
+  res = await POST(post({ latitude: null, longitude: null }));
+  check('is accepted', res.status === 200, String(res.status));
+  check('and the day ends', dayEnded(), 'no attendance UPDATE');
+  const out = db.auditEntries().find(a => a.action === 'clock_out');
+  check('recorded as position unknown, not quietly',
+    out?.details?.position_unavailable === true, JSON.stringify(out?.details));
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch(e => {

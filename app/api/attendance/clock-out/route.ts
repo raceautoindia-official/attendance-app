@@ -25,12 +25,19 @@ const ClockOutSchema = z.object({
   reason: z.enum(['geofence_exit', 'location_off']).optional(),
   is_mocked: z.boolean().optional(),
   accuracy_m: z.number().nullable().optional(),
-}).refine(
-  // Coordinates are mandatory for manual clock-outs; only the automatic
-  // location-off path may omit them (location is off — no fix exists).
-  d => (d.latitude != null && d.longitude != null) || d.auto === true,
-  { message: 'latitude and longitude are required' },
-);
+});
+
+// Coordinates used to be MANDATORY for a manual clock-out. On a phone that
+// cannot get a fix — indoors, location off, GPS never locking — that turned
+// "tap Clock Out and go home" into a spinner that never finished, and the day
+// stayed open until the next morning settled it.
+//
+// Refusing here bought nothing. Reaching this endpoint needs the employee's own
+// token, and clocking OUT early only shortens their own day; the fraud worth
+// stopping is clocking IN from somewhere they are not, which is still refused.
+// So a clock-out with no position is accepted and RECORDED as position
+// unknown — an honest gap in the record, rather than an employee unable to end
+// their shift.
 
 // ---------------------------------------------------------------------------
 // Shape of the attendance + shift info we need
@@ -312,6 +319,9 @@ export async function POST(request: NextRequest) {
       status: newStatus,
       auto: parsed.data.auto === true,
       reason: parsed.data.reason ?? null,
+      // The phone could not produce a fix. Worth recording: it is the same
+      // fault that stops tracking, and the employee cannot see it themselves.
+      position_unavailable: lat == null || lng == null,
       latitude: lat,
       longitude: lng,
     },
