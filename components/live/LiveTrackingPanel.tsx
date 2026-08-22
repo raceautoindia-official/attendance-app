@@ -46,7 +46,7 @@ export type LiveTrackingLiveRow = {
   recorded_count?: number;
 };
 
-type LiveRangePreset = '30m' | '2h' | '8h' | '24h' | 'custom';
+type LiveRangePreset = '30m' | '2h' | '8h' | '24h';
 
 const IST = 'Asia/Kolkata';
 const IST_LOCALE = 'en-IN';
@@ -173,8 +173,6 @@ export default function LiveTrackingPanel() {
   const [logMode, setLogMode] = useState<'recorded' | 'route'>('recorded');
   const [liveEmployeeFilter, setLiveEmployeeFilter] = useState<'all' | number>('all');
   const [liveRangePreset, setLiveRangePreset] = useState<LiveRangePreset>('2h');
-  const [customFromLocal, setCustomFromLocal] = useState('');
-  const [customToLocal, setCustomToLocal] = useState('');
   // REVIEWING A FINISHED DAY. Empty = live.
   //
   // Live only ever lists people who are clocked in RIGHT NOW, so once everybody
@@ -188,20 +186,12 @@ export default function LiveTrackingPanel() {
     // Reviewing a day, the server bounds the points to that work day. Sending a
     // "last 2 hours" window as well would cut the morning off it.
     if (reviewDate) return { fromUtc: null, toUtc: null };
-    if (liveRangePreset === 'custom') {
-      const fromDate = customFromLocal ? new Date(customFromLocal) : null;
-      const toDate = customToLocal ? new Date(customToLocal) : null;
-      return {
-        fromUtc: fromDate && !Number.isNaN(fromDate.getTime()) ? fromDate.toISOString() : null,
-        toUtc: toDate && !Number.isNaN(toDate.getTime()) ? toDate.toISOString() : null,
-      };
-    }
-    const minutesMap: Record<Exclude<LiveRangePreset, 'custom'>, number> = {
+    const minutesMap: Record<LiveRangePreset, number> = {
       '30m': 30, '2h': 120, '8h': 480, '24h': 1440,
     };
     const from = new Date(now.getTime() - minutesMap[liveRangePreset] * 60_000);
     return { fromUtc: from.toISOString(), toUtc: now.toISOString() };
-  }, [liveRangePreset, customFromLocal, customToLocal, reviewDate]);
+  }, [liveRangePreset, reviewDate]);
 
   const { data: liveData, isLoading: liveLoading } = useQuery({
     queryKey: ['live-tracking', 'live-admin', liveRange.fromUtc, liveRange.toUtc, reviewDate],
@@ -473,24 +463,7 @@ else if(ll.length===1){map.setView(ll[0],17);}
             <option value="2h">Last 2 hours</option>
             <option value="8h">Last 8 hours</option>
             <option value="24h">Last 24 hours</option>
-            <option value="custom">Custom</option>
           </select>
-          {liveRangePreset === 'custom' && (
-            <>
-              <input
-                type="datetime-local"
-                value={customFromLocal}
-                onChange={e => setCustomFromLocal(e.target.value)}
-                className="text-xs rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1"
-              />
-              <input
-                type="datetime-local"
-                value={customToLocal}
-                onChange={e => setCustomToLocal(e.target.value)}
-                className="text-xs rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1"
-              />
-            </>
-          )}
         </div>
       </div>
       {liveLoading ? (
