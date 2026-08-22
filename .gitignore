@@ -42,3 +42,4 @@ next-env.d.ts
 
 # Snapshot written by tests/wiringcheck.js between its seed and verify steps
 tests/.wiringcheck-state.json
+backups/
