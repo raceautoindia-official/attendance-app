@@ -142,7 +142,7 @@ export default function ReportsPage() {
   const [employeeId, setEmployeeId] = useState('');
   const [empSearch, setEmpSearch] = useState('');
   const [page, setPage] = useState(1);
-  const [exporting, setExporting] = useState<'csv' | 'pdf' | null>(null);
+  const [exporting, setExporting] = useState<'csv' | 'pdf' | 'excel' | null>(null);
   const [drillDown, setDrillDown] = useState<DrillDown | null>(null);
   const [reportView, setReportView] = useState<'summary' | 'daily'>('summary');
 
@@ -256,18 +256,24 @@ export default function ReportsPage() {
   const drillRows = drillData?.rows ?? [];
   const drillCount = drillData?.total ?? null;
 
-  async function downloadFile(type: 'csv' | 'pdf') {
+  // 'excel' hits a different route and file extension than its own name — the
+  // day-wise CSV/PDF exports and this summary-shaped Excel export are
+  // deliberately separate endpoints (see summary-xlsx/route.ts), so the path
+  // can't be built by just reusing `type` the way csv/pdf do.
+  async function downloadFile(type: 'csv' | 'pdf' | 'excel') {
     setExporting(type);
     try {
       const params = new URLSearchParams({ from_date: fromDate, to_date: toDate });
       if (employeeId) params.set('employee_id', employeeId);
-      const res = await fetch(`/api/reports/${type}?${params}`);
+      const path = type === 'excel' ? '/api/reports/summary-xlsx' : `/api/reports/${type}`;
+      const ext = type === 'excel' ? 'xlsx' : type;
+      const res = await fetch(`${path}?${params}`);
       if (!res.ok) throw new Error('Export failed');
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `attendance_${fromDate}_to_${toDate}.${type}`;
+      a.download = `attendance_${fromDate}_to_${toDate}.${ext}`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
@@ -328,6 +334,23 @@ export default function ReportsPage() {
           </div>
 
           <div className="flex gap-2 sm:ml-auto">
+            {/* Matches what's on screen in the Summary tab — one row per
+                employee, same columns (minus Leave, see summary-xlsx's own
+                note). The day-wise CSV/PDF exports below are a different
+                shape (one row per employee per day) and stay available in
+                both tabs. */}
+            {reportView === 'summary' && (
+              <Button
+                variant="secondary"
+                loading={exporting === 'excel'}
+                onClick={() => downloadFile('excel')}
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+                Export Excel
+              </Button>
+            )}
             <Button
               variant="secondary"
               loading={exporting === 'csv'}
@@ -695,24 +718,6 @@ export default function ReportsPage() {
                     <button
                       onClick={() => setDrillDown({ employeeId: row.id, employeeName: row.name, kind: 'absent' })}
                       className="font-semibold text-red-600 underline decoration-dotted underline-offset-2 hover:decoration-solid dark:text-red-400"
-                      title="Show which days"
-                    >
-                      {n}
-                    </button>
-                  );
-                },
-              },
-              {
-                key: 'total_days_leave',
-                header: 'Leave',
-                render: r => {
-                  const row = r as SummaryRow;
-                  const n = Number(row.total_days_leave);
-                  if (!n) return <span className="text-slate-400">0</span>;
-                  return (
-                    <button
-                      onClick={() => setDrillDown({ employeeId: row.id, employeeName: row.name, kind: 'leave' })}
-                      className="font-semibold text-blue-600 underline decoration-dotted underline-offset-2 hover:decoration-solid dark:text-blue-400"
                       title="Show which days"
                     >
                       {n}
