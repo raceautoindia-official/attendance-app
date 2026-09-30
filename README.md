@@ -122,6 +122,25 @@ Create a `.env.local` file in the project root. All variables marked **Required*
 | `SMTP_USER` | | SMTP username / email | `alerts@yourdomain.com` |
 | `SMTP_PASS` | | SMTP password / app-password | `smtp-app-password` |
 | `ADMIN_EMAIL` | | Recipient for late/absent alerts | `admin@yourdomain.com` |
+| `OPENAI_API_KEY` | | Enables the reporting assistant. Without it the app runs normally and `/api/chat*` returns 503 | `sk-…` |
+| `OPENAI_MODEL` | | Model for the assistant (default: `gpt-5.4-mini`) | `gpt-5.4-mini` |
+| `CHAT_RATE_MAX` | | Assistant questions allowed per window (default: `30`) | `30` |
+| `CHAT_RATE_WINDOW_MINUTES` | | Assistant rate-limit window in minutes (default: `10`) | `10` |
+
+> **Reporting assistant (super admins only).** A read-only chat panel that answers
+> questions about attendance, hours, leave and shifts, and can export any report as
+> Excel, CSV or PDF. It reaches the database through a fixed set of SELECT-only
+> functions in `lib/chat/` — there is no raw-SQL path, and bank, PAN and Aadhaar
+> columns are unreachable by design. Verify a deployment with:
+>
+> ```bash
+> npx tsx --env-file=.env.local scripts/verify-chat-tools.ts   # data layer, no API calls
+> npx tsx --env-file=.env.local scripts/verify-chat-export.ts  # file generation, no API calls
+> npx tsx --env-file=.env.local scripts/test-chat-live.ts gpt-5.4-mini  # behaviour — spends credits
+> ```
+>
+> If the assistant's replies stream in one lump rather than word by word, Nginx is
+> buffering `/api/chat/stream`; add `proxy_buffering off;` for that path.
 
 ### Generating secrets
 

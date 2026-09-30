@@ -3,6 +3,7 @@
 import { usePathname } from 'next/navigation';
 import Sidebar from './Sidebar';
 import TopBar from './TopBar';
+import ChatPanel from '@/components/chat/ChatPanel';
 
 const TITLE: Record<string, string> = {
   '/overview': 'Overview',
@@ -33,6 +34,8 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           {children}
         </main>
       </div>
+      {/* Renders nothing unless the signed-in user is a super_admin. */}
+      <ChatPanel />
     </div>
   );
 }
