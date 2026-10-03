@@ -3,6 +3,7 @@ import { query, queryOne } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import { formatInTimeZone } from 'date-fns-tz';
 import { TIMEZONE } from '@/lib/constants';
+import { toYmd } from '@/lib/date';
 import {
   creditedMinutes,
   hasOnDutyColumn,
@@ -234,7 +235,7 @@ export async function GET(request: NextRequest) {
 
   for (const row of rows) {
     // work_date is always a string ("YYYY-MM-DD") from the DB
-    const workDate = String(row.work_date).slice(0, 10);
+    const workDate = toYmd(row.work_date);
 
     const clockIn = row.clock_in_utc
       ? formatInTimeZone(new Date(row.clock_in_utc as unknown as string), TIMEZONE, 'yyyy-MM-dd HH:mm:ss')

@@ -3,6 +3,7 @@ import { query, queryOne } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import { formatInTimeZone } from 'date-fns-tz';
 import { TIMEZONE } from '@/lib/constants';
+import { toYmd } from '@/lib/date';
 import { jsPDF } from 'jspdf';
 import { autoTable } from 'jspdf-autotable';
 import {
@@ -44,6 +45,16 @@ interface EmployeeTotals {
   late: number;
   absent: number;
   leave: number;
+  /**
+   * Company-wide holidays, and weekly offs, counted separately from leave.
+   *
+   * attendance.status has a single 'holiday' value and lib/markSundayHolidays.ts
+   * writes it for every Sunday, so a Sunday and Diwali are stored identically.
+   * They are told apart by whether the date has a company-wide holiday row in
+   * leave_records - the same source lib/workingDays.ts uses.
+   */
+  holiday: number;
+  weekOff: number;
   minutes: number;
   /** Approved permission minutes in the period */
   permissionMinutes: number;
@@ -143,13 +154,18 @@ export async function GET(request: NextRequest) {
   ]);
 
   // Build per-employee summary
+  // Fetched once, before the tally, because the loop needs it to tell a
+  // declared holiday from a weekly off.
+  const holidaysList = await companyHolidays(fromDate, toDate);
+  const holidaySet = new Set(holidaysList);
+
   const summaryMap = new Map<number, EmployeeTotals>();
   for (const row of rows) {
     if (!summaryMap.has(row.employee_id)) {
       summaryMap.set(row.employee_id, {
         name: row.employee_name,
         emp_id: row.employee_emp_id,
-        present: 0, late: 0, absent: 0, leave: 0, minutes: 0,
+        present: 0, late: 0, absent: 0, leave: 0, holiday: 0, weekOff: 0, minutes: 0,
         permissionMinutes: 0, creditedMinutes: 0,
         workMode: row.work_mode === 'off_site' ? 'Off-site' : 'On-site',
         updateDays: new Set<string>(),
@@ -159,7 +175,14 @@ export async function GET(request: NextRequest) {
     if (row.status === 'present') s.present++;
     else if (row.status === 'late') s.late++;
     else if (row.status === 'absent') s.absent++;
-    else if (row.status === 'leave' || row.status === 'holiday') s.leave++;
+    else if (row.status === 'leave') s.leave++;
+    else if (row.status === 'holiday') {
+      // A declared holiday has a company-wide leave_records row; a Sunday
+      // written by the Sunday sweep does not. Counting both as leave made
+      // every Sunday look like a leave day for every employee.
+      if (holidaySet.has(toYmd(row.work_date))) s.holiday++;
+      else s.weekOff++;
+    }
     if (row.total_minutes) s.minutes += row.total_minutes;
     // Days they wrote something about their work. A Set because an employee can
     // post more than one update for a date and it is still one day.
@@ -202,7 +225,6 @@ export async function GET(request: NextRequest) {
   );
   const scopeShifts = await shiftsForEmployees(scopeEmployees.map(e => e.id), toDate);
   const dayCounts = weekdayCounts(fromDate, toDate);
-  const holidayDates = await companyHolidays(fromDate, toDate);
   let expectedTotal = 0;
   let employeesWithShift = 0;
   for (const e of scopeEmployees) {
@@ -210,7 +232,7 @@ export async function GET(request: NextRequest) {
     if (totalShiftMinutes(shifts) == null) continue;
     employeesWithShift++;
     // Weekday by weekday — see expectedMinutesFor().
-    expectedTotal += expectedMinutesFor(shifts!, dayCounts, holidayDates);
+    expectedTotal += expectedMinutesFor(shifts!, dayCounts, holidaysList);
   }
   const employeeCount = summaryMap.size;
   const workedTotal = Array.from(summaryMap.values()).reduce((s, e) => s + e.minutes, 0);
@@ -272,6 +294,8 @@ export async function GET(request: NextRequest) {
     String(s.late),
     String(s.absent),
     String(s.leave),
+    String(s.holiday),
+    String(s.weekOff),
     hm(s.minutes),
     hm(s.permissionMinutes),
     hm(s.creditedMinutes),
@@ -281,7 +305,7 @@ export async function GET(request: NextRequest) {
 
   autoTable(doc, {
     head: [[
-      'Employee', 'ID', 'Present', 'Late', 'Absent', 'Leave',
+      'Employee', 'ID', 'Present', 'Late', 'Absent', 'Leave', 'Holiday', 'Week Off',
       'Worked Hours', 'Permission', 'Credited Hours', 'Work Status', 'Updates',
     ]],
     body: summaryBody,
@@ -294,9 +318,11 @@ export async function GET(request: NextRequest) {
       3: { halign: 'center' },
       4: { halign: 'center' },
       5: { halign: 'center' },
-      6: { halign: 'right' },
-      7: { halign: 'right' },
+      6: { halign: 'center' },
+      7: { halign: 'center' },
       8: { halign: 'right' },
+      9: { halign: 'right' },
+      10: { halign: 'right' },
     },
   });
 
@@ -318,7 +344,7 @@ export async function GET(request: NextRequest) {
   doc.text('Detail', 14, detailStartY - 4);
 
   const detailBody = rows.map(row => {
-    const workDate = String(row.work_date).slice(0, 10);
+    const workDate = toYmd(row.work_date);
 
     const clockIn = row.clock_in_utc
       ? formatInTimeZone(new Date(row.clock_in_utc as unknown as string), TIMEZONE, 'HH:mm')
