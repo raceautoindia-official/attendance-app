@@ -51,6 +51,38 @@ FROM INFORMATION_SCHEMA.COLUMNS
 WHERE TABLE_SCHEMA = DATABASE()
   AND TABLE_NAME = 'employees' AND COLUMN_NAME = 'live_tracking_enabled';
 
+SELECT
+  '2026-05-28_add_webauthn_challenges_table' AS migration,
+  CASE WHEN COUNT(*) = 1 THEN 'APPLIED' ELSE 'MISSING' END AS result,
+  CONCAT(COUNT(*), '/1 tables') AS detail
+FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'webauthn_challenges';
+
+-- Easy to miss: this only widens a column, so nothing errors when it has not
+-- run. But while attendance.auth_method stays NOT NULL, rows inserted by
+-- markAbsentees / markSundayHolidays (which omit the column) silently receive
+-- the FIRST enum value, 'webauthn' - so absent and holiday records claim a
+-- passkey authentication that never happened.
+SELECT
+  '2026-06-03_attendance_auth_method_nullable' AS migration,
+  CASE WHEN IS_NULLABLE = 'YES' THEN 'APPLIED' ELSE 'MISSING' END AS result,
+  CONCAT('auth_method IS_NULLABLE = ', IS_NULLABLE,
+         ' (must be YES, else system-generated rows are mislabelled webauthn)') AS detail
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA = DATABASE()
+  AND TABLE_NAME = 'attendance'
+  AND COLUMN_NAME = 'auth_method';
+
+-- How many rows the gap above has already mislabelled.
+SELECT
+  'INFO rows mislabelled auth_method' AS check_name,
+  CONCAT(COUNT(*), ' row(s)') AS result,
+  '2026-10-03_fix_auth_method_on_generated_rows clears these' AS detail
+FROM attendance
+WHERE clock_in_utc IS NULL
+  AND auth_method IS NOT NULL
+  AND status IN ('absent', 'holiday', 'leave');
+
 -- ---------------------------------------------------------------------------
 -- The four that ship with the reporting assistant's prerequisites
 -- ---------------------------------------------------------------------------

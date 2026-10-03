@@ -1,4 +1,6 @@
-USE attendance;
+-- (no USE statement: the target database is selected by the caller,
+--  e.g. `mysql -u <user> -p <database> < this-file.sql`. A hardcoded
+--  USE breaks any deployment whose database is named differently.)
 
 CREATE TABLE IF NOT EXISTS login_photo_proofs (
   id            BIGINT       NOT NULL AUTO_INCREMENT,
