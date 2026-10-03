@@ -4,6 +4,14 @@ import { requireAuth } from '@/lib/auth';
 import { formatInTimeZone } from 'date-fns-tz';
 import { TIMEZONE } from '@/lib/constants';
 import type { AttendanceRecord } from '@/lib/types';
+import {
+  fetchCompanyHolidays,
+  fetchLocationHolidays,
+  holidaysForEmployee,
+  classifyAttendanceRow,
+  DAY_KIND_LABEL,
+  toYmd,
+} from '@/lib/reportClassification';
 
 interface AttendanceRow extends AttendanceRecord {
   employee_name: string;
@@ -130,6 +138,7 @@ export async function GET(request: NextRequest) {
     'Clock Out (IST)',
     'Hours Worked',
     'Status',
+    'Day Type',
     'Auth Method',
     'Geofence Status',
   ];
@@ -139,17 +148,32 @@ export async function GET(request: NextRequest) {
     `From Date,${escapeCsvField(fromDate)}`,
     `To Date,${escapeCsvField(toDate)}`,
     `Total Days (Selected Timeline),${escapeCsvField(Number(periodRow?.total_days ?? 0))}`,
-    `Weekend Days,${escapeCsvField(Number(periodRow?.weekend_days ?? 0))}`,
-    `Festive Holiday Days,${escapeCsvField(Number(periodRow?.festive_holidays ?? 0))}`,
+    `Weekend/Week-Off Days,${escapeCsvField(Number(periodRow?.weekend_days ?? 0))}`,
+    `Govt/Company Holiday Days,${escapeCsvField(Number(periodRow?.festive_holidays ?? 0))}`,
     `Working Days (Excl. Weekend/Festive),${escapeCsvField(Number(periodRow?.working_days ?? 0))}`,
     `Leave Days (Selected Timeline),${escapeCsvField(Number(leaveRow?.leave_days ?? 0))}`,
     '',
     HEADERS.join(','),
   ];
 
+  // Distinguishes a weekly off from a government holiday — both are stored as
+  // attendance.status = 'holiday'. See lib/reportClassification.ts.
+  const [companyHolidays, locationHolidays] = await Promise.all([
+    fetchCompanyHolidays(fromDate, toDate),
+    fetchLocationHolidays(fromDate, toDate),
+  ]);
+
   for (const row of rows) {
-    // work_date is always a string ("YYYY-MM-DD") from the DB
-    const workDate = String(row.work_date).slice(0, 10);
+    // mysql2 returns a JS Date for a DATE column (dateStrings: false), so the
+    // previous String(...).slice(0,10) rendered "Sat May 23" — no year.
+    const workDate = toYmd(row.work_date);
+    const dayType = DAY_KIND_LABEL[
+      classifyAttendanceRow(
+        row.status,
+        row.work_date,
+        holidaysForEmployee(companyHolidays, locationHolidays, row.employee_id),
+      )
+    ];
 
     const clockIn = row.clock_in_utc
       ? formatInTimeZone(new Date(row.clock_in_utc as unknown as string), TIMEZONE, 'yyyy-MM-dd HH:mm:ss')
@@ -173,6 +197,7 @@ export async function GET(request: NextRequest) {
         escapeCsvField(clockOut),
         escapeCsvField(hoursWorked),
         escapeCsvField(row.status),
+        escapeCsvField(dayType),
         escapeCsvField(row.auth_method ?? ''),
         escapeCsvField(row.geofence_status ?? ''),
       ].join(','),

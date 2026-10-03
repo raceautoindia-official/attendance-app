@@ -1,0 +1,216 @@
+{
+  "country": "IN",
+  "year": 2026,
+  "_about": [
+    "CANDIDATE holidays only. Importing this file does NOT make any day a holiday.",
+    "An admin must observe each one per location before it affects attendance.",
+    "",
+    "needs_verification = false  — the date is fixed by the Gregorian calendar, or",
+    "   is solar-reckoned and effectively fixed (Pongal / Makar Sankranti sit on",
+    "   14 January and drift by about a day per century). Safe to observe as-is.",
+    "",
+    "needs_verification = true   — the festival follows a lunar calendar (Diwali,",
+    "   Holi, the two Eids, Dussehra, Onam ...). The date here is a PLACEHOLDER and",
+    "   may be wrong. The API refuses to observe these until an admin supplies the",
+    "   correct date, because a wrong holiday date rewrites attendance for every",
+    "   employee in scope.",
+    "",
+    "state_code is an ISO 3166-2:IN suffix matched against locations.state_code.",
+    "null = applies nationally. 'TN' = Tamil Nadu (Chennai)."
+  ],
+  "holidays": [
+    {
+      "date": "2026-01-01",
+      "name": "New Year's Day",
+      "type": "regional",
+      "state_code": null,
+      "needs_verification": false,
+      "notes": "Fixed date. Not a central gazetted holiday but observed as a corporate holiday by most companies."
+    },
+    {
+      "date": "2026-01-14",
+      "name": "Pongal (Thai Pongal)",
+      "type": "regional",
+      "state_code": "TN",
+      "needs_verification": false,
+      "notes": "Solar calendar — 14 January. Tamil Nadu's principal harvest festival; most Chennai employers close 14-16 January."
+    },
+    {
+      "date": "2026-01-14",
+      "name": "Makar Sankranti",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": false,
+      "notes": "Solar calendar — 14 January. The same day as Pongal."
+    },
+    {
+      "date": "2026-01-15",
+      "name": "Thiruvalluvar Day",
+      "type": "regional",
+      "state_code": "TN",
+      "needs_verification": false,
+      "notes": "Tamil Nadu government holiday, day after Pongal."
+    },
+    {
+      "date": "2026-01-16",
+      "name": "Uzhavar Thirunal (Farmers' Day)",
+      "type": "regional",
+      "state_code": "TN",
+      "needs_verification": false,
+      "notes": "Tamil Nadu government holiday, third day of the Pongal cluster."
+    },
+    {
+      "date": "2026-01-26",
+      "name": "Republic Day",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": false,
+      "notes": "Gazetted. Fixed date."
+    },
+    {
+      "date": "2026-04-14",
+      "name": "Tamil New Year (Puthandu)",
+      "type": "regional",
+      "state_code": "TN",
+      "needs_verification": false,
+      "notes": "Solar calendar — 14 April. Tamil Nadu government holiday."
+    },
+    {
+      "date": "2026-04-14",
+      "name": "Dr. Ambedkar Jayanti",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": false,
+      "notes": "Fixed date. Public holiday in most states, including Tamil Nadu."
+    },
+    {
+      "date": "2026-05-01",
+      "name": "May Day / Labour Day",
+      "type": "regional",
+      "state_code": null,
+      "needs_verification": false,
+      "notes": "Fixed date. A state holiday in Tamil Nadu, Kerala, Karnataka, Maharashtra, West Bengal and others."
+    },
+    {
+      "date": "2026-08-15",
+      "name": "Independence Day",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": false,
+      "notes": "Gazetted. Fixed date."
+    },
+    {
+      "date": "2026-10-02",
+      "name": "Gandhi Jayanti",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": false,
+      "notes": "Gazetted. Fixed date."
+    },
+    {
+      "date": "2026-12-25",
+      "name": "Christmas Day",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": false,
+      "notes": "Gazetted. Fixed date."
+    },
+
+    {
+      "date": "2026-03-04",
+      "name": "Holi",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": true,
+      "notes": "VERIFY — lunar calendar. Not a Tamil Nadu government holiday."
+    },
+    {
+      "date": "2026-03-20",
+      "name": "Id-ul-Fitr (Ramzan Id)",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": true,
+      "notes": "VERIFY — depends on moon sighting and can shift by a day at short notice."
+    },
+    {
+      "date": "2026-04-03",
+      "name": "Good Friday",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": true,
+      "notes": "VERIFY — moves with Easter. A Tamil Nadu government holiday."
+    },
+    {
+      "date": "2026-05-27",
+      "name": "Bakrid (Id-ul-Zuha)",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": true,
+      "notes": "VERIFY — depends on moon sighting."
+    },
+    {
+      "date": "2026-06-26",
+      "name": "Muharram",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": true,
+      "notes": "VERIFY — Islamic calendar."
+    },
+    {
+      "date": "2026-09-04",
+      "name": "Janmashtami",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": true,
+      "notes": "VERIFY — lunar calendar."
+    },
+    {
+      "date": "2026-09-14",
+      "name": "Ganesh Chaturthi (Vinayaka Chaturthi)",
+      "type": "regional",
+      "state_code": null,
+      "needs_verification": true,
+      "notes": "VERIFY — lunar calendar. Observed in Tamil Nadu, Maharashtra, Karnataka and Goa."
+    },
+    {
+      "date": "2026-08-26",
+      "name": "Onam",
+      "type": "regional",
+      "state_code": "KL",
+      "needs_verification": true,
+      "notes": "VERIFY — Malayalam calendar. Kerala employers often close several days."
+    },
+    {
+      "date": "2026-10-19",
+      "name": "Ayudha Puja",
+      "type": "regional",
+      "state_code": "TN",
+      "needs_verification": true,
+      "notes": "VERIFY — lunar calendar. Tamil Nadu government holiday, day before Vijaya Dashami."
+    },
+    {
+      "date": "2026-10-20",
+      "name": "Vijaya Dashami (Dussehra)",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": true,
+      "notes": "VERIFY — lunar calendar."
+    },
+    {
+      "date": "2026-11-08",
+      "name": "Deepavali (Diwali)",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": true,
+      "notes": "VERIFY — lunar calendar. Many employers close two or more days."
+    },
+    {
+      "date": "2026-11-24",
+      "name": "Guru Nanak Jayanti",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": true,
+      "notes": "VERIFY — lunar calendar. Not a Tamil Nadu government holiday."
+    }
+  ]
+}

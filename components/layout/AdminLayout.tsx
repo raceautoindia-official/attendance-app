@@ -11,6 +11,7 @@ const TITLE: Record<string, string> = {
   '/attendance': 'Attendance',
   '/schedules': 'Schedules',
   '/leaves': 'Leave Management',
+  '/holidays': 'Holiday Calendar',
   '/locations': 'Locations',
   '/reports': 'Reports',
 };

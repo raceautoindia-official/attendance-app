@@ -120,6 +120,45 @@ FROM (
         AND SEQ_IN_INDEX = 1) AS total
 ) t;
 
+SELECT
+  '2026-10-03_holiday_calendar' AS migration,
+  CASE WHEN total = 4 THEN 'APPLIED'
+       WHEN total = 0 THEN 'MISSING'
+       ELSE 'PARTIAL - INSPECT BEFORE RUNNING' END AS result,
+  CONCAT(total, '/4 artifacts (2 tables + locations.state_code + leave_records.location_id)') AS detail
+FROM (
+  SELECT
+    (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME IN ('holiday_calendar','holiday_observances'))
+    +
+    (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'locations'
+        AND COLUMN_NAME = 'state_code')
+    +
+    (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'leave_records'
+        AND COLUMN_NAME = 'location_id') AS total
+) t;
+
+-- The NULL-safe unique keys are what make the holiday import idempotent and stop
+-- duplicate all-locations decisions. A plain UNIQUE on the nullable column does
+-- NOT dedupe, so verify both generated columns exist.
+SELECT
+  'holiday calendar NULL-safe unique keys' AS check_name,
+  CASE WHEN total = 2 THEN 'OK' ELSE 'MISSING - re-import will duplicate rows' END AS result,
+  CONCAT(total, '/2 generated key columns') AS detail
+FROM (
+  SELECT
+    (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'holiday_calendar'
+        AND COLUMN_NAME = 'state_key')
+    +
+    (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'holiday_observances'
+        AND COLUMN_NAME = 'location_key') AS total
+) t;
+
 -- ---------------------------------------------------------------------------
 -- Things worth eyeballing before a deploy
 -- ---------------------------------------------------------------------------

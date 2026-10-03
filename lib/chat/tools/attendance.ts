@@ -24,6 +24,11 @@ import {
   type DateRange,
   type ToolResult,
 } from '../types';
+import {
+  fetchCompanyHolidays,
+  classifyAttendanceRow,
+  DAY_KIND_LABEL,
+} from '@/lib/reportClassification';
 
 /** Filters shared by the group-level tools. */
 export interface ScopeArgs extends RangeInput {
@@ -209,6 +214,12 @@ export async function getAttendanceSummary(
 export interface AttendanceDetailRow {
   work_date: string;
   status: string;
+  /**
+   * Human label distinguishing a weekly off from a government holiday — both
+   * are stored as status 'holiday'. Without this the assistant reported a
+   * Sunday as a "holiday", matching the bug the reports had.
+   */
+  day_type: string;
   clock_in_ist: string;
   clock_out_ist: string;
   minutes_worked: number | null;
@@ -227,6 +238,7 @@ export async function getAttendanceDetail(
   requireSuperAdmin(ctx);
 
   const range = resolveRange(args);
+  const companyHolidays = await fetchCompanyHolidays(range.from, range.to);
 
   const rows = await query<{
     work_date: Date | string;
@@ -254,6 +266,9 @@ export async function getAttendanceDetail(
     rows: rows.map(r => ({
       work_date: toYmdString(r.work_date),
       status: r.status,
+      day_type: DAY_KIND_LABEL[
+        classifyAttendanceRow(r.status, r.work_date, companyHolidays)
+      ],
       clock_in_ist: toIstTime(r.clock_in_utc),
       clock_out_ist: toIstTime(r.clock_out_utc),
       minutes_worked: r.total_minutes == null ? null : Number(r.total_minutes),
@@ -271,6 +286,8 @@ export interface DailySnapshotRow {
   name: string;
   department: string | null;
   status: string;
+  /** Week Off vs Holiday — both stored as status 'holiday'. */
+  day_type: string;
   clock_in_ist: string;
   clock_out_ist: string;
   hours_display: string;
@@ -294,6 +311,7 @@ export async function getDailySnapshot(
       : { preset: 'today' },
   );
   const scope = employeeScope({ department: args.department });
+  const companyHolidays = await fetchCompanyHolidays(range.from, range.to);
 
   const rows = await query<{
     emp_id: string;
@@ -318,8 +336,14 @@ export async function getDailySnapshot(
   const totals: Record<string, number> = {};
   let noRecord = 0;
   for (const r of rows) {
-    if (!r.status) noRecord += 1;
-    else totals[r.status] = (totals[r.status] ?? 0) + 1;
+    if (!r.status) {
+      noRecord += 1;
+      continue;
+    }
+    // Key the totals by day KIND, not raw status, so "3 on holiday" can never
+    // actually mean "3 on their weekly off".
+    const kind = classifyAttendanceRow(r.status, range.from, companyHolidays);
+    totals[kind] = (totals[kind] ?? 0) + 1;
   }
 
   return {
@@ -336,6 +360,9 @@ export async function getDailySnapshot(
       name: r.name,
       department: r.department,
       status: r.status ?? 'no_record',
+      day_type: r.status
+        ? DAY_KIND_LABEL[classifyAttendanceRow(r.status, range.from, companyHolidays)]
+        : 'No record',
       clock_in_ist: toIstTime(r.clock_in_utc),
       clock_out_ist: toIstTime(r.clock_out_utc),
       hours_display: minutesToHours(r.total_minutes),

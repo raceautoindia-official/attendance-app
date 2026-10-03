@@ -6,19 +6,26 @@ import { TIMEZONE } from '@/lib/constants';
 import { jsPDF } from 'jspdf';
 import { autoTable } from 'jspdf-autotable';
 import type { AttendanceRecord } from '@/lib/types';
+import {
+  fetchCompanyHolidays,
+  fetchLocationHolidays,
+  holidaysForEmployee,
+  fetchPersonalLeaveDates,
+  classifyAttendanceRow,
+  DAY_KIND_LABEL,
+  emptyTotals,
+  toYmd,
+  type DayKindTotals,
+} from '@/lib/reportClassification';
 
 interface AttendanceRow extends AttendanceRecord {
   employee_name: string;
   employee_emp_id: string;
 }
 
-interface EmployeeTotals {
+interface EmployeeTotals extends DayKindTotals {
   name: string;
   emp_id: string;
-  present: number;
-  late: number;
-  absent: number;
-  leave: number;
   minutes: number;
 }
 
@@ -125,22 +132,61 @@ export async function GET(request: NextRequest) {
     ),
   ]);
 
-  // Build per-employee summary
+  // Build per-employee summary.
+  //
+  // Previously this counted `status === 'leave' || status === 'holiday'` as one
+  // "Leave" figure, so every Sunday (written as 'holiday' by the Sunday sweep)
+  // was reported as a leave day, while approved leave that had no attendance
+  // row was missed entirely. Classification now goes through
+  // lib/reportClassification.ts, and leave is read from leave_records.
+  const [companyHolidays, locationHolidays, personalLeave] = await Promise.all([
+    fetchCompanyHolidays(fromDate, toDate),
+    fetchLocationHolidays(fromDate, toDate),
+    fetchPersonalLeaveDates(fromDate, toDate),
+  ]);
+
   const summaryMap = new Map<number, EmployeeTotals>();
+  const leaveCounted = new Map<number, Set<string>>();
+
   for (const row of rows) {
     if (!summaryMap.has(row.employee_id)) {
       summaryMap.set(row.employee_id, {
+        ...emptyTotals(),
         name: row.employee_name,
         emp_id: row.employee_emp_id,
-        present: 0, late: 0, absent: 0, leave: 0, minutes: 0,
+        minutes: 0,
       });
+      leaveCounted.set(row.employee_id, new Set());
     }
     const s = summaryMap.get(row.employee_id)!;
-    if (row.status === 'present') s.present++;
-    else if (row.status === 'late') s.late++;
-    else if (row.status === 'absent') s.absent++;
-    else if (row.status === 'leave' || row.status === 'holiday') s.leave++;
+    const kind = classifyAttendanceRow(
+      row.status,
+      row.work_date,
+      holidaysForEmployee(companyHolidays, locationHolidays, row.employee_id),
+    );
+    s[kind] += 1;
+    if (kind === 'leave') leaveCounted.get(row.employee_id)!.add(toYmd(row.work_date));
     if (row.total_minutes) s.minutes += row.total_minutes;
+  }
+
+  // Fold in approved leave that left no attendance row, and make sure an
+  // employee who only has leave in this period still appears in the report.
+  for (const [employeeId, dates] of personalLeave) {
+    let s = summaryMap.get(employeeId);
+    if (!s) {
+      const named = rows.find(r => r.employee_id === employeeId);
+      if (!named) continue; // outside this caller's scope — skip
+      s = {
+        ...emptyTotals(),
+        name: named.employee_name,
+        emp_id: named.employee_emp_id,
+        minutes: 0,
+      };
+      summaryMap.set(employeeId, s);
+      leaveCounted.set(employeeId, new Set());
+    }
+    const already = leaveCounted.get(employeeId) ?? new Set<string>();
+    for (const d of dates) if (!already.has(d)) s.leave += 1;
   }
 
   // ---------------------------------------------------------------------------
@@ -161,7 +207,7 @@ export async function GET(request: NextRequest) {
   doc.text(`Total Days: ${Number(periodRow?.total_days ?? 0)}`, 95, 23);
   doc.text(`Working Days: ${Number(periodRow?.working_days ?? 0)}`, 95, 29);
   doc.text(`Leave Days: ${Number(leaveRow?.leave_days ?? 0)}`, 150, 23);
-  doc.text(`Festive Holidays: ${Number(periodRow?.festive_holidays ?? 0)}`, 150, 29);
+  doc.text(`Govt/Company Holidays: ${Number(periodRow?.festive_holidays ?? 0)}`, 150, 29);
 
   // Summary table
   doc.setFontSize(13);
@@ -175,11 +221,15 @@ export async function GET(request: NextRequest) {
     String(s.late),
     String(s.absent),
     String(s.leave),
+    String(s.holiday),
+    String(s.week_off),
     `${Math.floor(s.minutes / 60)}h ${s.minutes % 60}m`,
   ]);
 
   autoTable(doc, {
-    head: [['Employee', 'ID', 'Present', 'Late', 'Absent', 'Leave', 'Total Hours']],
+    head: [[
+      'Employee', 'ID', 'Present', 'Late', 'Absent', 'Leave', 'Holiday', 'Week Off', 'Total Hours',
+    ]],
     body: summaryBody,
     startY: 43,
     theme: 'striped',
@@ -190,7 +240,9 @@ export async function GET(request: NextRequest) {
       3: { halign: 'center' },
       4: { halign: 'center' },
       5: { halign: 'center' },
-      6: { halign: 'right' },
+      6: { halign: 'center' },
+      7: { halign: 'center' },
+      8: { halign: 'right' },
     },
   });
 
@@ -212,7 +264,16 @@ export async function GET(request: NextRequest) {
   doc.text('Detail', 14, detailStartY - 4);
 
   const detailBody = rows.map(row => {
-    const workDate = String(row.work_date).slice(0, 10);
+    // toYmd handles the JS Date mysql2 returns for a DATE column. The previous
+    // String(...).slice(0,10) produced "Sat May 23" — no year, no month number.
+    const workDate = toYmd(row.work_date);
+    const dayType = DAY_KIND_LABEL[
+      classifyAttendanceRow(
+        row.status,
+        row.work_date,
+        holidaysForEmployee(companyHolidays, locationHolidays, row.employee_id),
+      )
+    ];
 
     const clockIn = row.clock_in_utc
       ? formatInTimeZone(new Date(row.clock_in_utc as unknown as string), TIMEZONE, 'HH:mm')
@@ -233,13 +294,16 @@ export async function GET(request: NextRequest) {
       clockOut,
       hours,
       row.status,
+      dayType,
       row.auth_method ?? '—',
       row.geofence_status ?? '—',
     ];
   });
 
   autoTable(doc, {
-    head: [['Date', 'Employee', 'ID', 'In (IST)', 'Out (IST)', 'Hours', 'Status', 'Auth', 'Geofence']],
+    head: [[
+      'Date', 'Employee', 'ID', 'In (IST)', 'Out (IST)', 'Hours', 'Status', 'Day Type', 'Auth', 'Geofence',
+    ]],
     body: detailBody,
     startY: detailStartY,
     theme: 'striped',

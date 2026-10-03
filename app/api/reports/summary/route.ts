@@ -12,6 +12,16 @@ interface EmployeeSummary {
   total_days_late: number;
   total_days_absent: number;
   total_days_leave: number;
+  /**
+   * Government / company-wide holidays and weekly offs, reported separately.
+   *
+   * Both are stored as attendance.status = 'holiday' (the enum has no
+   * 'week_off'), so they are told apart by whether the date has a company-wide
+   * holiday row in leave_records — the same rule as lib/reportClassification.ts.
+   * Previously neither was reported here, while the PDF counted both as leave.
+   */
+  total_days_holiday: number;
+  total_days_week_off: number;
   total_minutes_worked: number;
   days_with_hours: number;
 }
@@ -98,6 +108,70 @@ export async function GET(request: NextRequest) {
             )
            THEN a.work_date
          END), 0)                                                                  AS total_days_leave,
+         (
+           COALESCE(SUM(CASE
+             WHEN a.status = 'holiday' AND EXISTS (
+               SELECT 1 FROM leave_records lrh
+                WHERE lrh.employee_id IS NULL
+                  AND lrh.leave_type = 'holiday'
+                  AND lrh.leave_date = a.work_date
+                  AND (
+                        lrh.location_id IS NULL
+                        OR EXISTS (
+                             SELECT 1 FROM employee_schedules es_lrh
+                              WHERE es_lrh.employee_id = e.id
+                                AND es_lrh.location_id = lrh.location_id
+                                AND es_lrh.effective_from <= lrh.leave_date
+                                AND (es_lrh.effective_to IS NULL
+                                     OR es_lrh.effective_to >= lrh.leave_date)
+                           )
+                      ))
+             THEN 1 ELSE 0 END), 0)
+           +
+           /* Company holidays that produced no attendance row at all. Granting
+              a holiday only UPDATEs existing rows and never inserts, so without
+              this term a government holiday is invisible per employee. Counting
+              only dates with NO row avoids double-counting the term above, and
+              a day the employee actually worked stays present/late. */
+           (SELECT COUNT(DISTINCT lrh2.leave_date)
+              FROM leave_records lrh2
+             WHERE lrh2.employee_id IS NULL
+               AND lrh2.leave_type = 'holiday'
+               AND lrh2.leave_date BETWEEN ? AND ?
+                  AND (
+                        lrh2.location_id IS NULL
+                        OR EXISTS (
+                             SELECT 1 FROM employee_schedules es_lrh2
+                              WHERE es_lrh2.employee_id = e.id
+                                AND es_lrh2.location_id = lrh2.location_id
+                                AND es_lrh2.effective_from <= lrh2.leave_date
+                                AND (es_lrh2.effective_to IS NULL
+                                     OR es_lrh2.effective_to >= lrh2.leave_date)
+                           )
+                      )
+               AND NOT EXISTS (
+                     SELECT 1 FROM attendance a2
+                      WHERE a2.employee_id = e.id
+                        AND a2.work_date = lrh2.leave_date))
+         )                                                                              AS total_days_holiday,
+         COALESCE(SUM(CASE
+           WHEN a.status = 'holiday' AND NOT EXISTS (
+             SELECT 1 FROM leave_records lrw
+              WHERE lrw.employee_id IS NULL
+                AND lrw.leave_type = 'holiday'
+                AND lrw.leave_date = a.work_date
+                  AND (
+                        lrw.location_id IS NULL
+                        OR EXISTS (
+                             SELECT 1 FROM employee_schedules es_lrw
+                              WHERE es_lrw.employee_id = e.id
+                                AND es_lrw.location_id = lrw.location_id
+                                AND es_lrw.effective_from <= lrw.leave_date
+                                AND (es_lrw.effective_to IS NULL
+                                     OR es_lrw.effective_to >= lrw.leave_date)
+                           )
+                      ))
+           THEN 1 ELSE 0 END), 0)                                                       AS total_days_week_off,
          COALESCE(SUM(a.total_minutes), 0)                                              AS total_minutes_worked,
          COUNT(CASE WHEN a.total_minutes IS NOT NULL THEN 1 END)                        AS days_with_hours
        FROM employees e
@@ -108,7 +182,7 @@ export async function GET(request: NextRequest) {
        GROUP BY e.id
        ORDER BY e.name ASC
        LIMIT ? OFFSET ?`,
-      [fromDate, toDate, fromDate, toDate, ...conditionParams, limit, offset],
+      [fromDate, toDate, fromDate, toDate, fromDate, toDate, ...conditionParams, limit, offset],
     ),
     queryOne<WorkingDaysRow>(
       `WITH RECURSIVE date_range AS (
@@ -180,7 +254,14 @@ export async function GET(request: NextRequest) {
   }>>({
     success: true,
     data: {
-      summary: rows,
+      // MySQL returns SUM() as a decimal string, so coerce the two fields added
+      // here to real numbers — the declared type says number. Pre-existing
+      // fields are left exactly as they were to avoid changing current output.
+      summary: rows.map(r => ({
+        ...r,
+        total_days_holiday: Number(r.total_days_holiday ?? 0),
+        total_days_week_off: Number(r.total_days_week_off ?? 0),
+      })),
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
       period: {
         from_date: fromDate,

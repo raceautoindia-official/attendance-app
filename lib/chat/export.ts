@@ -91,6 +91,7 @@ export const REPORTS: Record<string, ReportDef> = {
     columns: [
       { key: 'work_date', header: 'Date' },
       { key: 'status', header: 'Status' },
+      { key: 'day_type', header: 'Day Type' },
       { key: 'clock_in_ist', header: 'Clock in (IST)' },
       { key: 'clock_out_ist', header: 'Clock out (IST)' },
       { key: 'hours_display', header: 'Hours' },
@@ -116,6 +117,7 @@ export const REPORTS: Record<string, ReportDef> = {
       NAME,
       DEPT,
       { key: 'status', header: 'Status' },
+      { key: 'day_type', header: 'Day Type' },
       { key: 'clock_in_ist', header: 'Clock in (IST)' },
       { key: 'clock_out_ist', header: 'Clock out (IST)' },
       { key: 'hours_display', header: 'Hours' },

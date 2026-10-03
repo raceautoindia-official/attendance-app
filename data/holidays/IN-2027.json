@@ -1,0 +1,115 @@
+{
+  "country": "IN",
+  "year": 2027,
+  "_about": [
+    "CANDIDATE holidays only — importing this does NOT make any day a holiday.",
+    "",
+    "This file carries only holidays whose dates are fixed by the Gregorian",
+    "calendar or solar-reckoned (the Pongal cluster, Tamil New Year). Lunar",
+    "festivals — Diwali, Holi, the two Eids, Dussehra, Ayudha Puja, Onam — are",
+    "deliberately OMITTED for 2027 rather than guessed: their dates are published",
+    "closer to the year, and a wrong holiday date rewrites attendance for every",
+    "employee in scope.",
+    "",
+    "Add them on the admin Holiday Calendar page once the Tamil Nadu government",
+    "list for 2027 is published, or drop an updated IN-2027.json into this folder."
+  ],
+  "holidays": [
+    {
+      "date": "2027-01-01",
+      "name": "New Year's Day",
+      "type": "regional",
+      "state_code": null,
+      "needs_verification": false,
+      "notes": "Fixed date. Observed as a corporate holiday by most companies."
+    },
+    {
+      "date": "2027-01-14",
+      "name": "Pongal (Thai Pongal)",
+      "type": "regional",
+      "state_code": "TN",
+      "needs_verification": false,
+      "notes": "Solar calendar — 14 January. Most Chennai employers close 14-16 January."
+    },
+    {
+      "date": "2027-01-14",
+      "name": "Makar Sankranti",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": false,
+      "notes": "Solar calendar — 14 January. The same day as Pongal."
+    },
+    {
+      "date": "2027-01-15",
+      "name": "Thiruvalluvar Day",
+      "type": "regional",
+      "state_code": "TN",
+      "needs_verification": false,
+      "notes": "Tamil Nadu government holiday, day after Pongal."
+    },
+    {
+      "date": "2027-01-16",
+      "name": "Uzhavar Thirunal (Farmers' Day)",
+      "type": "regional",
+      "state_code": "TN",
+      "needs_verification": false,
+      "notes": "Tamil Nadu government holiday, third day of the Pongal cluster."
+    },
+    {
+      "date": "2027-01-26",
+      "name": "Republic Day",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": false,
+      "notes": "Gazetted. Fixed date."
+    },
+    {
+      "date": "2027-04-14",
+      "name": "Tamil New Year (Puthandu)",
+      "type": "regional",
+      "state_code": "TN",
+      "needs_verification": false,
+      "notes": "Solar calendar — 14 April. Tamil Nadu government holiday."
+    },
+    {
+      "date": "2027-04-14",
+      "name": "Dr. Ambedkar Jayanti",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": false,
+      "notes": "Fixed date. Public holiday in most states, including Tamil Nadu."
+    },
+    {
+      "date": "2027-05-01",
+      "name": "May Day / Labour Day",
+      "type": "regional",
+      "state_code": null,
+      "needs_verification": false,
+      "notes": "Fixed date. A state holiday in Tamil Nadu and many others."
+    },
+    {
+      "date": "2027-08-15",
+      "name": "Independence Day",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": false,
+      "notes": "Gazetted. Fixed date."
+    },
+    {
+      "date": "2027-10-02",
+      "name": "Gandhi Jayanti",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": false,
+      "notes": "Gazetted. Fixed date."
+    },
+    {
+      "date": "2027-12-25",
+      "name": "Christmas Day",
+      "type": "national",
+      "state_code": null,
+      "needs_verification": false,
+      "notes": "Gazetted. Fixed date."
+    }
+  ]
+}

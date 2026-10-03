@@ -19,6 +19,10 @@ interface SummaryRow {
   total_days_late: number;
   total_days_absent: number;
   total_days_leave: number;
+  /** Government / company-wide holidays, separate from weekly offs. */
+  total_days_holiday: number;
+  /** Weekly offs (Sundays). Stored as status 'holiday', told apart server-side. */
+  total_days_week_off: number;
   total_minutes_worked: number;
   days_with_hours: number;
 }
@@ -62,6 +66,8 @@ export default function ReportsPage() {
           total_days: number;
           total_working_days: number;
           total_leave_days: number;
+          festive_holidays: number;
+          weekend_days: number;
         };
       }>>;
     },
@@ -73,6 +79,8 @@ export default function ReportsPage() {
   const totalWorkingDays = data?.data?.period.total_working_days ?? 0;
   const totalDays = data?.data?.period.total_days ?? 0;
   const totalLeaveDays = data?.data?.period.total_leave_days ?? 0;
+  const totalHolidays = data?.data?.period.festive_holidays ?? 0;
+  const totalWeekendDays = data?.data?.period.weekend_days ?? 0;
 
   async function downloadFile(type: 'csv' | 'pdf') {
     setExporting(type);
@@ -160,7 +168,7 @@ export default function ReportsPage() {
       ) : (
         <>
           <Card>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
               <div className="flex items-center justify-between sm:block">
                 <p className="text-sm text-slate-600 dark:text-slate-300">Total Days</p>
                 <p className="text-xl font-semibold text-slate-900 dark:text-slate-100">{totalDays}</p>
@@ -173,9 +181,18 @@ export default function ReportsPage() {
                 <p className="text-sm text-slate-600 dark:text-slate-300">Leave Days</p>
                 <p className="text-xl font-semibold text-slate-900 dark:text-slate-100">{totalLeaveDays}</p>
               </div>
+              <div className="flex items-center justify-between sm:block">
+                <p className="text-sm text-slate-600 dark:text-slate-300">Holidays</p>
+                <p className="text-xl font-semibold text-indigo-600 dark:text-indigo-400">{totalHolidays}</p>
+              </div>
+              <div className="flex items-center justify-between sm:block">
+                <p className="text-sm text-slate-600 dark:text-slate-300">Week Offs</p>
+                <p className="text-xl font-semibold text-slate-500 dark:text-slate-400">{totalWeekendDays}</p>
+              </div>
             </div>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-              Excludes weekends and company festive/holiday leaves.
+              Working days exclude week offs and government/company holidays. Holidays
+              and week offs are counted separately — a week off is not a holiday.
             </p>
           </Card>
           <Table
@@ -218,6 +235,24 @@ export default function ReportsPage() {
                 ),
               },
               { key: 'total_days_leave', header: 'Leave', render: r => String((r as SummaryRow).total_days_leave) },
+              {
+                key: 'total_days_holiday',
+                header: 'Holiday',
+                render: r => (
+                  <span className="font-semibold text-indigo-600 dark:text-indigo-400">
+                    {(r as SummaryRow).total_days_holiday ?? 0}
+                  </span>
+                ),
+              },
+              {
+                key: 'total_days_week_off',
+                header: 'Week Off',
+                render: r => (
+                  <span className="text-slate-500 dark:text-slate-400">
+                    {(r as SummaryRow).total_days_week_off ?? 0}
+                  </span>
+                ),
+              },
               {
                 key: 'total_minutes_worked',
                 header: 'Total Hours',

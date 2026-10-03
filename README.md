@@ -26,6 +26,7 @@ A production-ready attendance management system built with **Next.js 15**, **MyS
 - **Geofence-based clock-in/out** — GPS coordinates checked against work location radius
 - **Shift management** — fixed, flexible, and rotating shift types
 - **Leave & holiday management** — per-employee or company-wide
+- **Holiday calendar** - bundled Indian government/corporate holiday lists per year, observed per work location by an admin (nothing auto-applies)
 - **Admin dashboard** — live overview, attendance editing, employee CRUD
 - **Report exports** — CSV and PDF with IST-formatted timestamps
 - **Dark mode** — full dark/light theme support
@@ -141,6 +142,49 @@ Create a `.env.local` file in the project root. All variables marked **Required*
 >
 > If the assistant's replies stream in one lump rather than word by word, Nginx is
 > buffering `/api/chat/stream`; add `proxy_buffering off;` for that path.
+
+## Holiday Calendar
+
+Admin page: **Holiday Calendar** (super admin only). Bundled yearly lists live in
+`data/holidays/IN-<year>.json`.
+
+**The model is "propose, don't apply."** Loading a year's list creates *candidates*
+in `holiday_calendar` and changes nothing an employee would notice. A day becomes
+a real holiday only when an admin observes it for a location, which writes a
+`leave_records` row and flips `attendance` for the employees in scope. Untick to
+reverse it.
+
+That separation is deliberate: observing a holiday rewrites attendance for
+everyone in scope, and attendance feeds payroll. There is no automatic sync from
+any external calendar, because no third-party feed knows which days *your*
+company closes, and a wrong date silently corrupts a day of payroll.
+
+**Per-location.** `leave_records.location_id` scopes a holiday to one work
+location; `NULL` means all locations, including employees with no location
+assigned. An employee is in scope when their schedule effective on that date
+points at the location, so a Chennai holiday leaves other sites untouched -
+`markAbsentees` honours the same rule.
+
+**Dates you must confirm.** Entries flagged `needs_verification` are lunar-calendar
+festivals (Diwali, Holi, the two Eids, Dussehra, Ayudha Puja, Onam). Their bundled
+date is a **placeholder** and the API refuses to observe them until an admin
+supplies the real date. Gregorian-fixed and solar holidays - Republic Day,
+Independence Day, Gandhi Jayanti, Christmas, New Year, May Day, Ambedkar Jayanti,
+and the Pongal cluster including Thiruvalluvar Day, Uzhavar Thirunal and Tamil New
+Year - ship ready to observe.
+
+**Updating a year's list.** Re-importing is idempotent. Rows still marked
+`source = 'bundled'` have their type, state, notes and verification flag refreshed
+from the file; rows an admin has edited (`source = 'manual'`) are never touched,
+and neither is any date. Candidates the file no longer lists are pruned - but only
+while they are unobserved, so a holiday in force is never removed from under its
+`leave_records` row.
+
+Verify a deployment (read-only on the calendar's own tables, no API calls):
+
+```bash
+npx tsx --env-file=.env.local scripts/verify-holidays.ts
+```
 
 ### Generating secrets
 
