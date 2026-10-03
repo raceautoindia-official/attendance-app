@@ -6,23 +6,18 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 # Which branch is production
 
-**Production runs `feature/workday-permissions-and-hardening`, not `master`.**
+**`master`. It is also GitHub's default branch and what the server deploys.**
+One branch, one truth — branch from it, deploy it, clone it.
 
-`master` is stale. At the time of writing it sat 110 commits behind this branch,
-and it does not contain device binding, permission and on-duty requests, password
-resets, token versioning, out-of-fence review, the Google Drive tracking
-archival, or the WorkLens rebrand.
+It was not always so. Production ran `feature/workday-permissions-and-hardening`
+while `master` sat 112 commits behind as the GitHub default, so a fresh clone
+gave you the stale branch and any PR targeted a branch nothing deployed. That
+cost a working session and stranded finished work on the wrong side. The two
+were merged into `master` on 2026-10-03; the feature branch is kept only as a
+short-lived fallback and should be deleted once `master` has proven stable.
 
-Consequences, before you touch anything:
-
-- **Never deploy `master`.** It would roll production back by months.
-- **Branch from this branch**, not from `master` or from a fresh clone's default.
-- A fresh `git clone` checks out the default branch, which may be `master`. Run
-  `git checkout feature/workday-permissions-and-hardening` first, and confirm with
-  `git log --oneline -1` that you are on a recent commit.
-- Before assuming a feature is missing, check this branch for it. Work has been
-  lost to re-implementing things that already existed here.
-
+If you ever find production on a branch other than `master` again, stop and fix
+that before writing code — not after.
 ## The database
 
 Production's database is named **`attendance_db`**. `.env` on the server is the
