@@ -14,21 +14,30 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Attendance App",
-  description: "Attendance management system",
+  title: "WorkLens",
+  description: "See Work. Measure Productivity. Manage Smarter.",
   manifest: "/manifest.webmanifest",
+  // The square MARK, not the wordmark: a favicon is 16-32px and the lettering
+  // is a smudge at that size.
+  //
+  // Three sizes, because browsers pick badly when given one: the SVG for
+  // anything that can scale it, a 96px PNG for tabs, and the .ico for the
+  // older Windows browsers that still ask for it by name. apple-touch-icon is
+  // its own file at 180px — iOS crops and rounds it itself, and handing it a
+  // 512px image makes a home-screen icon that looks soft.
   icons: {
     icon: [
-      { url: "/favicon.ico", sizes: "any" },
-      { url: "/icons/app-icon.svg", type: "image/svg+xml", sizes: "any" },
+      { url: "/brand/worklens-mark.svg", type: "image/svg+xml", sizes: "any" },
+      { url: "/brand/favicon-96x96.png", type: "image/png", sizes: "96x96" },
+      { url: "/favicon.ico", sizes: "48x48" },
     ],
-    apple: [{ url: "/icons/app-icon.svg", sizes: "180x180", type: "image/svg+xml" }],
+    apple: [{ url: "/brand/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
   },
-  applicationName: "Attendance App",
+  applicationName: "WorkLens",
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
-    title: "Attendance App",
+    title: "WorkLens",
   },
 };
 

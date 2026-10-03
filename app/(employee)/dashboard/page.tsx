@@ -11,6 +11,7 @@ import Table from '@/components/ui/Table';
 import Pagination from '@/components/ui/Pagination';
 import LeaveBalanceCard from '@/components/LeaveBalanceCard';
 import MyDetailsCard from '@/components/MyDetailsCard';
+import PermissionHoursCard from '@/components/PermissionHoursCard';
 import { useCurrentUser } from '@/lib/useCurrentUser';
 import { REQUIRED_SHIFT_HOURS } from '@/lib/constants';
 import type { AttendanceRecord, AttendanceStatus, ApiResponse } from '@/lib/types';
@@ -51,6 +52,8 @@ type TodayData = {
   } | null;
   /** Plant staff: may clock in again after completing a session today */
   multi_session?: boolean;
+  /** Approved permission minutes for today */
+  permission_minutes?: number;
 };
 
 type LiveTrackingStatusData = {
@@ -221,7 +224,9 @@ export default function DashboardPage() {
         const att: AttendanceRecord = action === 'clock-in'
           ? { ...cur, clock_in_utc: nowIso, clock_out_utc: null, status: 'present' }
           : { ...cur, clock_out_utc: nowIso };
-        return { success: true, data: { attendance: att, schedule: old?.data?.schedule ?? null } };
+        // Keep the rest of the payload (schedule, multi_session, permission
+        // minutes) — only the attendance row is being predicted here.
+        return { success: true, data: { ...(old?.data ?? {}), attendance: att } };
       });
       return { prev };
     },
@@ -231,7 +236,7 @@ export default function DashboardPage() {
       if (rec) {
         qc.setQueryData<ApiResponse<TodayData>>(['attendance', 'today'], old => ({
           success: true,
-          data: { attendance: rec, schedule: old?.data?.schedule ?? null },
+          data: { ...(old?.data ?? {}), attendance: rec },
         }));
       }
     },
@@ -380,6 +385,36 @@ export default function DashboardPage() {
     // sessions today on top of the current one.
     return Number(attendance?.banked_minutes ?? 0) + diff;
   }, [attendance?.clock_in_utc, attendance?.clock_out_utc, attendance?.total_minutes, attendance?.banked_minutes, now]);
+
+  // Approved permission hours for today, and what the shift asks for — needed
+  // to credit them (see lib/permissions.creditedMinutes for the rule).
+  const permissionMinutes = Number(todayData?.data?.permission_minutes ?? 0);
+  const requiredMinutes = useMemo(() => {
+    const shift = schedule?.shift;
+    if (shift?.required_hours != null && Number(shift.required_hours) > 0) {
+      return Math.round(Number(shift.required_hours) * 60);
+    }
+    if (shift?.start_time && shift?.end_time) {
+      const [sh, sm] = shift.start_time.split(':').map(Number);
+      const [eh, em] = shift.end_time.split(':').map(Number);
+      if (![sh, sm, eh, em].some(Number.isNaN)) {
+        const span = ((eh * 60 + em - (sh * 60 + sm)) % 1440 + 1440) % 1440;
+        if (span > 0) return span;
+      }
+    }
+    return REQUIRED_SHIFT_HOURS * 60;
+  }, [schedule?.shift]);
+
+  // Permission tops the day up to the shift length — never beyond it, so a day
+  // spent clocked in through the permission window isn't counted twice.
+  const liveCreditedMinutes = useMemo(() => {
+    if (liveWorkedMinutes == null) return null;
+    if (permissionMinutes <= 0) return liveWorkedMinutes;
+    return Math.min(
+      liveWorkedMinutes + permissionMinutes,
+      Math.max(liveWorkedMinutes, requiredMinutes),
+    );
+  }, [liveWorkedMinutes, permissionMinutes, requiredMinutes]);
 
   // Open a live-tracking session as soon as tracking should be active. The
   // ping loop below only records points into an existing session — without
@@ -557,7 +592,7 @@ export default function DashboardPage() {
               {[
                 { label: 'Clock In', value: toIST(attendance?.clock_in_utc) ?? '-' },
                 { label: 'Clock Out', value: toIST(attendance?.clock_out_utc) ?? '-' },
-                { label: 'Hours', value: minutesToHours(liveWorkedMinutes) },
+                { label: 'Hours', value: minutesToHours(liveCreditedMinutes) },
               ].map(item => (
                 <div key={item.label}>
                   <p className="text-xs text-slate-500 dark:text-slate-400">{item.label}</p>
@@ -565,10 +600,19 @@ export default function DashboardPage() {
                 </div>
               ))}
             </div>
+
+            {permissionMinutes > 0 && (
+              <p className="-mt-3 mb-4 text-xs text-slate-500 dark:text-slate-400">
+                Includes approved permission: {minutesToHours(liveWorkedMinutes)} worked
+                {' + '}{minutesToHours(permissionMinutes)} permission
+              </p>
+            )}
             {schedule?.shift && (
               <div className="mb-4 text-sm text-slate-600 dark:text-slate-300">
                 {schedule.shift.type === 'flexible'
-                  ? `${schedule.shift.name ?? 'Flexible Shift'} - ${REQUIRED_SHIFT_HOURS} hours required`
+                  // Show the shift's OWN required hours — a flexible shift set
+                  // to 8h must not advertise the 9h default.
+                  ? `${schedule.shift.name ?? 'Flexible Shift'} - ${Number(schedule.shift.required_hours ?? REQUIRED_SHIFT_HOURS)} hours required`
                   : `${schedule.shift.name ?? 'Shift'} - ${schedule.shift.start_time?.slice(0, 5) ?? '--:--'} to ${schedule.shift.end_time?.slice(0, 5) ?? '--:--'}`}
               </div>
             )}
@@ -771,6 +815,9 @@ export default function DashboardPage() {
       {/* Leave balance for the current year */}
       <LeaveBalanceCard />
 
+      {/* Permission hours — apply and track approval */}
+      <PermissionHoursCard />
+
       {/* Bank & identity details + document uploads */}
       <MyDetailsCard />
 
@@ -818,9 +865,16 @@ export default function DashboardPage() {
                         <p className="text-xs text-slate-700 dark:text-slate-300 tabular-nums">
                           {toIST(record.clock_out_utc) ?? '-'}
                         </p>
-                        <p className="text-xs font-semibold text-slate-800 dark:text-slate-200 tabular-nums text-right">
-                          {minutesToHours(record.total_minutes)}
-                        </p>
+                        <div className="text-right">
+                          <p className="text-xs font-semibold text-slate-800 dark:text-slate-200 tabular-nums">
+                            {minutesToHours(record.credited_minutes ?? record.total_minutes)}
+                          </p>
+                          {!!record.permission_minutes && (
+                            <p className="text-[10px] text-blue-600 dark:text-blue-400 tabular-nums">
+                              +{minutesToHours(record.permission_minutes)} P
+                            </p>
+                          )}
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -833,7 +887,23 @@ export default function DashboardPage() {
                   { key: 'work_date', header: 'Date', render: r => formatDateOnly((r as AttendanceRecord).work_date) },
                   { key: 'clock_in_utc', header: 'In', render: r => toIST((r as AttendanceRecord).clock_in_utc) ?? '-' },
                   { key: 'clock_out_utc', header: 'Out', render: r => toIST((r as AttendanceRecord).clock_out_utc) ?? '-' },
-                  { key: 'total_minutes', header: 'Hours', render: r => minutesToHours((r as AttendanceRecord).total_minutes) },
+                  { key: 'total_minutes', header: 'Worked', render: r => minutesToHours((r as AttendanceRecord).total_minutes) },
+                  {
+                    key: 'permission_minutes',
+                    header: 'Permission',
+                    render: r => {
+                      const m = (r as AttendanceRecord).permission_minutes;
+                      return m ? minutesToHours(m) : '-';
+                    },
+                  },
+                  {
+                    key: 'credited_minutes',
+                    header: 'Credited',
+                    render: r => {
+                      const rec = r as AttendanceRecord;
+                      return minutesToHours(rec.credited_minutes ?? rec.total_minutes);
+                    },
+                  },
                   { key: 'status', header: 'Status', render: r => statusBadge((r as AttendanceRecord).status) },
                 ]}
                 data={history as object[]}

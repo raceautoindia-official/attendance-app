@@ -9,7 +9,7 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
-import { login } from '../api/client';
+import { login, requestPasswordReset } from '../api/client';
 import { biometricAvailable, authenticateBiometric } from '../auth/biometric';
 import { colors } from '../theme';
 
@@ -18,6 +18,33 @@ export default function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) 
   const [pin, setPin] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetNote, setResetNote] = useState<string | null>(null);
+
+  // Forgot PIN: the server emails a single-use link to the address on the
+  // employee's record. It answers the same way whether or not the ID exists —
+  // employee IDs here are short and guessable, and a "no such employee" reply
+  // would turn this button into a way to enumerate them.
+  const forgotPin = async () => {
+    setError(null);
+    setResetNote(null);
+    if (!empId.trim()) {
+      setError('Type your Employee ID first, then tap Forgot PIN.');
+      return;
+    }
+    setResetBusy(true);
+    try {
+      const message = await requestPasswordReset(empId.trim());
+      setResetNote(message);
+    } catch (e) {
+      // The server DOES report one thing plainly: itself being unable to send
+      // mail. Waiting for an email nobody could have sent is worse than being
+      // told to ask an admin.
+      setError(e instanceof Error ? e.message : 'Could not request a reset.');
+    } finally {
+      setResetBusy(false);
+    }
+  };
 
   const submit = async () => {
     setError(null);
@@ -104,6 +131,19 @@ export default function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) 
               <Text style={styles.buttonText}>Sign in</Text>
             )}
           </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.forgotBtn}
+            onPress={() => { void forgotPin(); }}
+            disabled={resetBusy}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.forgotText}>
+              {resetBusy ? 'Sending…' : 'Forgot PIN?'}
+            </Text>
+          </TouchableOpacity>
+
+          {resetNote && <Text style={styles.resetNote}>{resetNote}</Text>}
         </View>
 
         <Text style={styles.footer}>Mark your attendance securely</Text>
@@ -115,6 +155,12 @@ export default function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bg, justifyContent: 'center', padding: 20 },
   inner: { width: '100%', maxWidth: 400, alignSelf: 'center' },
+  forgotBtn: { alignSelf: 'center', paddingVertical: 12, paddingHorizontal: 8 },
+  forgotText: { color: colors.accent, fontSize: 14, fontWeight: '600' },
+  resetNote: {
+    color: colors.greenText, fontSize: 13, lineHeight: 19, textAlign: 'center',
+    backgroundColor: 'rgba(22,163,74,0.12)', borderRadius: 10, padding: 12, marginTop: 4,
+  },
   brandRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 20 },
   logo: {
     width: 36,

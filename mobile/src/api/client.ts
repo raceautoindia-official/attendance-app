@@ -1,3 +1,5 @@
+import { Platform } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
 import { API_BASE_URL } from '../config';
 import {
   getAccessToken,
@@ -7,9 +9,45 @@ import {
 } from '../storage/tokens';
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  /**
+   * The server's machine-readable refusal code and any facts it sent with it,
+   * e.g. code 'outside_fence' plus the site name, its radius and how far out
+   * the employee is. Matching on the MESSAGE instead would break the first time
+   * the wording changed — and that message carries a distance, so it changes.
+   */
+  constructor(
+    public status: number,
+    message: string,
+    public code?: string,
+    public info?: Record<string, unknown>,
+  ) {
     super(message);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Per-install device identifier.
+//
+// Generated once and kept in secure storage, so it survives app restarts but
+// not a reinstall (after which an admin re-registers the device). The server
+// binds an employee to the first device it sees — see lib/deviceBinding.ts.
+// ---------------------------------------------------------------------------
+const DEVICE_ID_KEY = 'device_id';
+let cachedDeviceId: string | null = null;
+
+/** An identifier, not a secret — it names the install, it does not authorise it. */
+function newDeviceId(): string {
+  const rand = () => Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
+  return `${Date.now().toString(16)}-${rand()}-${rand()}-${rand()}`;
+}
+
+export async function getDeviceId(): Promise<string> {
+  if (cachedDeviceId) return cachedDeviceId;
+  const stored = await SecureStore.getItemAsync(DEVICE_ID_KEY).catch(() => null);
+  const id = stored ?? newDeviceId();
+  if (!stored) await SecureStore.setItemAsync(DEVICE_ID_KEY, id).catch(() => {});
+  cachedDeviceId = id;
+  return id;
 }
 
 // Deduplicate concurrent refreshes (foreground + background task may overlap).
@@ -56,6 +94,7 @@ export async function apiFetch<T = unknown>(
 ): Promise<T> {
   const send = async () => {
     const token = await getAccessToken();
+    const deviceId = await getDeviceId();
     return fetch(`${API_BASE_URL}${path}`, {
       method,
       headers: {
@@ -63,6 +102,11 @@ export async function apiFetch<T = unknown>(
         // Declares this client as mobile so the attendance routes (which are
         // mobile-only for employees) accept clock-in / clock-out.
         'sec-ch-ua-mobile': '?1',
+        // Identifies THIS install. The server binds an employee to the first
+        // device it sees and refuses others, so a desktop copying the header
+        // above still cannot mark attendance. See lib/deviceBinding.ts.
+        'x-device-id': deviceId,
+        'x-device-platform': Platform.OS,
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: body != null ? JSON.stringify(body) : undefined,
@@ -85,7 +129,7 @@ export async function apiFetch<T = unknown>(
     throw new ApiError(401, 'Session expired. Please log in again.');
   }
   if (!res.ok || json?.success === false) {
-    throw new ApiError(res.status, json?.error ?? `HTTP ${res.status}`);
+    throw new ApiError(res.status, json?.error ?? `HTTP ${res.status}`, json?.code, json);
   }
   return json.data as T;
 }
@@ -120,4 +164,23 @@ export async function logout(): Promise<void> {
     // ignore — we clear local session regardless
   }
   await clearSession();
+}
+
+/**
+ * Ask the server to email a PIN-reset link. Returns the sentence to show the
+ * employee — deliberately the same whether or not the ID exists, so this
+ * cannot be used to discover employee IDs. Throws only when the SERVER says it
+ * cannot send mail at all, which is worth telling them plainly.
+ */
+export async function requestPasswordReset(empId: string): Promise<string> {
+  const res = await fetch(`${API_BASE_URL}/api/auth/forgot-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ emp_id: empId }),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || !json?.success) {
+    throw new ApiError(res.status, json?.error ?? 'Could not request a reset.');
+  }
+  return json.message ?? 'If that employee ID exists, a reset link is on its way.';
 }

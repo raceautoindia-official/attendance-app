@@ -413,7 +413,57 @@ CREATE TABLE leave_quotas (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
--- 15. audit_log
+-- 15. permission_requests — short paid absence during a working day, applied
+--     for by the employee and approved by a manager / super admin. Approved
+--     minutes top the day's worked hours back up to the required shift length.
+-- ---------------------------------------------------------------------------
+CREATE TABLE permission_requests (
+  id               INT          NOT NULL AUTO_INCREMENT,
+  employee_id      INT          NOT NULL,
+  -- 'permission' = paid time OFF, tops the day's hours up to the shift length
+  --                and consumes the monthly quota.
+  -- 'on_duty'    = working away from the site; no quota, no credited minutes,
+  --                and the geofence must not clock them out while approved.
+  request_type     ENUM('permission','on_duty') NOT NULL DEFAULT 'permission',
+  permission_date  DATE         NOT NULL,
+  -- IST wall-clock times; `minutes` is derived once at write time.
+  start_time       TIME         NOT NULL,
+  end_time         TIME         NOT NULL,
+  minutes          INT          NOT NULL,
+  reason           VARCHAR(500) NULL,
+  status           ENUM('pending','approved','rejected','cancelled') NOT NULL DEFAULT 'pending',
+  requested_by     INT          NULL,
+  reviewed_by      INT          NULL,
+  reviewed_at      DATETIME     NULL,
+  review_notes     VARCHAR(500) NULL,
+  created_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+  PRIMARY KEY (id),
+  INDEX idx_permission_requests_employee_date (employee_id, permission_date),
+  INDEX idx_permission_requests_type_date     (request_type, status, permission_date),
+  INDEX idx_permission_requests_date          (permission_date),
+  INDEX idx_permission_requests_status        (status),
+  INDEX idx_permission_requests_reviewed_by   (reviewed_by),
+
+  CONSTRAINT fk_permission_requests_employee
+    FOREIGN KEY (employee_id) REFERENCES employees (id)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE,
+
+  CONSTRAINT fk_permission_requests_requested_by
+    FOREIGN KEY (requested_by) REFERENCES employees (id)
+    ON DELETE SET NULL
+    ON UPDATE CASCADE,
+
+  CONSTRAINT fk_permission_requests_reviewed_by
+    FOREIGN KEY (reviewed_by) REFERENCES employees (id)
+    ON DELETE SET NULL
+    ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
+-- 16. audit_log
 -- ---------------------------------------------------------------------------
 CREATE TABLE audit_log (
   id            BIGINT       NOT NULL AUTO_INCREMENT,

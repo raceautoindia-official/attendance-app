@@ -66,9 +66,15 @@ export async function insertAuditLog(params: {
 }): Promise<void> {
   try {
     await query(
+      // created_at explicitly, in UTC. The column default is CURRENT_TIMESTAMP,
+      // which is whatever timezone the DATABASE SERVER happens to run in — UTC
+      // on the production host, IST on a local dev box. Every other datetime in
+      // this schema is written as explicit UTC; the audit log was the one
+      // exception, and on a non-UTC server its entries land shifted against the
+      // very events they narrate.
       `INSERT INTO audit_log
-         (action, entity, entity_id, performed_by, details, ip_address)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+         (action, entity, entity_id, performed_by, details, ip_address, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())`,
       [
         params.action,
         params.entity,

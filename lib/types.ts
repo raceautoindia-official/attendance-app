@@ -20,6 +20,16 @@ export type AttendanceStatus =
 
 export type LeaveType = 'casual' | 'sick' | 'earned' | 'holiday' | 'other';
 
+export type PermissionStatus = 'pending' | 'approved' | 'rejected' | 'cancelled';
+
+/**
+ * 'permission' — paid time OFF inside a working day; consumes the monthly
+ *                quota and tops the day's hours up to the shift length.
+ * 'on_duty'    — official work AWAY from the site; no quota, no credited
+ *                hours, and the geofence must not clock them out.
+ */
+export type PermissionRequestType = 'permission' | 'on_duty';
+
 export type DocumentType =
   | 'pan_card'
   | 'aadhaar_card'
@@ -176,6 +186,9 @@ export interface AttendanceRecord {
   id: number;
   employee_id: number;
   work_date: string; // "YYYY-MM-DD" — IST date
+  /** The day's FIRST login. Never overwritten by later sessions — clock_in_utc
+   *  is the CURRENT session's start and legitimately moves on re-open. */
+  first_clock_in_utc?: Date | null;
   clock_in_utc: Date | null;
   clock_out_utc: Date | null;
   clock_in_lat: number | null;
@@ -198,6 +211,113 @@ export interface AttendanceRecord {
   emp_id?: string;
   location_name?: string | null;
   location_address?: string | null;
+  /** Approved permission minutes for this work_date */
+  permission_minutes?: number;
+  /** Minutes the day's shift requires (used to cap the permission credit) */
+  required_minutes?: number;
+  /** total_minutes topped up by approved permission, capped at required_minutes */
+  credited_minutes?: number | null;
+  /** Hours actually worked on the day (banked sessions included) */
+  worked_minutes?: number | null;
+  /** Why this clock-in was allowed from outside the work site, if it was. */
+  out_of_fence_reason?: string | null;
+  /** Worked past the overtime line — the part credited_minutes caps off */
+  overtime_minutes?: number;
+  /** How late the day's FIRST clock-in was, past shift start + grace.
+   *  null when the day has no start time to be late against (flexible shift,
+   *  or no schedule at all) — which is not the same as 0. */
+  late_minutes?: number | null;
+  /** Minutes between sessions: elapsed span minus time actually worked. */
+  break_minutes?: number | null;
+  /**
+   * This session was closed by the away-from-site watchdog, not by a person.
+   *
+   * The phone re-opens the day on re-entry only for a closure of this kind or
+   * one it performed itself; a manual or end-of-day closure means the day is
+   * genuinely over and should stay closed.
+   */
+  auto_clocked_out?: boolean;
+}
+
+/**
+ * One employee's whole day, for the admin's day view.
+ *
+ * Built from the EMPLOYEE outwards rather than from an attendance row, so
+ * somebody who has not clocked in is still a row — with nulls where the day
+ * has not happened yet. An AttendanceRecord cannot express that: it only
+ * exists once there is something to record.
+ */
+export interface DayAttendanceRow {
+  employee_id: number;
+  employee_name: string;
+  emp_id: string;
+  role: string;
+  /** null when no attendance row exists for the day yet. */
+  attendance_id: number | null;
+  clock_in_utc: Date | string | null;
+  clock_out_utc: Date | string | null;
+  first_clock_in_utc: Date | string | null;
+  status: AttendanceStatus;
+  /** null = nothing to report yet (not clocked in), not "outside". */
+  geofence_status: GeofenceStatus | null;
+  /** Is this employee fenced at all? Distinguishes "switched off" from "no reading". */
+  geofencing_enabled: boolean;
+  location_name: string | null;
+  location_radius_m: number | null;
+  out_of_fence_reason: string | null;
+  /** Minutes worked. While in_progress this is a RUNNING total, counted up to
+   *  now — total_minutes is only written at clock-out, so without it every
+   *  employee currently at work read as having no hours at all. */
+  worked_minutes: number | null;
+  /** Still clocked in: worked_minutes is climbing, not a result. */
+  in_progress?: boolean;
+  credited_minutes: number | null;
+  required_minutes: number | null;
+  permission_minutes: number;
+  overtime_minutes: number;
+  late_minutes: number | null;
+  break_minutes: number | null;
+  session_count: number;
+  /** Was this employee due in at all today? False on their weekly off or a
+   *  weekday their shift does not work — which is not the same as absent. */
+  expected_today: boolean;
+}
+
+/** A short paid absence inside a working day, approved by an admin. */
+export interface PermissionRequest {
+  id: number;
+  employee_id: number;
+  request_type: PermissionRequestType;
+  permission_date: string; // "YYYY-MM-DD"
+  start_time: string;      // "HH:MM:SS" (IST wall clock)
+  end_time: string;        // "HH:MM:SS"
+  minutes: number;
+  reason: string | null;
+  status: PermissionStatus;
+  requested_by: number | null;
+  reviewed_by: number | null;
+  reviewed_at: Date | null;
+  review_notes: string | null;
+  created_at: Date;
+  updated_at: Date;
+  /** Filed after the date it covers — shown to the approver. */
+  is_backdated?: boolean | number;
+  days_late?: number | null;
+  // Populated via JOIN
+  employee_name?: string | null;
+  employee_emp_id?: string | null;
+  reviewed_by_name?: string | null;
+}
+
+/** Monthly permission entitlement for one employee. */
+export interface PermissionBalance {
+  month: string;          // "YYYY-MM"
+  monthly_limit_minutes: number;
+  used_minutes: number;   // approved
+  pending_minutes: number;
+  remaining_minutes: number;
+  max_minutes_per_request: number;
+  min_minutes_per_request: number;
 }
 
 export interface LeaveRecord {
@@ -265,6 +385,19 @@ export interface ApiResponse<T = undefined> {
   data?: T;
   error?: string;
   message?: string;
+  /**
+   * A stable identifier for a refusal the client must handle specially, e.g.
+   * 'outside_fence', which makes the phone ask for a reason and retry.
+   *
+   * The message beside it is written for a person and carries a distance and a
+   * site name, so it changes; matching on its text would break silently the
+   * first time the wording did.
+   */
+  code?: string;
+  /** Extra facts about a refusal — the fence's name, radius and how far out. */
+  location_name?: string | null;
+  radius_m?: number;
+  distance_m?: number | null;
 }
 
 // ---------------------------------------------------------------------------

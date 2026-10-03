@@ -22,7 +22,7 @@ const shiftSchema = z.object({
   start_time: z.string().optional(),
   end_time: z.string().optional(),
   required_hours: z.coerce.number().min(1).max(24).optional(),
-  grace_minutes: z.coerce.number().min(0).max(120).default(10),
+  grace_minutes: z.coerce.number().min(0).max(60, 'Grace cannot exceed 60 minutes').default(10),
   working_days: z.array(z.string()).min(1, 'Select at least one day'),
 });
 
@@ -34,8 +34,32 @@ const assignSchema = z.object({
   location_id: z.preprocess(v => (v === '' || v === null || v === undefined) ? undefined : Number(v), z.number().int().positive().optional()),
   geofencing_enabled: z.boolean().default(false),
   effective_from: z.string().min(1, 'Required'),
+  // Add alongside the current shift (double shift) rather than replacing it.
+  additional: z.boolean().default(false),
 });
 type AssignForm = z.infer<typeof assignSchema>;
+
+interface AssignedShift {
+  schedule_id: number;
+  shift_id: number;
+  shift_name: string;
+  start_time: string | null;
+  end_time: string | null;
+  location_id: number | null;
+  location_name: string | null;
+  geofencing_enabled: boolean;
+  effective_from: string;
+  fence_without_location: boolean;
+}
+interface EmployeeAssignments {
+  employee_id: number;
+  employee_name: string;
+  emp_id: string;
+  shifts: AssignedShift[];
+  overlapping_shifts: string[] | null;
+}
+
+const hhmm = (t: string | null) => (t ? t.slice(0, 5) : '—');
 
 const selectClass = 'block w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500';
 
@@ -74,6 +98,17 @@ export default function SchedulesPage() {
       return res.json() as Promise<ApiResponse<{ locations: Location[] }>>;
     },
   });
+
+  // Who is currently rostered on what — needed to show an employee's existing
+  // shift before adding a second, and to flag misconfigured schedules.
+  const { data: assignData, isLoading: assignLoading } = useQuery({
+    queryKey: ['schedule-assignments'],
+    queryFn: async () => {
+      const res = await fetch('/api/schedules/assignments');
+      return res.json() as Promise<ApiResponse<{ assignments: EmployeeAssignments[] }>>;
+    },
+  });
+  const assignments = assignData?.data?.assignments ?? [];
 
   const shifts = shiftsData?.data?.shifts ?? [];
   const employees = empData?.data?.employees ?? [];
@@ -152,8 +187,26 @@ export default function SchedulesPage() {
   // Assign schedule
   const assignForm = useForm<AssignForm>({
     resolver: zodResolver(assignSchema) as unknown as Resolver<AssignForm>,
-    defaultValues: { geofencing_enabled: false, effective_from: new Date().toISOString().slice(0, 10) },
+    defaultValues: {
+      // Default ON. Choosing a work location and then NOT fencing it is the
+      // unusual case, but the form used to default off — so an admin who
+      // assigned a site got no fence, no warning, and no away-from-site
+      // clock-out, with nothing on screen saying why. The checkbox is disabled
+      // until a location is picked, and the server forces it off without one,
+      // so this cannot switch on a fence that has nothing to check against.
+      geofencing_enabled: true,
+      additional: false,
+      effective_from: new Date().toISOString().slice(0, 10),
+    },
   });
+
+  // What the employee picked in the modal already has, so the admin can see
+  // what a second shift would sit next to.
+  const selectedEmployeeId = Number(assignForm.watch('employee_id')) || null;
+  const addAsSecond = assignForm.watch('additional');
+  const selectedAssignment = selectedEmployeeId
+    ? assignments.find(a => a.employee_id === selectedEmployeeId)
+    : undefined;
 
   const assignMutation = useMutation({
     mutationFn: async (values: AssignForm) => {
@@ -168,6 +221,7 @@ export default function SchedulesPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['employees'] });
       qc.invalidateQueries({ queryKey: ['attendance'] });
+      qc.invalidateQueries({ queryKey: ['schedule-assignments'] });
       setAssignOpen(false);
       assignForm.reset();
     },
@@ -179,8 +233,66 @@ export default function SchedulesPage() {
     shiftForm.setValue('working_days', next);
   }
 
+  // Schedules that claim a fence but have no coordinates to check against, so
+  // nothing is actually enforced. New ones are refused at assignment; these are
+  // older rows, and the admin has to pick a location to make them real.
+  const unfenced = assignments.flatMap(a =>
+    a.shifts.filter(s => s.fence_without_location).map(s => ({ ...a, shift: s })));
+  const clashing = assignments.filter(a => a.overlapping_shifts);
+
+  // One row per assigned schedule, so the fence can be switched per person
+  // without reassigning them. Geofencing used to be settable only at assignment
+  // time, which meant it was changed with SQL instead — and a fence left on for
+  // someone whose phone had stopped reporting costs them real hours.
+  const fenceRows = assignments.flatMap(a =>
+    a.shifts.map(s => ({
+      key: s.schedule_id,
+      employee_name: a.employee_name,
+      emp_id: a.emp_id,
+      shift: s,
+    })));
+
+  const fenceMutation = useMutation({
+    mutationFn: async ({ scheduleId, enabled }: { scheduleId: number; enabled: boolean }) => {
+      const res = await fetch(`/api/schedules/assignments/${scheduleId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ geofencing_enabled: enabled }),
+      });
+      const json = (await res.json()) as ApiResponse;
+      if (!res.ok || !json.success) throw new Error(json.error ?? 'Could not change geofencing');
+      return json;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['schedule-assignments'] }),
+  });
+
   return (
     <div className="space-y-4">
+      {unfenced.length > 0 && (
+        <div className="rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 p-3">
+          <p className="text-sm font-medium text-amber-800 dark:text-amber-300">
+            Geofencing is switched on for {unfenced.length} schedule{unfenced.length > 1 ? 's' : ''} with no
+            location — no fence is being enforced for them.
+          </p>
+          <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">
+            {unfenced.map(u => `${u.employee_name} (${u.shift.shift_name})`).join(', ')} — reassign with a
+            location to make the fence real, or turn geofencing off.
+          </p>
+        </div>
+      )}
+
+      {clashing.length > 0 && (
+        <div className="rounded-lg border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/20 p-3">
+          <p className="text-sm font-medium text-red-800 dark:text-red-300">
+            {clashing.length} employee{clashing.length > 1 ? 's have' : ' has'} overlapping shifts, which
+            cannot both be worked — their expected hours will be overstated.
+          </p>
+          <p className="mt-1 text-xs text-red-700 dark:text-red-400">
+            {clashing.map(a => `${a.employee_name}: ${a.overlapping_shifts!.join(' + ')}`).join('; ')}
+          </p>
+        </div>
+      )}
+
       <div className="flex gap-3 justify-end">
         <Button variant="secondary" onClick={() => setAssignOpen(true)}>Assign Schedule</Button>
         {isSuperAdmin && (
@@ -190,6 +302,87 @@ export default function SchedulesPage() {
             </svg>
             New Shift
           </Button>
+        )}
+      </div>
+
+      {/* Who is fenced. Tick to enforce the work site for that person; untick to
+          leave them tracked but unjudged. */}
+      <div className="rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-700">
+          <h2 className="font-semibold text-slate-800 dark:text-slate-200">Geofencing</h2>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+            Tick to enforce the work site: clock-in is refused away from it, and leaving it ends the day.
+            Unticking does <strong>not</strong> stop live tracking — their movements are still recorded,
+            they are simply not judged by a radius. Leave it off for anyone whose phone does not report
+            continuously, or their day is closed at their last known position.
+          </p>
+        </div>
+        {fenceMutation.isError && (
+          <p className="px-5 py-2 text-sm text-red-500">{(fenceMutation.error as Error).message}</p>
+        )}
+        {assignLoading ? (
+          <div className="flex justify-center py-8"><Spinner /></div>
+        ) : (
+          <Table
+            columns={[
+              {
+                key: 'employee',
+                header: 'Employee',
+                render: r => {
+                  const row = r as (typeof fenceRows)[number];
+                  return (
+                    <div>
+                      <p className="font-medium text-slate-800 dark:text-slate-200">{row.employee_name}</p>
+                      <p className="text-xs text-slate-400">{row.emp_id}</p>
+                    </div>
+                  );
+                },
+              },
+              {
+                key: 'shift',
+                header: 'Shift',
+                render: r => (r as (typeof fenceRows)[number]).shift.shift_name,
+              },
+              {
+                key: 'site',
+                header: 'Work Site',
+                render: r => {
+                  const s = (r as (typeof fenceRows)[number]).shift;
+                  return s.location_name
+                    ? <span className="text-slate-700 dark:text-slate-300">{s.location_name}</span>
+                    : <span className="text-slate-400 text-xs">No location — assign one to fence them</span>;
+                },
+              },
+              {
+                key: 'geofence',
+                header: 'Geofence',
+                render: r => {
+                  const row = r as (typeof fenceRows)[number];
+                  const s = row.shift;
+                  const canFence = s.location_id != null;
+                  return (
+                    <label className={`flex items-center gap-2 ${canFence ? 'cursor-pointer' : 'cursor-not-allowed'}`}>
+                      <input
+                        type="checkbox"
+                        checked={s.geofencing_enabled}
+                        disabled={!canFence || fenceMutation.isPending}
+                        onChange={e =>
+                          fenceMutation.mutate({ scheduleId: s.schedule_id, enabled: e.target.checked })}
+                        className="w-4 h-4 rounded border-slate-300 text-blue-600 disabled:opacity-50"
+                      />
+                      <span className={`text-xs ${s.geofencing_enabled
+                        ? 'text-slate-700 dark:text-slate-300'
+                        : 'text-slate-400'}`}>
+                        {s.geofencing_enabled ? 'Fenced' : 'Tracking only'}
+                      </span>
+                    </label>
+                  );
+                },
+              },
+            ]}
+            data={fenceRows as object[]}
+            emptyMessage="No schedules assigned yet."
+          />
         )}
       </div>
 
@@ -270,7 +463,7 @@ export default function SchedulesPage() {
               {...shiftForm.register('required_hours')} error={shiftForm.formState.errors.required_hours?.message} />
           )}
 
-          <Input label="Grace Period (minutes)" type="number" min={0} max={120}
+          <Input label="Grace Period (minutes)" type="number" min={0} max={60}
             {...shiftForm.register('grace_minutes')} />
 
           <div>
@@ -334,7 +527,7 @@ export default function SchedulesPage() {
                 {...editShiftForm.register('required_hours')} error={editShiftForm.formState.errors.required_hours?.message} />
             )}
 
-            <Input label="Grace Period (minutes)" type="number" min={0} max={120}
+            <Input label="Grace Period (minutes)" type="number" min={0} max={60}
               {...editShiftForm.register('grace_minutes')} />
 
             <div>
@@ -382,11 +575,61 @@ export default function SchedulesPage() {
             )}
           </div>
 
+          {/* What this employee is already rostered on today. */}
+          {selectedAssignment && selectedAssignment.shifts.length > 0 && (
+            <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-3">
+              <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1.5">
+                Currently assigned
+              </p>
+              <ul className="space-y-1">
+                {selectedAssignment.shifts.map(s => (
+                  <li key={s.schedule_id} className="text-sm text-slate-700 dark:text-slate-300">
+                    {s.shift_name}{' '}
+                    <span className="text-slate-500 dark:text-slate-400">
+                      {hhmm(s.start_time)}–{hhmm(s.end_time)}
+                      {s.location_name ? ` · ${s.location_name}` : ''}
+                    </span>
+                    {s.fence_without_location && (
+                      <span className="ml-1 text-xs text-amber-600 dark:text-amber-400">
+                        (geofencing on but no location — nothing is fenced)
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+              {selectedAssignment.overlapping_shifts && (
+                <p className="mt-1.5 text-xs text-red-600 dark:text-red-400">
+                  These shifts overlap: {selectedAssignment.overlapping_shifts.join(' and ')}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Double shift: only the employees the admin opts in get a second. */}
+          {selectedAssignment && selectedAssignment.shifts.length > 0 && (
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input type="checkbox" {...assignForm.register('additional')}
+                className="mt-0.5 w-4 h-4 rounded border-slate-300 text-blue-600" />
+              <span className="text-sm text-slate-700 dark:text-slate-300">
+                Add as a second shift (double shift)
+                <span className="block text-xs text-slate-500 dark:text-slate-400">
+                  {addAsSecond
+                    ? 'Both shifts stay in force; the day expects the hours of both.'
+                    : 'Leave unticked to replace the current shift.'}
+                </span>
+              </span>
+            </label>
+          )}
+
           <div className="flex flex-col gap-1">
-            <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Shift</label>
+            <label className="text-sm font-medium text-slate-700 dark:text-slate-300">
+              {addAsSecond ? 'Second shift' : 'Shift'}
+            </label>
             <select {...assignForm.register('shift_id')} className={selectClass}>
               <option value="">Select shift…</option>
-              {shifts.map(s => <option key={s.id} value={s.id}>{s.name} ({s.type})</option>)}
+              {shifts
+                .filter(s => !addAsSecond || !selectedAssignment?.shifts.some(a => a.shift_id === s.id))
+                .map(s => <option key={s.id} value={s.id}>{s.name} ({s.type})</option>)}
             </select>
           </div>
 
@@ -400,8 +643,14 @@ export default function SchedulesPage() {
 
           <label className="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" {...assignForm.register('geofencing_enabled')}
-              className="w-4 h-4 rounded border-slate-300 text-blue-600" />
-            <span className="text-sm text-slate-700 dark:text-slate-300">Enable geofencing</span>
+              disabled={!assignForm.watch('location_id')}
+              className="w-4 h-4 rounded border-slate-300 text-blue-600 disabled:opacity-50" />
+            <span className={`text-sm ${assignForm.watch('location_id')
+              ? 'text-slate-700 dark:text-slate-300'
+              : 'text-slate-400 dark:text-slate-500'}`}>
+              Enable geofencing
+              {!assignForm.watch('location_id') && ' — pick a location first'}
+            </span>
           </label>
 
           <Input label="Effective From" type="date" {...assignForm.register('effective_from')}

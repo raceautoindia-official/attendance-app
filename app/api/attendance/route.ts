@@ -2,6 +2,16 @@ import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from '@/lib/constants';
+import { hasSessionColumns, hasOutOfFenceReasonColumn, hasFirstClockInColumn } from '@/lib/employeeDetails';
+import {
+  creditedMinutes,
+  hasPermissionTable,
+  hasOnDutyColumn,
+  hasApprovedPermissionSql,
+  permissionMinutesSelect,
+} from '@/lib/permissions';
+import { dayRequiredMinutesSelect } from '@/lib/shifts';
+import { overtimeMinutes, lateMinutes, breakMinutes } from '@/lib/attendance';
 import type { ApiResponse, AttendanceRecord } from '@/lib/types';
 
 // ---------------------------------------------------------------------------
@@ -75,6 +85,17 @@ export async function GET(request: NextRequest) {
     params.push(`%${employeeSearch}%`, `%${employeeSearch}%`);
   }
 
+  // Which optional migrations this database has. Read BEFORE the filters are
+  // built, because the permission filter below is a different query depending
+  // on the answer.
+  const [permissionsAvailable, sessionCols, reasonCol, firstInCol, onDutyCol] = await Promise.all([
+    hasPermissionTable(),
+    hasSessionColumns(),
+    hasOutOfFenceReasonColumn(),
+    hasFirstClockInColumn(),
+    hasOnDutyColumn(),
+  ]);
+
   // Validate status value against allowed enum before injecting into SQL
   const validStatuses = [
     'present', 'late', 'early_departure', 'absent', 'leave', 'holiday',
@@ -82,6 +103,13 @@ export async function GET(request: NextRequest) {
   if (status && validStatuses.includes(status)) {
     conditions.push('a.status = ?');
     params.push(status);
+  } else if (status === 'permission') {
+    // Not an attendance status: a day on permission is still present, or late,
+    // or whatever the attendance itself was. It asks a different question of a
+    // different table — see hasApprovedPermissionSql().
+    conditions.push(
+      hasApprovedPermissionSql(permissionsAvailable, onDutyCol, 'a.employee_id', 'a.work_date'),
+    );
   }
 
   const whereClause =
@@ -90,6 +118,20 @@ export async function GET(request: NextRequest) {
   // ---------------------------------------------------------------------------
   // Run count + data queries in parallel
   // ---------------------------------------------------------------------------
+
+  // Approved permission hours for the row's date, plus what the day's shift
+  // requires — together they give the credited hours (see creditedMinutes()).
+  //
+  // onDutyCol is passed so ON-DUTY rows are excluded. It was omitted here while
+  // every other caller passed it, so this list counted a day spent working away
+  // from the site as permission taken — crediting hours that were already being
+  // clocked, and disagreeing with the same figure on the CSV and the reports.
+  const permissionExpr = permissionMinutesSelect(
+    permissionsAvailable,
+    'a.employee_id',
+    'a.work_date',
+    onDutyCol,
+  );
 
   const [countRow, rows] = await Promise.all([
     queryOne<{ total: number }>(
@@ -104,8 +146,15 @@ export async function GET(request: NextRequest) {
               a.clock_in_utc, a.clock_out_utc, a.clock_in_lat, a.clock_in_lng,
               a.clock_out_lat, a.clock_out_lng, a.ip_address, a.geofence_status,
               a.auth_method, a.total_minutes, a.status, a.notes, a.edited_by, a.edited_at,
+              ${reasonCol ? 'a.out_of_fence_reason,' : 'NULL AS out_of_fence_reason,'}
+              ${firstInCol ? 'a.first_clock_in_utc,' : 'NULL AS first_clock_in_utc,'}
+              ${sessionCols ? 'a.banked_minutes, a.session_count,' : '0 AS banked_minutes, 1 AS session_count,'}
               e.name AS employee_name, e.emp_id,
-              l.name AS location_name, l.address AS location_address
+              l.name AS location_name, l.address AS location_address,
+              s.start_time AS shift_start_time, s.grace_minutes AS shift_grace_minutes,
+              s.type AS shift_type,
+              ${permissionExpr} AS permission_minutes,
+              ${dayRequiredMinutesSelect('a.employee_id', 'a.work_date')} AS required_minutes
        FROM attendance a
        JOIN employees e ON a.employee_id = e.id
        LEFT JOIN employee_schedules es
@@ -118,6 +167,7 @@ export async function GET(request: NextRequest) {
            ORDER BY es2.effective_from DESC, es2.id DESC
            LIMIT 1
          )
+       LEFT JOIN shifts s ON s.id = es.shift_id
        LEFT JOIN locations l ON l.id = es.location_id
        ${whereClause}
        ORDER BY a.work_date DESC, a.clock_in_utc DESC
@@ -125,6 +175,51 @@ export async function GET(request: NextRequest) {
       [...params, limit, offset],
     ),
   ]);
+
+  const records = rows.map(r => {
+    const permission = Number(r.permission_minutes ?? 0);
+    // A required of 0 is meaningful — the employee is scheduled, but this
+    // weekday isn't one their shift works, so nothing is demanded of them.
+    // Only a missing value falls back to the standard shift.
+    const required = r.required_minutes == null ? undefined : Number(r.required_minutes);
+    // Multi-session days carry minutes from finished sessions in banked_minutes
+    // while a later session is open (total_minutes is NULL until it closes) —
+    // credit those so a plant employee's hours aren't shown as blank mid-day.
+    const banked = Number(r.banked_minutes ?? 0);
+    const worked = r.total_minutes ?? (banked > 0 ? banked : null);
+    // Hours past the overtime line — a flat nine for everyone, not each
+    // employee's own roster. Reported separately from credited minutes, which
+    // cap at the rostered day and so can never show a long day as long.
+    const shift = r as AttendanceRecord & {
+      shift_start_time?: string | null;
+      shift_grace_minutes?: number | null;
+      shift_type?: string | null;
+    };
+    const firstIn = r.first_clock_in_utc ?? r.clock_in_utc;
+    return {
+      ...r,
+      banked_minutes: banked,
+      session_count: Number(r.session_count ?? 1),
+      permission_minutes: permission,
+      required_minutes: required,
+      credited_minutes: creditedMinutes(worked, permission, required),
+      worked_minutes: worked,
+      overtime_minutes: overtimeMinutes(worked),
+      late_minutes: lateMinutes(
+        firstIn ? new Date(firstIn) : null,
+        shift.shift_start_time,
+        shift.shift_grace_minutes,
+        shift.shift_type,
+      ),
+      break_minutes: breakMinutes(
+        firstIn ? new Date(firstIn) : null,
+        r.clock_in_utc ? new Date(r.clock_in_utc) : null,
+        r.clock_out_utc ? new Date(r.clock_out_utc) : null,
+        worked,
+        banked,
+      ),
+    };
+  });
 
   const total = Number(countRow?.total ?? 0);
   const totalPages = Math.ceil(total / limit);
@@ -136,7 +231,7 @@ export async function GET(request: NextRequest) {
     {
       success: true,
       data: {
-        records: rows,
+        records,
         pagination: { page, limit, total, totalPages },
       },
     },

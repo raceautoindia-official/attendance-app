@@ -1,11 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
-import { toMySQLDatetime } from '@/lib/attendance';
+import { getWorkDateIST, toMySQLDatetime, workDayStartUtc, workDayEndUtc } from '@/lib/attendance';
 import type { ApiResponse } from '@/lib/types';
 
 interface LiveRow {
-  session_id: number;
+  /**
+   * NULL when the employee is on shift but has no live-tracking session — their
+   * phone is not reporting. The row is still returned: absence from this list
+   * used to be the only signal, and it is indistinguishable from having gone
+   * home.
+   */
+  session_id: number | null;
   employee_id: number;
   emp_id: string;
   employee_name: string;
@@ -15,8 +21,23 @@ interface LiveRow {
   latitude: number | null;
   longitude: number | null;
   accuracy_meters: number | null;
+  /** Name of the work site this employee marks attendance at, if one is assigned */
+  location_name: string | null;
+  location_address: string | null;
+  /** Jitter-filtered route, for drawing a clean line on the map */
   path?: LivePoint[];
+  /** Every fix actually recorded, in order — the admin's audit log. A
+   *  stationary phone keeps pinging, and those points are dropped from `path`
+   *  as jitter, so only this shows exactly where the employee was and when. */
+  recorded_path?: LivePoint[];
+  /** Total fixes recorded in the window, before any display cap */
+  recorded_count?: number;
 }
+
+// The audit log is a UI list, not a dataset — cap what we ship per session so a
+// long window can't return tens of thousands of rows. recorded_count still
+// reports the true total.
+const MAX_RECORDED_POINTS = 500;
 
 interface LivePoint {
   tracked_at_utc: string;
@@ -27,6 +48,7 @@ interface LivePoint {
 
 interface LivePointRow extends LivePoint {
   session_id: number;
+  employee_id: number;
 }
 
 // GPS fixes worse than this are Wi-Fi/cell-tower guesses that scatter hundreds
@@ -104,49 +126,112 @@ export async function GET(request: NextRequest) {
   };
   const fromUtc = toMySQLBound(searchParams.get('from_utc'));
   const toUtc = toMySQLBound(searchParams.get('to_utc'));
+  // REVIEW A PAST DAY.
+  //
+  // Without this the page can only ever show people who are clocked in RIGHT
+  // NOW (see the WHERE below), so at the end of the day — once everybody has
+  // gone home — it is empty, and a day's movement cannot be looked at from it
+  // at all. The time-range control did not help: it trims the path of people
+  // still on shift rather than bringing finished ones back.
+  //
+  // With a date, the same rows are returned for that WORK DATE whether or not
+  // the day was closed, and the path covers the whole day.
+  const dateParam = searchParams.get('date');
+  const reviewDate = dateParam && /^\d{4}-\d{2}-\d{2}$/.test(dateParam) ? dateParam : null;
+
   const includePathParam = searchParams.get('include_path');
   const includePath =
     includePathParam == null
       ? auth.role !== 'employee'
       : !['0', 'false', 'no'].includes(includePathParam.toLowerCase());
 
-  const conditions: string[] = ['s.is_active = TRUE', 'e.is_active = TRUE'];
+  const conditions: string[] = ['e.is_active = TRUE'];
   const params: unknown[] = [];
 
   if (auth.role === 'employee') {
-    conditions.push('s.employee_id = ?');
+    conditions.push('a.employee_id = ?');
     params.push(auth.id);
   } else if (auth.role === 'manager') {
     conditions.push('e.manager_id = ?');
     params.push(auth.id);
   }
 
+  // Driven by WHO IS CLOCKED IN, not by who has a tracking session.
+  //
+  // It used to start from live_tracking_sessions, so an employee on shift whose
+  // phone was not reporting simply vanished from the page — and "vanished" is
+  // indistinguishable from "went home". Three people disappeared from this list
+  // on the same afternoon they were sitting at their desks, and answering why
+  // took four wrong guesses. Someone on shift now always appears; whether their
+  // phone is reporting is shown as a fact about them, not by their absence.
   const rows = await query<LiveRow>(
     `SELECT
        s.id AS session_id,
-       s.employee_id,
+       a.employee_id,
        e.emp_id,
        e.name AS employee_name,
-       s.started_at_utc,
+       COALESCE(s.started_at_utc, a.clock_in_utc) AS started_at_utc,
        s.last_ping_utc,
        p.tracked_at_utc,
        p.latitude,
        p.longitude,
-       p.accuracy_meters
-     FROM live_tracking_sessions s
-     JOIN employees e ON e.id = s.employee_id
+       p.accuracy_meters,
+       l.name    AS location_name,
+       l.address AS location_address
+     FROM attendance a
+     JOIN employees e ON e.id = a.employee_id
+     -- The open session IS the definition of "on shift": clocked in, not yet
+     -- clocked out. Matching on work_date instead would drop anyone still on an
+     -- overnight shift once the 07:00 boundary moved the date on.
+     -- Reviewing a finished day, the ACTIVE session is the wrong one to attach
+     -- (there may be none, or one from a later day). Take the session that
+     -- covers this attendance instead.
+     LEFT JOIN live_tracking_sessions s
+       ON ${reviewDate
+            ? `s.id = (SELECT s2.id FROM live_tracking_sessions s2
+                        WHERE s2.employee_id = a.employee_id
+                          AND s2.started_at_utc >= a.clock_in_utc
+                        ORDER BY s2.started_at_utc ASC LIMIT 1)`
+            : 's.employee_id = a.employee_id AND s.is_active = TRUE'}
+     -- The work site this employee is scheduled to mark attendance at, so the
+     -- Overview can name the place instead of only showing raw coordinates.
+     LEFT JOIN employee_schedules es
+       ON es.id = (
+         SELECT es2.id
+         FROM employee_schedules es2
+         WHERE es2.employee_id = a.employee_id
+           AND es2.effective_from <= ?
+           AND (es2.effective_to IS NULL OR es2.effective_to >= ?)
+         ORDER BY es2.effective_from DESC, es2.id DESC
+         LIMIT 1
+       )
+     LEFT JOIN locations l ON l.id = es.location_id
+     -- Latest fix of this shift. Keyed on the employee and their clock-in
+     -- rather than on the session id, so a phone that reported before its
+     -- session was replaced still shows its last known position instead of a
+     -- blank row.
      LEFT JOIN live_tracking_points p
        ON p.id = (
          SELECT p2.id
          FROM live_tracking_points p2
-         WHERE p2.session_id = s.id
+         WHERE p2.employee_id = a.employee_id
+           AND p2.tracked_at_utc >= a.clock_in_utc
          ORDER BY (p2.accuracy_meters IS NULL OR p2.accuracy_meters <= ?) DESC,
                   p2.tracked_at_utc DESC, p2.id DESC
          LIMIT 1
        )
-     WHERE ${conditions.join(' AND ')}
-     ORDER BY s.last_ping_utc DESC, s.started_at_utc DESC`,
-    [MAX_ACCURACY_M, ...params],
+     WHERE a.clock_in_utc IS NOT NULL
+       ${reviewDate ? 'AND a.work_date = ?' : 'AND a.clock_out_utc IS NULL'}
+       AND ${conditions.join(' AND ')}
+     ORDER BY p.tracked_at_utc IS NULL, p.tracked_at_utc DESC, a.clock_in_utc DESC`,
+    // The two schedule-date params come first: that subquery appears before the
+    // accuracy-ordered point lookup in the statement.
+    [
+      reviewDate ?? getWorkDateIST(), reviewDate ?? getWorkDateIST(),
+      MAX_ACCURACY_M,
+      ...(reviewDate ? [reviewDate] : []),
+      ...params,
+    ],
   );
 
   if (!rows.length) {
@@ -163,13 +248,38 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  const sessionIds = Array.from(new Set(rows.map(r => r.session_id)));
-  const placeholders = sessionIds.map(() => '?').join(',');
+  // Someone on shift whose phone is not reporting has no session at all, so
+  // session_id is NULL for them. Left in, those would build `IN (NULL)` — and
+  // if NOBODY has a session, `IN ()`, which is a syntax error that would take
+  // the whole page down rather than showing it with empty paths.
+  const employeeIds = Array.from(new Set(rows.map(r => r.employee_id)));
+  const sessionIds = Array.from(new Set(rows.map(r => r.session_id).filter((id): id is number => id != null)));
+  // In review mode a row with no session still has points to show, so the
+  // early return only applies to live mode.
+  if (!reviewDate && !sessionIds.length) {
+    return NextResponse.json<ApiResponse<{ sessions: LiveRow[] }>>({
+      success: true,
+      data: { sessions: rows.map(row => ({ ...row, path: [], recorded_path: [], recorded_count: 0 })) },
+    });
+  }
+  const keyIds = reviewDate ? employeeIds : sessionIds;
+  const keyCol = reviewDate ? 'employee_id' : 'session_id';
+  const placeholders = keyIds.map(() => '?').join(',');
   const pointConditions: string[] = [
-    `session_id IN (${placeholders})`,
+    `${keyCol} IN (${placeholders})`,
     '(accuracy_meters IS NULL OR accuracy_meters <= ?)',
   ];
-  const pointParams: unknown[] = [...sessionIds, MAX_ACCURACY_M];
+  const pointParams: unknown[] = [...keyIds, MAX_ACCURACY_M];
+  // Bound a reviewed day to the work day itself (07:00 to 07:00), or a session
+  // spanning midnight would drag in the neighbouring day's movement. An
+  // explicit range from the caller still wins.
+  if (reviewDate && !fromUtc && !toUtc) {
+    pointConditions.push('tracked_at_utc >= ?', 'tracked_at_utc <= ?');
+    pointParams.push(
+      toMySQLDatetime(workDayStartUtc(reviewDate)),
+      toMySQLDatetime(workDayEndUtc(reviewDate)),
+    );
+  }
   if (fromUtc) {
     pointConditions.push('tracked_at_utc >= ?');
     pointParams.push(fromUtc);
@@ -181,13 +291,14 @@ export async function GET(request: NextRequest) {
   const pointRows = await query<LivePointRow>(
     `SELECT
        session_id,
+       employee_id,
        tracked_at_utc,
        latitude,
        longitude,
        accuracy_meters
      FROM live_tracking_points
      WHERE ${pointConditions.join(' AND ')}
-     ORDER BY session_id ASC, tracked_at_utc ASC, id ASC`,
+     ORDER BY ${keyCol} ASC, tracked_at_utc ASC, id ASC`,
     pointParams,
   );
 
@@ -200,15 +311,25 @@ export async function GET(request: NextRequest) {
       longitude: Number(point.longitude),
       accuracy_meters: point.accuracy_meters != null ? Number(point.accuracy_meters) : null,
     };
-    const existing = rawBySession.get(point.session_id);
+    const key = reviewDate ? point.employee_id : point.session_id;
+    if (key == null) continue;
+    const existing = rawBySession.get(key);
     if (existing) existing.push(normalized);
-    else rawBySession.set(point.session_id, [normalized]);
+    else rawBySession.set(key, [normalized]);
   }
 
-  const sessionsWithPath = rows.map(row => ({
-    ...row,
-    path: cleanPath(rawBySession.get(row.session_id) ?? []),
-  }));
+  const sessionsWithPath = rows.map(row => {
+    const key = reviewDate ? row.employee_id : row.session_id;
+    const raw = (key != null ? rawBySession.get(key) : undefined) ?? [];
+    return {
+      ...row,
+      path: cleanPath(raw),
+      // Keep the MOST RECENT points when capping — the tail is what an admin
+      // is looking at, and the count below still states the real total.
+      recorded_path: raw.length > MAX_RECORDED_POINTS ? raw.slice(-MAX_RECORDED_POINTS) : raw,
+      recorded_count: raw.length,
+    };
+  });
 
   return NextResponse.json<ApiResponse<{ sessions: LiveRow[] }>>({
     success: true,

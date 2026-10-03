@@ -1,7 +1,7 @@
 {
-  "name": "Attendance App",
-  "short_name": "Attendance",
-  "description": "Attendance management system",
+  "name": "WorkLens",
+  "short_name": "WorkLens",
+  "description": "See Work. Measure Productivity. Manage Smarter.",
   "start_url": "/login",
   "scope": "/",
   "display": "standalone",
@@ -10,16 +10,22 @@
   "theme_color": "#2563eb",
   "icons": [
     {
-      "src": "/icons/app-icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "src": "/brand/worklens-mark.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
     },
     {
-      "src": "/favicon.ico",
-      "sizes": "any",
-      "type": "image/x-icon"
+      "src": "/brand/worklens-mark.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/brand/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
     }
   ]
 }
-

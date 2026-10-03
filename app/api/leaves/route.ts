@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from '@/lib/constants';
+import { hasPermissionTable, hasOnDutyColumn } from '@/lib/permissions';
 import type { ApiResponse, LeaveRecord } from '@/lib/types';
 
 // ---------------------------------------------------------------------------
@@ -82,6 +83,7 @@ export async function GET(request: NextRequest) {
     ),
     query<LeaveRecord & { employee_name: string | null; employee_emp_id: string | null }>(
       `SELECT lr.*,
+              DATE_FORMAT(lr.leave_date, '%Y-%m-%d') AS leave_date,
               e.name   AS employee_name,
               e.emp_id AS employee_emp_id
        FROM leave_records lr
@@ -95,13 +97,100 @@ export async function GET(request: NextRequest) {
 
   const total = Number(countRow?.total ?? 0);
 
+  // ---------------------------------------------------------------------------
+  // WHO ACTUALLY WORKED on these dates, and what they had approved.
+  //
+  // A leave record says the day was excused; it does not say nobody came in.
+  // People do work on holidays, and until now the day simply read "holiday"
+  // with the hours buried in an attendance row nobody looked at. For a
+  // company-wide holiday (employee_id NULL) this is a LIST — that is the case
+  // worth seeing.
+  // ---------------------------------------------------------------------------
+  const dates = Array.from(new Set(rows.map(r => String(r.leave_date))));
+  type WorkedRow = {
+    work_date: string; employee_id: number; employee_name: string; emp_id: string;
+    clock_in_utc: string | null; clock_out_utc: string | null;
+    worked_minutes: number | null;
+  };
+  type PermRow = {
+    permission_date: string; employee_id: number; request_type: string;
+    start_time: string; end_time: string; minutes: number;
+    status: string; reason: string | null;
+  };
+  let worked: WorkedRow[] = [];
+  let perms: PermRow[] = [];
+  if (dates.length) {
+    const ph = dates.map(() => '?').join(',');
+    const scope = auth.role === 'manager' ? 'AND e.manager_id = ?' : '';
+    const scopeParams = auth.role === 'manager' ? [auth.id] : [];
+    worked = await query<WorkedRow>(
+      `SELECT DATE_FORMAT(a.work_date, '%Y-%m-%d') AS work_date, a.employee_id,
+              e.name AS employee_name, e.emp_id,
+              a.clock_in_utc, a.clock_out_utc,
+              COALESCE(a.total_minutes, a.banked_minutes) AS worked_minutes
+         FROM attendance a
+         JOIN employees e ON e.id = a.employee_id
+        WHERE a.work_date IN (${ph})
+          AND a.clock_in_utc IS NOT NULL
+          ${scope}
+        ORDER BY e.name ASC`,
+      [...dates, ...scopeParams],
+    );
+    if (await hasPermissionTable()) {
+      const hasType = await hasOnDutyColumn();
+      perms = await query<PermRow>(
+        `SELECT DATE_FORMAT(pr.permission_date, '%Y-%m-%d') AS permission_date,
+                pr.employee_id,
+                ${hasType ? 'pr.request_type' : "'permission' AS request_type"},
+                pr.start_time, pr.end_time, pr.minutes, pr.status, pr.reason
+           FROM permission_requests pr
+           JOIN employees e ON e.id = pr.employee_id
+          WHERE pr.permission_date IN (${ph})
+            ${scope}
+          ORDER BY pr.start_time ASC`,
+        [...dates, ...scopeParams],
+      );
+    }
+  }
+
+  const leaves = rows.map(r => {
+    const date = String(r.leave_date);
+    // A company-wide holiday belongs to everybody, so everyone who worked that
+    // date is attached to it. A personal leave only carries that one person's.
+    const mine = (id: number) => r.employee_id === null || r.employee_id === id;
+    return {
+      ...r,
+      worked_on_day: worked
+        .filter(w => w.work_date === date && mine(w.employee_id))
+        .map(w => ({
+          employee_id: w.employee_id,
+          employee_name: w.employee_name,
+          emp_id: w.emp_id,
+          clock_in_utc: w.clock_in_utc,
+          clock_out_utc: w.clock_out_utc,
+          worked_minutes: w.worked_minutes == null ? null : Number(w.worked_minutes),
+        })),
+      permissions: perms
+        .filter(pm => pm.permission_date === date && mine(pm.employee_id))
+        .map(pm => ({
+          employee_id: pm.employee_id,
+          request_type: pm.request_type,
+          start_time: pm.start_time,
+          end_time: pm.end_time,
+          minutes: Number(pm.minutes ?? 0),
+          status: pm.status,
+          reason: pm.reason,
+        })),
+    };
+  });
+
   return NextResponse.json<ApiResponse<{
-    leaves: (LeaveRecord & { employee_name: string | null; employee_emp_id: string | null })[];
+    leaves: typeof leaves;
     pagination: { page: number; limit: number; total: number; totalPages: number };
   }>>({
     success: true,
     data: {
-      leaves: rows,
+      leaves,
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     },
   });
@@ -269,11 +358,18 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Flip any existing attendance record to 'holiday'
+    // Flip attendance to 'holiday' — but ONLY for people who did not work.
+    //
+    // This used to flip every row for the date. Somebody who came in on the
+    // holiday had their day relabelled 'holiday' on top of a real clock-in:
+    // the hours stayed in the row, but the day stopped counting as present and
+    // there was nothing left to say they had worked at all. Declaring a
+    // holiday must not erase the people who turned up for it.
     await query(
       `UPDATE attendance
        SET status = ?
        WHERE work_date = ?
+         AND clock_in_utc IS NULL
          AND employee_id IN (SELECT id FROM employees WHERE is_active = TRUE)`,
       [holidayAttendanceStatus, normalizedLeaveDate],
     );
@@ -327,10 +423,20 @@ export async function POST(request: NextRequest) {
     );
   const insertId = (result as unknown as { insertId: number }).insertId;
 
-  // Flip existing attendance record status if one exists
+  // Flip an existing attendance row to leave/holiday — but ONLY if they did
+  // not work that day.
+  //
+  // This is what makes an approved casual or sick leave stop reading as
+  // ABSENT: the end-of-day job may already have written an 'absent' row before
+  // anyone recorded the leave, and this converts it.
+  //
+  // The clock_in_utc guard is the other half. Without it, recording leave for
+  // somebody who had actually worked overwrote their day: hours in the row,
+  // status saying they were on leave, and no way to tell they had been in.
   const newAttendanceStatus = leave_type === 'holiday' ? 'holiday' : 'leave';
   await query(
-    `UPDATE attendance SET status = ? WHERE employee_id = ? AND work_date = ?`,
+    `UPDATE attendance SET status = ?
+      WHERE employee_id = ? AND work_date = ? AND clock_in_utc IS NULL`,
     [newAttendanceStatus, employee_id, normalizedLeaveDate],
   );
 

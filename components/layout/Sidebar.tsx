@@ -5,6 +5,8 @@ import { usePathname, useRouter } from 'next/navigation';
 import { cn } from '@/lib/cn';
 import { useCurrentUser } from '@/lib/useCurrentUser';
 import { clearStoredUser } from '@/lib/user';
+import { useQuery } from '@tanstack/react-query';
+import type { ApiResponse } from '@/lib/types';
 
 const NAV = [
   {
@@ -30,12 +32,38 @@ const NAV = [
     ),
   },
   {
-    label: 'Attendance',
+    label: 'Checkin Records',
     href: '/attendance',
     icon: (
       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
           d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"
+        />
+      </svg>
+    ),
+  },
+  {
+    label: 'Notifications',
+    href: '/notifications',
+    // How many things are waiting on a decision: off-site clock-ins nobody has
+    // looked at, plus pending permission requests. Permissions has no badge of
+    // its own, so a request sat there unseen until somebody opened the page.
+    badge: true,
+    icon: (
+      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+          d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
+        />
+      </svg>
+    ),
+  },
+  {
+    label: 'Live Tracking',
+    href: '/live-tracking',
+    icon: (
+      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+          d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"
         />
       </svg>
     ),
@@ -58,6 +86,17 @@ const NAV = [
       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
           d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"
+        />
+      </svg>
+    ),
+  },
+  {
+    label: 'Permissions',
+    href: '/permissions',
+    icon: (
+      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+          d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
         />
       </svg>
     ),
@@ -119,6 +158,20 @@ export default function Sidebar() {
   const user = useCurrentUser();
   const isSuperAdmin = user?.role === 'super_admin';
 
+  // How many off-site clock-ins nobody has looked at. Polled rather than pushed:
+  // the count only needs to be roughly current, and a socket for one integer is
+  // not worth the failure modes. The endpoint answers 0 before its migration has
+  // run, so this is safe on a server that has not been updated yet.
+  const { data: notifData } = useQuery({
+    queryKey: ['notifications', 'pending-count'],
+    queryFn: async () => {
+      const res = await fetch('/api/notifications?status=pending&limit=1');
+      return res.json() as Promise<ApiResponse<{ pending_count: number }>>;
+    },
+    refetchInterval: 60_000,
+  });
+  const pendingCount = notifData?.data?.pending_count ?? 0;
+
   async function handleLogout() {
     await fetch('/api/auth/logout', { method: 'POST' });
     clearStoredUser();
@@ -132,15 +185,18 @@ export default function Sidebar() {
       {/* Desktop sidebar */}
       <aside className="hidden md:flex md:flex-col w-60 min-h-screen bg-slate-900 dark:bg-slate-950 border-r border-slate-800 flex-shrink-0">
         <div className="flex items-center gap-3 px-5 py-5 border-b border-slate-800">
-          <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center flex-shrink-0">
-            <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"
-              />
-            </svg>
-          </div>
+          {/* The square mark only — the sidebar is 32px of space and the
+              wordmark is unreadable at that size. The name sits beside it as
+              text, which also keeps it legible when the rail is collapsed. */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/brand/worklens-mark.png"
+            alt=""
+            className="w-8 h-8 rounded-lg flex-shrink-0 object-contain"
+            onError={e => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+          />
           <div>
-            <span className="text-white font-semibold text-sm block">Attendance</span>
+            <span className="text-white font-semibold text-sm block">WorkLens</span>
             {user && (
               <span className="text-slate-400 text-xs capitalize">
                 {user.role === 'super_admin' ? 'Super Admin' : 'Manager'}
@@ -164,7 +220,12 @@ export default function Sidebar() {
                 )}
               >
                 {item.icon}
-                {item.label}
+                <span className="flex-1">{item.label}</span>
+                {item.badge && pendingCount > 0 && (
+                  <span className="rounded-full bg-red-500 px-2 py-0.5 text-xs font-semibold text-white">
+                    {pendingCount > 99 ? '99+' : pendingCount}
+                  </span>
+                )}
               </Link>
             );
           })}
@@ -202,7 +263,14 @@ export default function Sidebar() {
                 active ? 'text-blue-400' : 'text-slate-500 hover:text-slate-300',
               )}
             >
-              {item.icon}
+              {/* A dot, not a number: the bottom bar has no room for one, and
+                  "there is something waiting" is all it needs to say. */}
+              <span className="relative">
+                {item.icon}
+                {item.badge && pendingCount > 0 && (
+                  <span className="absolute -right-1 -top-0.5 h-2 w-2 rounded-full bg-red-500" />
+                )}
+              </span>
               <span className="hidden xs:block">{item.label}</span>
             </Link>
           );

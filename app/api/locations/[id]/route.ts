@@ -119,6 +119,31 @@ export async function DELETE(request: NextRequest, context: Params) {
     );
   }
 
+  // Schedules still pointing here would be left fenced to a site the admin
+  // believes is gone — and clearing the reference silently would leave
+  // "geofencing on" with nothing to check against, which is how employees ended
+  // up able to clock in from anywhere. Refuse, and say who has to be moved.
+  const inUse = await query<{ emp_id: string; name: string }>(
+    `SELECT DISTINCT e.emp_id, e.name
+     FROM employee_schedules es
+     JOIN employees e ON e.id = es.employee_id
+     WHERE es.location_id = ?
+       AND e.is_active = TRUE
+       AND (es.effective_to IS NULL OR es.effective_to >= CURDATE())`,
+    [locationId],
+  );
+  if (inUse.length > 0) {
+    const names = inUse.slice(0, 5).map(u => `${u.name} (${u.emp_id})`).join(', ');
+    const more = inUse.length > 5 ? ` and ${inUse.length - 5} more` : '';
+    return NextResponse.json<ApiResponse>(
+      {
+        success: false,
+        error: `${inUse.length} employee${inUse.length > 1 ? 's are' : ' is'} still assigned to this location: ${names}${more}. Reassign them before deleting it.`,
+      },
+      { status: 409 },
+    );
+  }
+
   await query('UPDATE locations SET is_active = FALSE WHERE id = ?', [locationId]);
 
   await insertAuditLog({

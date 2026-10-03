@@ -22,15 +22,19 @@ async function hasLiveTrackingColumn() {
 // Validation — POST
 // ---------------------------------------------------------------------------
 
+// Empty string from a form field means "nothing typed", not a value to be
+// validated. The add form submits every field whether or not it was filled in.
+const blankToNull = (v: unknown) => (typeof v === 'string' && v.trim() === '' ? null : v);
+
 const CreateEmployeeSchema = z.object({
   emp_id: z
     .string()
     .min(1)
     .regex(/^[A-Za-z0-9]+$/, 'emp_id must be alphanumeric'),
   name: z.string().min(1).max(100),
-  email: z.string().email().nullable().optional(),
-  phone: z.string().max(20).nullable().optional(),
-  department: z.string().max(100).nullable().optional(),
+  email: z.preprocess(blankToNull, z.string().email().nullable().optional()),
+  phone: z.preprocess(blankToNull, z.string().max(20).nullable().optional()),
+  department: z.preprocess(blankToNull, z.string().max(100).nullable().optional()),
   pin: z.string().regex(/^\d{4,6}$/, 'PIN must be 4–6 digits'),
   role: z.enum(['employee', 'manager', 'super_admin']).default('employee'),
   manager_id: z.number().int().positive().nullable().optional(),
@@ -38,6 +42,11 @@ const CreateEmployeeSchema = z.object({
   location_id: z.number().int().positive().nullable().optional(),
   geofencing_enabled: z.boolean().optional().default(false),
   live_tracking_enabled: z.boolean().optional().default(true),
+  // Settable when the employee is created. It could only be changed by editing
+  // afterwards, so every new field employee started life fenced as on-site and
+  // had to be corrected in a second step.
+  work_mode: z.enum(['on_site', 'off_site']).optional().default('on_site'),
+  allow_multiple_sessions: z.boolean().optional().default(false),
   schedule_effective_from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
 });
 
@@ -138,14 +147,39 @@ export async function GET(request: NextRequest) {
 
   const total = Number(countRow?.total ?? 0);
 
+  // Active employees with NO schedule in force today. The nightly mark-absent
+  // job derives working days from the assigned shift, so an employee without a
+  // schedule is invisible to it — they can miss any number of days and never be
+  // flagged. Reported across the whole scope, not just this page, so the count
+  // doesn't change as the admin pages through.
+  const unscheduled = await query<{ id: number; emp_id: string; name: string }>(
+    `SELECT e.id, e.emp_id, e.name
+     FROM employees e
+     WHERE e.is_active = TRUE
+       ${auth.role === 'manager' ? 'AND e.manager_id = ?' : ''}
+       AND NOT EXISTS (
+         SELECT 1 FROM employee_schedules es
+         WHERE es.employee_id = e.id
+           AND es.effective_from <= ?
+           AND (es.effective_to IS NULL OR es.effective_to >= ?)
+       )
+     ORDER BY e.emp_id ASC`,
+    auth.role === 'manager'
+      ? [auth.id, getWorkDateIST(), getWorkDateIST()]
+      : [getWorkDateIST(), getWorkDateIST()],
+  );
+
   return NextResponse.json<ApiResponse<{
     employees: Employee[];
     pagination: { page: number; limit: number; total: number; totalPages: number };
+    /** Active employees with no schedule today — excluded from absent marking */
+    unscheduled: { id: number; emp_id: string; name: string }[];
   }>>({
     success: true,
     data: {
       employees: rows,
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+      unscheduled,
     },
   });
 }
@@ -172,9 +206,13 @@ export async function POST(request: NextRequest) {
 
   const {
     emp_id, name, email, phone, department, pin, role, manager_id,
-    shift_id, location_id, geofencing_enabled, live_tracking_enabled, schedule_effective_from,
+    shift_id, location_id, geofencing_enabled, live_tracking_enabled,
+    work_mode, allow_multiple_sessions, schedule_effective_from,
   } = parsed.data;
-  const liveTrackingColExists = await hasLiveTrackingColumn();
+  const [liveTrackingColExists, workModeColsPresent] = await Promise.all([
+    hasLiveTrackingColumn(),
+    hasWorkModeColumns(),
+  ]);
 
   // Uniqueness checks
   const [dupEmpId, dupEmail] = await Promise.all([
@@ -227,17 +265,26 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const result = liveTrackingColExists
-    ? await query(
-        `INSERT INTO employees (emp_id, name, email, phone, department, pin_hash, role, manager_id, live_tracking_enabled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [emp_id, name, email ?? null, phone ?? null, department ?? null, pinHash, role, manager_id ?? null, live_tracking_enabled ? 1 : 0],
-      )
-    : await query(
-        `INSERT INTO employees (emp_id, name, email, phone, department, pin_hash, role, manager_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [emp_id, name, email ?? null, phone ?? null, department ?? null, pinHash, role, manager_id ?? null],
-      );
+  // Built column by column rather than as one branch per optional migration:
+  // there are two independent groups now (live tracking, and work mode with
+  // multi-session), so a nested ternary would be four hand-written statements
+  // that have to agree with each other.
+  const cols = ['emp_id', 'name', 'email', 'phone', 'department', 'pin_hash', 'role', 'manager_id'];
+  const vals: unknown[] = [
+    emp_id, name, email ?? null, phone ?? null, department ?? null, pinHash, role, manager_id ?? null,
+  ];
+  if (liveTrackingColExists) {
+    cols.push('live_tracking_enabled');
+    vals.push(live_tracking_enabled ? 1 : 0);
+  }
+  if (workModeColsPresent) {
+    cols.push('work_mode', 'allow_multiple_sessions');
+    vals.push(work_mode, allow_multiple_sessions ? 1 : 0);
+  }
+  const result = await query(
+    `INSERT INTO employees (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`,
+    vals,
+  );
   const insertId = (result as unknown as { insertId: number }).insertId;
 
   if (shift_id && schedule_effective_from) {

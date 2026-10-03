@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import StatCard from '@/components/ui/StatCard';
@@ -10,28 +10,16 @@ import Card from '@/components/ui/Card';
 import Button from '@/components/ui/Button';
 import Spinner from '@/components/ui/Spinner';
 import { useCurrentUser } from '@/lib/useCurrentUser';
-import type { AttendanceRecord, AttendanceStatus, ApiResponse, Employee } from '@/lib/types';
+import type {
+  AttendanceRecord, AttendanceStatus, ApiResponse, Employee, DayAttendanceRow,
+} from '@/lib/types';
 import { formatDateOnly } from '@/lib/date';
 
-type AttRow = AttendanceRecord & { employee_name?: string; emp_id?: string };
-type LiveTrackingLiveRow = {
-  session_id: number;
-  employee_id: number;
-  emp_id: string;
-  employee_name: string;
-  started_at_utc: string;
-  last_ping_utc: string | null;
-  tracked_at_utc: string | null;
-  latitude: number | null;
-  longitude: number | null;
-  accuracy_meters: number | null;
-  path?: Array<{
-    tracked_at_utc: string;
-    latitude: number;
-    longitude: number;
-    accuracy_meters: number | null;
-  }>;
-};
+type DayRow = DayAttendanceRow;
+
+/** '' = show everyone. 'permission' is not an attendance status — it means the
+ *  employee has approved paid time off inside the day, whatever the day was. */
+type DayFilter = AttendanceStatus | 'permission' | '';
 type DailyUpdateRow = {
   id: number;
   employee_id: number;
@@ -41,12 +29,21 @@ type DailyUpdateRow = {
   update_text: string;
   updated_at: string;
 };
-type LiveRangePreset = '30m' | '2h' | '8h' | '24h' | 'custom';
 
 const STATUS_BADGE: Record<AttendanceStatus, 'success' | 'warning' | 'danger' | 'info' | 'neutral'> = {
   present: 'success', late: 'warning', absent: 'danger',
   early_departure: 'warning', leave: 'info', holiday: 'info',
 };
+
+const STATUS_FILTERS: Array<{ value: DayFilter; label: string }> = [
+  { value: 'present',         label: 'Present' },
+  { value: 'late',            label: 'Late' },
+  { value: 'absent',          label: 'Absent' },
+  { value: 'permission',      label: 'Permission' },
+  { value: 'early_departure', label: 'Early departure' },
+  { value: 'leave',           label: 'Leave' },
+  { value: 'holiday',         label: 'Holiday' },
+];
 
 const IST = 'Asia/Kolkata';
 const IST_LOCALE = 'en-IN';
@@ -57,13 +54,6 @@ function toIST(d: Date | string | null) {
 function minutesToHours(m: number | null | undefined) {
   if (m == null) return '—';
   return `${Math.floor(m / 60)}h ${m % 60}m`;
-}
-
-function getSignalAgeMinutes(lastPingUtc: string | null): number | null {
-  if (!lastPingUtc) return null;
-  const ms = new Date(lastPingUtc).getTime();
-  if (!Number.isFinite(ms)) return null;
-  return Math.max(0, Math.floor((Date.now() - ms) / 60_000));
 }
 
 export default function OverviewPage() {
@@ -80,31 +70,6 @@ export default function OverviewPage() {
   }, []);
 
   const [gpsError, setGpsError] = useState<string | null>(null);
-  const [selectedLiveSessionId, setSelectedLiveSessionId] = useState<number | null>(null);
-  const [liveEmployeeFilter, setLiveEmployeeFilter] = useState<'all' | number>('all');
-  const [liveRangePreset, setLiveRangePreset] = useState<LiveRangePreset>('2h');
-  const [customFromLocal, setCustomFromLocal] = useState('');
-  const [customToLocal, setCustomToLocal] = useState('');
-
-  const liveRange = useMemo(() => {
-    const now = new Date();
-    if (liveRangePreset === 'custom') {
-      const fromDate = customFromLocal ? new Date(customFromLocal) : null;
-      const toDate = customToLocal ? new Date(customToLocal) : null;
-      return {
-        fromUtc: fromDate && !Number.isNaN(fromDate.getTime()) ? fromDate.toISOString() : null,
-        toUtc: toDate && !Number.isNaN(toDate.getTime()) ? toDate.toISOString() : null,
-      };
-    }
-    const minutesMap: Record<Exclude<LiveRangePreset, 'custom'>, number> = {
-      '30m': 30,
-      '2h': 120,
-      '8h': 480,
-      '24h': 1440,
-    };
-    const from = new Date(now.getTime() - minutesMap[liveRangePreset] * 60_000);
-    return { fromUtc: from.toISOString(), toUtc: now.toISOString() };
-  }, [liveRangePreset, customFromLocal, customToLocal]);
 
   const getCoords = useCallback(
     () => new Promise<GeolocationCoordinates>((resolve, reject) => {
@@ -173,27 +138,30 @@ export default function OverviewPage() {
     refetchInterval: 60_000,
   });
 
-  const { data: attData, isLoading: attLoading } = useQuery({
-    queryKey: ['attendance', 'today-list', today],
+  const [statusFilter, setStatusFilter] = useState<DayFilter>('');
+
+  // EVERY active employee for the day, not only the ones with an attendance
+  // row. Somebody who has not clocked in has no row until they do (or until
+  // the end-of-day job writes one that night), so the old query left exactly
+  // the people worth chasing out of the list.
+  const { data: dayData, isLoading: attLoading } = useQuery({
+    queryKey: ['attendance', 'day', today],
     queryFn: async () => {
-      const res = await fetch(`/api/attendance?from_date=${today}&to_date=${today}&limit=100`);
-      return res.json() as Promise<ApiResponse<{ records: AttRow[]; pagination: { total: number } }>>;
+      const res = await fetch(`/api/attendance/day?date=${today}`);
+      return res.json() as Promise<ApiResponse<{ work_date: string; employees: DayRow[] }>>;
     },
     refetchInterval: 60_000,
   });
 
-  const { data: liveData, isLoading: liveLoading } = useQuery({
-    queryKey: ['live-tracking', 'live-admin', liveRange.fromUtc, liveRange.toUtc],
+  const { data: absentData } = useQuery({
+    queryKey: ['attendance', 'absent-today', today],
     queryFn: async () => {
-      const params = new URLSearchParams();
-      if (liveRange.fromUtc) params.set('from_utc', liveRange.fromUtc);
-      if (liveRange.toUtc) params.set('to_utc', liveRange.toUtc);
-      const query = params.toString();
-      const res = await fetch(`/api/live-tracking/live${query ? `?${query}` : ''}`);
-      return res.json() as Promise<ApiResponse<{ sessions: LiveTrackingLiveRow[] }>>;
+      const res = await fetch(`/api/attendance/absent-today?date=${today}`);
+      return res.json() as Promise<ApiResponse<{ count: number; employees: Array<{ id: number; name: string }> }>>;
     },
-    refetchInterval: 5_000,
+    refetchInterval: 60_000,
   });
+
   const { data: dailyUpdatesData, isLoading: dailyUpdatesLoading } = useQuery({
     queryKey: ['daily-updates', 'admin', today],
     queryFn: async () => {
@@ -205,121 +173,37 @@ export default function OverviewPage() {
 
 
   const totalEmployees = empData?.data?.pagination.total ?? 0;
-  const records = attData?.data?.records ?? [];
+  const allDayRows = dayData?.data?.employees ?? [];
+  // Filtered HERE, not by the server. That was the wrong choice while the list
+  // was a page of at most 100 attendance records — a filter would have searched
+  // the first page only. This response is one row per employee with no
+  // pagination at all, so there is no page two for a filter to miss, and the
+  // stat cards can keep counting the unfiltered set for free.
+  const records = statusFilter === ''
+    ? allDayRows
+    : statusFilter === 'permission'
+      // Not an attendance status: it means approved paid time off inside the
+      // day, which sits alongside whatever the day itself was.
+      ? allDayRows.filter(r => r.permission_minutes > 0)
+      // "Absent" means someone who was DUE IN and is not here. A weekly off is
+      // not an absence, and filtering to Absent on a Sunday must not return the
+      // whole company.
+      : statusFilter === 'absent'
+        ? allDayRows.filter(r => r.status === 'absent' && r.expected_today)
+        : allDayRows.filter(r => r.status === statusFilter);
   const dailyUpdates = dailyUpdatesData?.data?.updates ?? [];
-  const liveSessions = useMemo(
-    () => liveData?.data?.sessions ?? [],
-    [liveData?.data?.sessions],
-  );
-  const liveEmployeeOptions = useMemo(() => {
-    const seen = new Set<number>();
-    const opts: Array<{ id: number; label: string }> = [];
-    for (const s of liveSessions) {
-      if (seen.has(s.employee_id)) continue;
-      seen.add(s.employee_id);
-      opts.push({ id: s.employee_id, label: `${s.employee_name} (${s.emp_id})` });
-    }
-    return opts.sort((a, b) => a.label.localeCompare(b.label));
-  }, [liveSessions]);
-  const filteredLiveSessions = useMemo(
-    () =>
-      liveEmployeeFilter === 'all'
-        ? liveSessions
-        : liveSessions.filter(s => s.employee_id === liveEmployeeFilter),
-    [liveSessions, liveEmployeeFilter],
-  );
-  const selectedLiveSession =
-    filteredLiveSessions.find(s => s.session_id === selectedLiveSessionId) ??
-    filteredLiveSessions[0] ??
-    null;
-  const selectedLat =
-    selectedLiveSession?.latitude != null ? Number(selectedLiveSession.latitude) : null;
-  const selectedLng =
-    selectedLiveSession?.longitude != null ? Number(selectedLiveSession.longitude) : null;
-  const selectedHasCoords =
-    selectedLat != null &&
-    selectedLng != null &&
-    Number.isFinite(selectedLat) &&
-    Number.isFinite(selectedLng);
-  const selectedPath = useMemo(
-    () => selectedLiveSession?.path ?? [],
-    [selectedLiveSession?.path],
-  );
-  // Stable JSON signature of the route points. Because it's a string compared
-  // by value, the map iframe below only re-renders when the path actually
-  // changes — not on every 5s poll — so live updates are smooth (no reload
-  // flicker) and feel real-time.
-  const routePointsJson = useMemo(() => {
-    const fmt = (iso: string | null | undefined) =>
-      iso
-        ? new Date(iso).toLocaleTimeString(IST_LOCALE, {
-            timeZone: IST,
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: true,
-          })
-        : '';
-    let pts = selectedPath
-      .map(p => ({ lat: Number(p.latitude), lng: Number(p.longitude), t: fmt(p.tracked_at_utc) }))
-      .filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lng));
-    if (pts.length < 1 && selectedHasCoords) {
-      pts = [{ lat: Number(selectedLat), lng: Number(selectedLng), t: '' }];
-    }
-    return pts.length ? JSON.stringify(pts) : null;
-  }, [selectedPath, selectedHasCoords, selectedLat, selectedLng]);
-
-  // Self-contained Leaflet + OpenStreetMap page drawing the exact route on real
-  // streets — white casing under a bold blue line, a clickable dot at every
-  // recorded point that shows the IST time the employee was there, green start
-  // + red latest markers. Keyless (no Google Cloud).
-  const routeMapSrc = useMemo(() => {
-    if (!routePointsJson) return null;
-    return `<!DOCTYPE html><html><head><meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<style>html,body,#map{margin:0;height:100%;width:100%}.leaflet-popup-content{font:13px system-ui;margin:8px 12px}</style></head>
-<body><div id="map"></div>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script>
-var pts=${routePointsJson};
-var ll=pts.map(function(p){return [p.lat,p.lng];});
-var map=L.map('map',{zoomControl:true});
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(map);
-function popup(prefix,p){return '<b>'+prefix+'</b><br/>🕐 '+(p.t||'-');}
-if(ll.length>1){
-  L.polyline(ll,{color:'#ffffff',weight:9,opacity:0.95,lineJoin:'round',lineCap:'round'}).addTo(map);
-  var line=L.polyline(ll,{color:'#2563eb',weight:5,opacity:1,lineJoin:'round',lineCap:'round'}).addTo(map);
-  for(var i=1;i<pts.length-1;i++){
-    L.circleMarker(ll[i],{radius:5,color:'#2563eb',fillColor:'#ffffff',fillOpacity:1,weight:2}).addTo(map).bindPopup(popup('Was here at',pts[i]));
-  }
-  map.fitBounds(line.getBounds(),{padding:[35,35]});
-}else{map.setView(ll[0],17);}
-L.circleMarker(ll[0],{color:'#ffffff',weight:3,fillColor:'#16a34a',fillOpacity:1,radius:8}).addTo(map).bindPopup(popup('Start',pts[0]));
-L.circleMarker(ll[ll.length-1],{color:'#ffffff',weight:3,fillColor:'#dc2626',fillOpacity:1,radius:8}).addTo(map).bindPopup(popup('Latest',pts[pts.length-1]));
-</script></body></html>`;
-  }, [routePointsJson]);
-  const present = records.filter(r => r.status === 'present' || r.status === 'late').length;
-  const absent = records.filter(r => r.status === 'absent').length;
-  const totalMinutes = records.reduce((s, r) => s + (r.total_minutes ?? 0), 0);
-  const avgHours = records.length > 0 ? (totalMinutes / records.length / 60).toFixed(1) : '0';
+  const present = allDayRows.filter(r => r.status === 'present' || r.status === 'late').length;
+  // Absent comes from the server, which applies the same rule the end-of-day
+  // job does. Counting rows here showed 0 all day every day: an 'absent' row
+  // is only written after the day FINISHES. Deriving it in the browser instead
+  // would need the schedules, the weekly-off rule and the leave table — three
+  // chances to disagree with the job that decides.
+  const absent = absentData?.data?.count ?? 0;
+  const absentNames = absentData?.data?.employees ?? [];
 
   const isLoading = empLoading || attLoading;
 
   const displayTime = now.toLocaleTimeString(IST_LOCALE, { timeZone: IST, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
-
-  useEffect(() => {
-    if (!filteredLiveSessions.length) {
-      setSelectedLiveSessionId(null);
-      return;
-    }
-    if (
-      !selectedLiveSessionId ||
-      !filteredLiveSessions.some(s => s.session_id === selectedLiveSessionId)
-    ) {
-      setSelectedLiveSessionId(filteredLiveSessions[0].session_id);
-    }
-  }, [filteredLiveSessions, selectedLiveSessionId]);
 
   return (
     <div className="space-y-6">
@@ -387,7 +271,7 @@ L.circleMarker(ll[ll.length-1],{color:'#ffffff',weight:3,fillColor:'#dc2626',fil
       )}
 
       {/* Stats */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <StatCard
           label="Total Employees"
           value={totalEmployees}
@@ -413,36 +297,58 @@ L.circleMarker(ll[ll.length-1],{color:'#ffffff',weight:3,fillColor:'#dc2626',fil
           }
         />
         <StatCard
-          label="Absent Today"
+          label="Not In Yet"
           value={absent}
           loading={isLoading}
           variant="danger"
+          // Naming them is the point. A count tells an admin something is
+          // wrong; the names tell them who to ring.
+          subLabel={absentNames.length
+            ? absentNames.slice(0, 3).map(e => e.name).join(', ')
+              + (absentNames.length > 3 ? ` +${absentNames.length - 3} more` : '')
+            : undefined}
           icon={
             <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
           }
         />
-        <StatCard
-          label="Avg Hours Today"
-          value={isLoading ? '…' : `${avgHours}h`}
-          loading={isLoading}
-          variant="warning"
-          icon={
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-          }
-        />
+
       </div>
 
       {/* Today attendance table */}
       <Card padding={false}>
         <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
-          <h2 className="font-semibold text-slate-800 dark:text-slate-200">Today Attendance</h2>
-          <span className="text-xs text-slate-400 dark:text-slate-500">
-            Auto-refreshes every 60s
-          </span>
+          <div>
+            <h2 className="font-semibold text-slate-800 dark:text-slate-200">Today Attendance</h2>
+            {/* Which day this actually is. The table is a live view of one
+                work day and said so nowhere — an admin reading it at 7am,
+                when the work day has just rolled over, had no way to tell
+                which day they were looking at. */}
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {new Date(`${today}T12:00:00Z`).toLocaleDateString('en-IN', {
+                timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+              })}
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <label className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+              Status
+              <select
+                value={statusFilter}
+                onChange={e => setStatusFilter(e.target.value as DayFilter)}
+                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1.5 text-xs text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">All</option>
+                {STATUS_FILTERS.map(f => (
+                  <option key={f.value} value={f.value}>{f.label}</option>
+                ))}
+              </select>
+            </label>
+            <span className="hidden sm:inline text-xs text-slate-400 dark:text-slate-500">
+              Auto-refreshes every 60s
+            </span>
+          </div>
         </div>
 
         {attLoading ? (
@@ -452,229 +358,220 @@ L.circleMarker(ll[ll.length-1],{color:'#ffffff',weight:3,fillColor:'#dc2626',fil
             columns={[
               {
                 key: 'employee_name',
-                header: 'Employee',
+                header: 'Employee Name',
                 render: r => (
-                  <div>
-                    <p className="font-medium text-slate-800 dark:text-slate-200">{(r as AttRow).employee_name ?? '—'}</p>
-                    <p className="text-xs text-slate-400">{(r as AttRow).emp_id}</p>
-                  </div>
+                  <span className="font-medium text-slate-800 dark:text-slate-200">
+                    {(r as DayRow).employee_name ?? '—'}
+                  </span>
+                ),
+              },
+              {
+                key: 'emp_id',
+                header: 'Employee ID',
+                render: r => (
+                  <span className="text-slate-500 dark:text-slate-400 tabular-nums">
+                    {(r as DayRow).emp_id ?? '—'}
+                  </span>
                 ),
               },
               {
                 key: 'clock_in_utc',
-                header: 'Clock In',
-                render: r => toIST((r as AttRow).clock_in_utc),
+                header: 'Check-in',
+                render: r => {
+                  const row = r as DayRow;
+                  // The day's FIRST arrival, not the current session's start —
+                  // on a multi-session day clock_in_utc moves to the afternoon
+                  // and would report someone in at 9:10 as having arrived at 2pm.
+                  const first = row.first_clock_in_utc ?? row.clock_in_utc;
+                  return (
+                    <div>
+                      <span className="tabular-nums">{toIST(first)}</span>
+                    </div>
+                  );
+                },
               },
               {
                 key: 'clock_out_utc',
-                header: 'Clock Out',
-                render: r => toIST((r as AttRow).clock_out_utc),
+                header: 'Check-out',
+                render: r => <span className="tabular-nums">{toIST((r as DayRow).clock_out_utc)}</span>,
+              },
+              {
+                key: 'break_minutes',
+                header: 'Break',
+                render: r => {
+                  const m = (r as DayRow).break_minutes;
+                  if (m == null) return <span className="text-slate-400">—</span>;
+                  return <span className="tabular-nums">{minutesToHours(m)}</span>;
+                },
+              },
+              {
+                key: 'permission_minutes',
+                header: 'Permission',
+                render: r => {
+                  const m = (r as DayRow).permission_minutes;
+                  if (!m) return <span className="text-slate-400">—</span>;
+                  // Approved paid time off inside the day. It sits beside the
+                  // hours rather than in them: it tops the day back up to the
+                  // shift, which is why a short day can still read as complete.
+                  return (
+                    <span className="tabular-nums text-blue-600 dark:text-blue-400">
+                      {minutesToHours(m)}
+                    </span>
+                  );
+                },
               },
               {
                 key: 'total_minutes',
-                header: 'Hours',
+                header: 'Total Hours',
                 render: r => {
-                  const m = (r as AttRow).total_minutes;
-                  return m != null ? `${Math.floor(m / 60)}h ${m % 60}m` : '—';
+                  const row = r as DayRow;
+                  // worked_minutes counts the sessions already banked, so an
+                  // employee back from lunch shows the morning rather than a
+                  // blank until they clock out for the day. The server derives
+                  // it; there is no raw total to fall back to here.
+                  const m = row.worked_minutes;
+                  // A running total is marked as one. Somebody reading this
+                  // column needs to know whether 2h 10m is what the person has
+                  // worked so far or what they worked in total — the same
+                  // number means different things, and the difference is not
+                  // visible from the number.
+                  return (
+                    <span className="tabular-nums font-medium text-slate-800 dark:text-slate-200">
+                      {minutesToHours(m)}
+                      {row.in_progress && m != null && (
+                        <span className="ml-1 text-xs font-normal text-slate-400">so far</span>
+                      )}
+                    </span>
+                  );
+                },
+              },
+              {
+                key: 'late_minutes',
+                header: 'Late',
+                render: r => {
+                  const m = (r as DayRow).late_minutes;
+                  // null and 0 mean different things: null is "this day has no
+                  // start time to be late against" (flexible shift, or nobody
+                  // rostered them), 0 is "they made it".
+                  if (m == null) return <span className="text-slate-400">—</span>;
+                  if (m === 0) return <span className="text-slate-400">On time</span>;
+                  return (
+                    <span className="tabular-nums text-amber-600 dark:text-amber-400">
+                      {minutesToHours(m)}
+                    </span>
+                  );
+                },
+              },
+              {
+                key: 'overtime_minutes',
+                header: 'Overtime',
+                render: r => {
+                  const m = (r as DayRow).overtime_minutes ?? 0;
+                  if (m <= 0) return <span className="text-slate-400">—</span>;
+                  return (
+                    <span className="tabular-nums text-green-600 dark:text-green-400">
+                      +{minutesToHours(m)}
+                    </span>
+                  );
                 },
               },
               {
                 key: 'status',
                 header: 'Status',
-                render: r => (
-                  <Badge variant={STATUS_BADGE[(r as AttRow).status]}>
-                    {(r as AttRow).status.replace('_', ' ')}
-                  </Badge>
-                ),
-              },
-              {
-                key: 'location_name',
-                header: 'Location',
                 render: r => {
-                  const row = r as AttRow;
-                  return row.location_name ? (
-                    <div>
-                      <p className="text-sm">{row.location_name}</p>
-                      <p className="text-xs text-slate-400">{row.location_address ?? ''}</p>
-                    </div>
-                  ) : <span className="text-slate-400 text-xs">No location assigned</span>;
+                  const row = r as DayRow;
+                  // Nobody is ABSENT on their day off. Without this the whole
+                  // company reads absent every Sunday, and the "Not In Yet"
+                  // card — which does apply the roster — would say nobody is
+                  // missing while the table below listed everyone.
+                  if (row.status === 'absent' && !row.expected_today) {
+                    return <Badge variant="neutral">weekly off</Badge>;
+                  }
+                  // Still mid-day: they have not arrived, but the day is not
+                  // over, so it is not yet a fact that they were absent.
+                  if (row.status === 'absent' && !row.attendance_id) {
+                    return <Badge variant="danger">not in yet</Badge>;
+                  }
+                  return (
+                    <Badge variant={STATUS_BADGE[row.status]}>
+                      {row.status.replace('_', ' ')}
+                    </Badge>
+                  );
                 },
               },
               {
                 key: 'geofence_status',
                 header: 'Geofence',
                 render: r => {
-                  const g = (r as AttRow).geofence_status;
-                  if (g === 'not_required') return <span className="text-slate-400 text-xs">—</span>;
-                  return <Badge variant={g === 'inside' ? 'success' : 'danger'}>{g}</Badge>;
+                  const row = r as DayRow;
+                  // This column was blank for everybody, and the blank was
+                  // TRUE: geofencing is switched off for every employee, so
+                  // there is no fence and 'not_required' rendered as a dash.
+                  // A dash cannot tell that apart from "no reading yet", so
+                  // the admin had no way to see that the fences were down.
+                  // Each state now says which one it is.
+                  if (!row.geofencing_enabled) {
+                    return (
+                      <span
+                        className="text-xs text-slate-400"
+                        title={row.location_name
+                          ? `${row.location_name} is assigned, but geofencing is switched off for this employee`
+                          : 'No work site assigned'}
+                      >
+                        {row.location_name ? 'Off' : 'No site'}
+                      </span>
+                    );
+                  }
+                  if (row.geofence_status == null) {
+                    return <span className="text-xs text-slate-400" title="Not clocked in yet">—</span>;
+                  }
+                  if (row.geofence_status === 'inside') return <Badge variant="success">inside</Badge>;
+                  if (row.geofence_status === 'outside') {
+                    return (
+                      <span title={row.out_of_fence_reason ?? 'Clocked in away from the work site'}>
+                        <Badge variant="danger">outside</Badge>
+                      </span>
+                    );
+                  }
+                  return <span className="text-xs text-slate-400">—</span>;
                 },
               },
-              { key: 'work_date', header: 'Date', render: r => formatDateOnly((r as AttRow).work_date) },
               {
-                key: 'signal',
-                header: 'Signal',
+                key: 'location_name',
+                header: 'Work Site',
                 render: r => {
-                  const age = getSignalAgeMinutes((r as LiveTrackingLiveRow).last_ping_utc);
-                  if (age == null) return <Badge variant="neutral">Unknown</Badge>;
-                  if (age <= 2) return <Badge variant="success">Active</Badge>;
-                  if (age <= 5) return <Badge variant="warning">Delayed</Badge>;
-                  return <Badge variant="danger">Lost</Badge>;
+                  const row = r as DayRow;
+                  if (!row.location_name) return <span className="text-slate-400 text-xs">—</span>;
+                  return (
+                    <span className="text-xs text-slate-500 dark:text-slate-400">
+                      {row.location_name}
+                      {row.location_radius_m != null && row.geofencing_enabled
+                        ? ` · ${row.location_radius_m} m`
+                        : ''}
+                    </span>
+                  );
                 },
               },
+              // The Date column used to follow; the date is on the heading now,
+              // because the table is one day.
+              //
+              // A "Signal" column used to sit here too. It cast an attendance
+              // row to a live-tracking row and read last_ping_utc, which belongs
+              // to live_tracking_sessions and is not returned by this endpoint —
+              // so it rendered "Unknown" for every employee, every day, since it
+              // was written.
             ]}
             data={records as object[]}
-            emptyMessage="No attendance records for today."
-          />
-        )}
-      </Card>
-
-      {/* Live tracking table */}
-      <Card padding={false}>
-        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
-          <div>
-            <h2 className="font-semibold text-slate-800 dark:text-slate-200">Live Tracking</h2>
-            <span className="text-xs text-slate-400 dark:text-slate-500">Auto-refreshes every 5s</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <select
-              value={liveEmployeeFilter}
-              onChange={e => {
-                const v = e.target.value;
-                setLiveEmployeeFilter(v === 'all' ? 'all' : Number(v));
-              }}
-              className="text-xs rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1"
-            >
-              <option value="all">All employees</option>
-              {liveEmployeeOptions.map(opt => (
-                <option key={opt.id} value={opt.id}>{opt.label}</option>
-              ))}
-            </select>
-            <select
-              value={liveRangePreset}
-              onChange={e => setLiveRangePreset(e.target.value as LiveRangePreset)}
-              className="text-xs rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1"
-            >
-              <option value="30m">Last 30 min</option>
-              <option value="2h">Last 2 hours</option>
-              <option value="8h">Last 8 hours</option>
-              <option value="24h">Last 24 hours</option>
-              <option value="custom">Custom</option>
-            </select>
-            {liveRangePreset === 'custom' && (
-              <>
-                <input
-                  type="datetime-local"
-                  value={customFromLocal}
-                  onChange={e => setCustomFromLocal(e.target.value)}
-                  className="text-xs rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1"
-                />
-                <input
-                  type="datetime-local"
-                  value={customToLocal}
-                  onChange={e => setCustomToLocal(e.target.value)}
-                  className="text-xs rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1"
-                />
-              </>
-            )}
-          </div>
-        </div>
-        {liveLoading ? (
-          <div className="flex justify-center py-8"><Spinner /></div>
-        ) : (
-          <Table
-            columns={[
-              {
-                key: 'employee_name',
-                header: 'Employee',
-                render: r => (
-                  <div>
-                    <p className="font-medium text-slate-800 dark:text-slate-200">{(r as LiveTrackingLiveRow).employee_name}</p>
-                    <p className="text-xs text-slate-400">{(r as LiveTrackingLiveRow).emp_id}</p>
-                  </div>
-                ),
-              },
-              { key: 'last_ping_utc', header: 'Last Update', render: r => toIST((r as LiveTrackingLiveRow).last_ping_utc) },
-              {
-                key: 'coords',
-                header: 'Coordinates',
-                render: r => {
-                  const row = r as LiveTrackingLiveRow;
-                  if (row.latitude == null || row.longitude == null) return '—';
-                  const lat = Number(row.latitude);
-                  const lng = Number(row.longitude);
-                  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return '—';
-                  return `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
-                },
-              },
-              {
-                key: 'accuracy_meters',
-                header: 'Accuracy',
-                render: r => {
-                  const a = (r as LiveTrackingLiveRow).accuracy_meters;
-                  if (a == null) return '—';
-                  const accuracy = Number(a);
-                  return Number.isFinite(accuracy) ? `±${accuracy.toFixed(0)}m` : '—';
-                },
-              },
-              {
-                key: 'path_points',
-                header: 'Path Points',
-                render: r => ((r as LiveTrackingLiveRow).path?.length ?? 0),
-              },
-            ]}
-            data={filteredLiveSessions as object[]}
-            emptyMessage="No active live-tracking sessions."
-            onRowClick={row => setSelectedLiveSessionId((row as LiveTrackingLiveRow).session_id)}
-            rowClassName={row =>
-              (row as LiveTrackingLiveRow).session_id === selectedLiveSessionId
-                ? 'bg-blue-50 dark:bg-blue-900/20'
-                : ''
+            emptyMessage={
+              statusFilter
+                ? `Nobody matches "${STATUS_FILTERS.find(f => f.value === statusFilter)?.label ?? statusFilter}" today.`
+                : 'No active employees.'
             }
           />
         )}
-        {selectedLiveSession && (
-          <div className="p-4 border-t border-slate-200 dark:border-slate-700 space-y-2">
-            <div className="flex items-center justify-between">
-              <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
-                Live Map: {selectedLiveSession.employee_name} ({selectedLiveSession.emp_id})
-              </p>
-              {selectedHasCoords && (
-                <a
-                  href={`https://www.google.com/maps?q=${selectedLat},${selectedLng}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
-                >
-                  Open in Maps
-                </a>
-              )}
-            </div>
-            {routeMapSrc ? (
-              <div className="space-y-2">
-                <p className="text-xs font-medium text-slate-600 dark:text-slate-300">
-                  Movement route ({selectedPath.length} point{selectedPath.length === 1 ? '' : 's'})
-                </p>
-                <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700">
-                  <iframe
-                    title="Movement route map"
-                    srcDoc={routeMapSrc}
-                    className="w-full h-80"
-                    loading="lazy"
-                  />
-                </div>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Blue line is the exact path taken · green is start · red is latest location.
-                </p>
-              </div>
-            ) : (
-              <p className="text-sm text-slate-500 dark:text-slate-400">
-                Waiting for tracking points — they appear here as the employee moves.
-              </p>
-            )}
-          </div>
-        )}
       </Card>
 
+      {/* Daily work updates */}
       <Card padding={false}>
         <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-700">
           <h2 className="font-semibold text-slate-800 dark:text-slate-200">Daily Work Updates</h2>

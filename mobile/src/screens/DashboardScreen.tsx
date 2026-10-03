@@ -14,14 +14,15 @@ import {
   ToastAndroid,
   Alert,
   AppState,
+  Modal,
 } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { WebView } from 'react-native-webview';
 import * as Location from 'expo-location';
-import { apiFetch, logout } from '../api/client';
+import { apiFetch, logout, ApiError } from '../api/client';
 import { getStoredEmployee, StoredEmployee } from '../storage/tokens';
 import { saveTodayCache, getTodayCache, clearTodayCache } from '../storage/cache';
-import { startBackgroundTracking, stopBackgroundTracking, isTrackingRunning } from '../location/tracking';
+import { startBackgroundTracking, stopBackgroundTracking, isTrackingRunning, diagnoseTracking } from '../location/tracking';
 import {
   startGeofenceAutoMode,
   stopGeofenceAutoMode,
@@ -30,16 +31,52 @@ import {
 } from '../location/geofenceAuto';
 import { startLocationWatch, stopLocationWatch, checkLocationAndWarn } from '../location/locationWatch';
 import { scheduleShiftEndReminders, cancelShiftEndReminders } from '../notifications/shiftReminder';
+import {
+  scheduleClockInReminders,
+  cancelClockInReminders,
+  REMINDER_HOUR,
+} from '../notifications/clockInReminder';
+import { notifyPermissionUpdates, PermissionUpdate } from '../notifications/permissionUpdates';
+import { startInboxPoller, stopInboxPoller } from '../notifications/inboxPoller';
+import DatePicker from './DatePicker';
+import TimePicker from './TimePicker';
 import { requestIgnoreBatteryOptimization, openAppSettings } from '../location/batteryOptimization';
 import ConsentModal from './ConsentModal';
 import { colors } from '../theme';
 
 const CONSENT_KEY = 'location_consent_v1';
 
-const STATUS_BAR_PAD = Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 : 0;
+// How far down the header has to start to clear the status bar.
+//
+// The app draws EDGE TO EDGE (edgeToEdgeEnabled=true, and Android 15 enforces
+// it), so content begins at y=0 — underneath the clock and the battery icon.
+// This was StatusBar.currentHeight alone, which reported too little on the
+// phone in the bug report: the title, the logo and Sign out all sat under the
+// status bar.
+//
+// A FLOOR is applied rather than trusting that number. Where currentHeight is
+// right (24–48dp on most phones, more with a camera cutout) the real value
+// wins; where it under-reports, 36 still clears an ordinary status bar.
+//
+// react-native-safe-area-context would measure this properly and was tried —
+// it compiles C++ through CMake, and the object paths under this project's
+// directory exceed the 260-character Windows path limit, so it cannot be built
+// on the machine that produces these APKs. Not worth moving the repository for
+// one padding value.
+const STATUS_BAR_PAD = Platform.OS === 'android'
+  ? Math.max(StatusBar.currentHeight ?? 0, 36)
+  : 0;
 const TZ = 'Asia/Kolkata'; // all dates/times shown in IST, matching the web app
 
+interface TodaySession {
+  in_utc: string;
+  out_utc: string | null;
+  out_kind: string | null;
+}
+
 interface TodayAttendance {
+  /** The day's first login — never moves; clock_in_utc is the current session. */
+  first_clock_in_utc?: string | null;
   clock_in_utc: string | null;
   clock_out_utc: string | null;
   total_minutes: number | null;
@@ -53,6 +90,8 @@ interface HistoryRow {
   clock_in_utc: string | null;
   clock_out_utc: string | null;
   total_minutes: number | null;
+  permission_minutes?: number | null;
+  credited_minutes?: number | null;
   status: string | null;
 }
 
@@ -62,6 +101,29 @@ interface Shift {
   start_time?: string;
   end_time?: string;
   required_hours?: number;
+  /** "Mon".."Sat" — used so the morning reminder skips their day off. */
+  working_days?: string[];
+}
+
+interface PermissionRow {
+  id: number;
+  permission_date: string;
+  start_time: string;
+  end_time: string;
+  minutes: number;
+  reason: string | null;
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled';
+  review_notes: string | null;
+}
+
+interface PermissionBalance {
+  month: string;
+  monthly_limit_minutes: number;
+  used_minutes: number;
+  pending_minutes: number;
+  remaining_minutes: number;
+  max_minutes_per_request: number;
+  min_minutes_per_request: number;
 }
 
 interface FenceLocation {
@@ -86,7 +148,25 @@ function timeOnly(iso: string | null): string {
 }
 
 // IST calendar date (YYYY-MM-DD) — matches the server's getWorkDateIST().
+/**
+ * The WORK date an instant belongs to.
+ *
+ * The work day turns over at WORK_DAY_START_HOUR (07:00 IST), not midnight, so
+ * a night that runs past 00:00 still belongs to the day it started on. This has
+ * to match lib/attendance.getWorkDateIST() on the server exactly — if the phone
+ * called it a new day at midnight it would cache the wrong day's attendance and
+ * show a blank card to someone who is still on shift.
+ */
+const WORK_DAY_START_HOUR = 7;
+
 function istYmd(date: Date): string {
+  const shifted = new Date(date.getTime() - WORK_DAY_START_HOUR * 60 * 60 * 1000);
+  return shifted.toLocaleDateString('en-CA', { timeZone: TZ });
+}
+
+/** The plain IST calendar date, for things that are about the wall clock
+ *  rather than the work day (e.g. the default date on a permission form). */
+function istCalendarYmd(date: Date): string {
   return date.toLocaleDateString('en-CA', { timeZone: TZ });
 }
 
@@ -108,6 +188,55 @@ function initials(name?: string | null): string {
   return ((parts[0]?.[0] ?? '') + (parts[1]?.[0] ?? '')).toUpperCase() || '--';
 }
 
+// "09:30" → "9:30 am", for displaying permission windows.
+function clock12(t: string): string {
+  const [h, m] = t.split(':').map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return t;
+  const suffix = h < 12 ? 'am' : 'pm';
+  const hour12 = h % 12 === 0 ? 12 : h % 12;
+  return `${hour12}:${String(m).padStart(2, '0')} ${suffix}`;
+}
+
+/** "HH:MM" -> minutes since midnight, or null when malformed. */
+function clockMinutes(value: string): number | null {
+  const m = value.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h > 23 || min > 59) return null;
+  return h * 60 + min;
+}
+
+/** Minutes between two "HH:MM" wall-clock times, or null when not a forward
+ *  span. Used for the permission form, where a backwards window is invalid. */
+function spanMinutes(start: string, end: string): number | null {
+  const s = clockMinutes(start);
+  const e = clockMinutes(end);
+  if (s === null || e === null) return null;
+  const diff = e - s;
+  return diff > 0 ? diff : null;
+}
+
+/** Minutes the shift asks for — mirrors lib/permissions.requiredMinutesForShift,
+ *  including a shift that runs past midnight (22:00-06:00 is 8h, not a fallback
+ *  9h). Keeping the two in step matters because this drives the live credited
+ *  figure on screen while the server computes the stored one. */
+function requiredMinutes(shift: Shift | null): number {
+  if (shift?.required_hours != null && Number(shift.required_hours) > 0) {
+    return Math.round(Number(shift.required_hours) * 60);
+  }
+  if (shift?.start_time && shift?.end_time) {
+    const s = clockMinutes(shift.start_time.slice(0, 5));
+    const e = clockMinutes(shift.end_time.slice(0, 5));
+    if (s !== null && e !== null) {
+      const span = ((e - s) % 1440 + 1440) % 1440;
+      if (span > 0) return span;
+    }
+  }
+  // No schedule at all — standard 9-hour day.
+  return 9 * 60;
+}
+
 // Matches the web: flexible shifts show "<name> - N hours required",
 // fixed shifts show "<name> - HH:MM to HH:MM".
 function scheduleLine(shift: Shift | null): string | null {
@@ -124,15 +253,90 @@ function toast(msg: string): void {
   if (Platform.OS === 'android') ToastAndroid.show(msg, ToastAndroid.SHORT);
 }
 
-async function getCoords(): Promise<{ latitude: number; longitude: number }> {
+export interface FixPayload {
+  /** null when the phone could not get a fix — see getCoords(allowUnknown). */
+  latitude: number | null;
+  longitude: number | null;
+  /** Android reports when a fix came from a mock-location provider. */
+  is_mocked?: boolean;
+  accuracy_m?: number | null;
+}
+
+/**
+ * Where the phone thinks it is, or an honest admission that it does not know.
+ *
+ * @param allowUnknown  Return null coordinates instead of throwing when no fix
+ *                      can be had. TRUE for clock-out, FALSE for clock-in: a
+ *                      clock-in is judged against a fence and needs a position;
+ *                      a clock-out only ends the employee's own day.
+ */
+async function getCoords(
+  { allowUnknown = false }: { allowUnknown?: boolean } = {},
+): Promise<FixPayload> {
   const perm = await Location.requestForegroundPermissionsAsync();
-  if (perm.status !== 'granted') throw new Error('Location permission is required.');
-  // Use a recent cached fix first — instant, so clock-in doesn't hang on a
-  // fresh GPS lock (during which the connection could drop).
-  const last = await Location.getLastKnownPositionAsync({ maxAge: 60_000, requiredAccuracy: 200 });
-  if (last) return { latitude: last.coords.latitude, longitude: last.coords.longitude };
-  const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-  return { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+  if (perm.status !== 'granted') {
+    if (!allowUnknown) throw new Error('Location permission is required.');
+    return { latitude: null, longitude: null, is_mocked: false, accuracy_m: null };
+  }
+  // Clock-in must feel instant, and a fresh GPS lock is the one thing that
+  // cannot be made instant — cold, indoors, it takes 5–30 seconds, and it has
+  // NO timeout, which is exactly the "clock in takes time" complaint. So:
+  //
+  //   1. a cached fix from the last 2 minutes — instant, covers mid-shift;
+  //   2. else a fresh fix RACED against 8 seconds;
+  //   3. on timeout, any fix from the last 10 minutes — its own accuracy is
+  //      sent along, so the server judges it honestly;
+  //   4. only with no cached fix at all do we keep waiting for the lock —
+  //      there is genuinely nothing else to offer.
+  const last = await Location.getLastKnownPositionAsync({ maxAge: 120_000, requiredAccuracy: 250 });
+  let pos = last;
+  if (!pos) {
+    const fresh = Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+    pos = await Promise.race([
+      fresh,
+      new Promise<null>(resolve => setTimeout(() => resolve(null), 8_000)),
+    ]);
+    if (!pos) {
+      // Any older fix will do at this point — its own accuracy travels with it,
+      // so the server judges it honestly rather than trusting it blindly.
+      pos = await Location.getLastKnownPositionAsync({ maxAge: 600_000 });
+    }
+    if (!pos) {
+      // Last resort: keep waiting for the lock, but NOT for ever.
+      //
+      // This used to be a bare `await fresh`, with no timeout at all. On a
+      // phone that never gets a lock — indoors, location switched off, GPS
+      // hardware unable to fix — that promise simply never settles, so tapping
+      // Clock Out span the button until the employee gave up and went home
+      // with the day still open. That day then reached the next morning as an
+      // unclosed session, which is the other half of the reports.
+      //
+      // Twenty more seconds, then answer honestly.
+      pos = await Promise.race([
+        fresh,
+        new Promise<null>(resolve => setTimeout(() => resolve(null), 20_000)),
+      ]);
+    }
+  }
+
+  if (!pos) {
+    if (!allowUnknown) {
+      throw new Error(
+        'Could not get your location. Move outside or into an open area, check that ' +
+        'Location is switched on, and try again.',
+      );
+    }
+    // Clocking out matters more than knowing where from.
+    return { latitude: null, longitude: null, is_mocked: false, accuracy_m: null };
+  }
+  // `mocked` is set by Android when the fix came from a fake-GPS app. Pass it
+  // through rather than deciding here — the server records the attempt.
+  return {
+    latitude: pos.coords.latitude,
+    longitude: pos.coords.longitude,
+    is_mocked: (pos as { mocked?: boolean }).mocked === true,
+    accuracy_m: pos.coords.accuracy ?? null,
+  };
 }
 
 export default function DashboardScreen({ onLogout }: { onLogout: () => void }) {
@@ -143,9 +347,14 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [tracking, setTracking] = useState(false);
+  // The reason tracking is not running, in the employee's words. Thrown away
+  // before, which left "tap to fix" offering battery settings for problems
+  // battery settings cannot fix.
+  const [trackingIssue, setTrackingIssue] = useState<string | null>(null);
   const [trackingEnabled, setTrackingEnabled] = useState(true); // admin per-employee toggle
   const [multiSession, setMultiSession] = useState(false); // plant: several clock-ins per day
   const [fenceLocation, setFenceLocation] = useState<FenceLocation | null>(null);
+  const [todaySessions, setTodaySessions] = useState<TodaySession[]>([]);
   // Google Play prominent-disclosure consent. null = not yet loaded.
   const [hasConsent, setHasConsent] = useState<boolean | null>(null);
   const [consentVisible, setConsentVisible] = useState(false);
@@ -159,6 +368,51 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   const [liveCoords, setLiveCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [dailyUpdate, setDailyUpdate] = useState('');
   const [savingUpdate, setSavingUpdate] = useState(false);
+
+  // Permission hours — short paid time off inside the working day.
+  const [permissions, setPermissions] = useState<PermissionRow[]>([]);
+  const [permissionBalance, setPermissionBalance] = useState<PermissionBalance | null>(null);
+  const [todayPermissionMinutes, setTodayPermissionMinutes] = useState(0);
+  const [permFormOpen, setPermFormOpen] = useState(false);
+  const [permDate, setPermDate] = useState(istCalendarYmd(new Date()));
+  const [permDateOpen, setPermDateOpen] = useState(false);
+  // The server refuses dates more than 3 days back (PERMISSION_MAX_PAST_DAYS),
+  // so the calendar greys those out instead of letting someone pick a day the
+  // submit will bounce.
+  const permMinDate = istCalendarYmd(new Date(Date.now() - 3 * 86_400_000));
+  // "Mon, 11 Aug" — what a person calls a day. Anchored to noon so the label
+  // cannot slip a day in any timezone.
+  const permDateLabel = (() => {
+    const d = new Date(`${permDate}T12:00:00Z`);
+    return Number.isNaN(d.getTime())
+      ? permDate
+      : d.toLocaleDateString('en-IN', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+  })();
+  // Times are PICKED on a clock face, not typed. They used to be a text field
+  // plus an AM/PM toggle, propped up by a rule that guessed PM for an hour of
+  // 1–7 — a guess that existed only because typing let people enter times they
+  // did not mean. A dial cannot produce "25:99", cannot be left half-finished,
+  // and is how a time is set on a phone everywhere else.
+  //
+  // Held as 24-hour "HH:MM", which is what the server takes; the dial is the
+  // only thing that speaks AM/PM.
+  const [permStart24, setPermStart24] = useState<string | null>(null);
+  const [permEnd24, setPermEnd24] = useState<string | null>(null);
+  const [permTimeOpen, setPermTimeOpen] = useState<'start' | 'end' | null>(null);
+
+  /** "14:30" → "2:30 PM" for the button face. */
+  const timeLabel = (hhmm: string | null): string => {
+    if (!hhmm) return 'Tap to choose';
+    const m = /^(\d{2}):(\d{2})$/.exec(hhmm);
+    if (!m) return 'Tap to choose';
+    const h = Number(m[1]);
+    const suffix = h < 12 ? 'AM' : 'PM';
+    const h12 = h % 12 === 0 ? 12 : h % 12;
+    return `${h12}:${m[2]} ${suffix}`;
+  };
+  const [permReason, setPermReason] = useState('');
+  const [permError, setPermError] = useState<string | null>(null);
+  const [permBusy, setPermBusy] = useState(false);
 
   const clockedIn = !!attendance?.clock_in_utc;
   const clockedOut = !!attendance?.clock_out_utc;
@@ -174,6 +428,18 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     return Number(attendance?.banked_minutes ?? 0) + Math.max(0, Math.floor((now.getTime() - ms) / 60_000));
   }, [attendance, now]);
 
+  // Approved permission tops the day back up to the shift length — never past
+  // it, so hours are not double-counted when the employee stayed clocked in
+  // through the permission window. Mirrors lib/permissions.creditedMinutes.
+  const liveCreditedMinutes = useMemo(() => {
+    if (liveWorkedMinutes == null) return null;
+    if (todayPermissionMinutes <= 0) return liveWorkedMinutes;
+    return Math.min(
+      liveWorkedMinutes + todayPermissionMinutes,
+      Math.max(liveWorkedMinutes, requiredMinutes(shift)),
+    );
+  }, [liveWorkedMinutes, todayPermissionMinutes, shift]);
+
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
@@ -185,10 +451,20 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         attendance: TodayAttendance | null;
         schedule: { shift?: Shift; location?: { latitude: number | string; longitude: number | string; radius_meters: number | string } | null } | null;
         multi_session?: boolean;
+        permission_minutes?: number;
+        permission_balance?: PermissionBalance;
+        permission_updates?: PermissionUpdate[];
+        today_sessions?: TodaySession[];
       }>('/api/attendance/today');
+      setTodaySessions(data.today_sessions ?? []);
+      // Announce approved/rejected permission decisions — deduped internally,
+      // so calling on every refresh is safe.
+      void notifyPermissionUpdates(data.permission_updates);
       setAttendance(data.attendance);
       setShift(data.schedule?.shift ?? null);
       setMultiSession(data.multi_session === true);
+      setTodayPermissionMinutes(Number(data.permission_minutes ?? 0));
+      if (data.permission_balance) setPermissionBalance(data.permission_balance);
       const loc = data.schedule?.location;
       setFenceLocation(
         loc
@@ -242,6 +518,23 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     }
   }, []);
 
+  // This month's permission requests plus the remaining entitlement.
+  const loadPermissions = useCallback(async () => {
+    const monthStart = `${istYmd(new Date()).slice(0, 7)}-01`;
+    try {
+      const [list, balance] = await Promise.all([
+        apiFetch<{ permissions: PermissionRow[] }>(
+          `/api/permissions?from_date=${monthStart}&limit=5&page=1`,
+        ),
+        apiFetch<PermissionBalance>('/api/permissions/balance'),
+      ]);
+      setPermissions(list.permissions ?? []);
+      setPermissionBalance(balance);
+    } catch {
+      /* non-fatal — the card just shows what it has */
+    }
+  }, []);
+
   useEffect(() => {
     let active = true;
     (async () => {
@@ -270,11 +563,12 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       loadHistory();
       loadDailyUpdate();
       loadTrackingEnabled();
+      loadPermissions();
     })();
     return () => {
       active = false;
     };
-  }, [loadToday, loadHistory, loadDailyUpdate, loadTrackingEnabled]);
+  }, [loadToday, loadHistory, loadDailyUpdate, loadTrackingEnabled, loadPermissions]);
 
   // Keep the live map updated while clocked in. Also auto-resume background
   // tracking — when the app is reopened mid-shift, the OS may have stopped the
@@ -300,7 +594,16 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       return;
     }
     // No auto-start (or map polling) before the disclosure has been accepted.
-    if (hasConsent !== true) return;
+    // No auto-start before the disclosure is accepted. Say so on the pill —
+    // this branch returns without starting anything, and the pill's generic
+    // "off" plus a battery dialog could never fix a missing consent flag. A
+    // silent dead end is how an employee ends up with perfect settings and no
+    // tracking.
+    if (hasConsent !== true) {
+      setTracking(false);
+      setTrackingIssue('Location consent not accepted');
+      return;
+    }
     let active = true;
 
     const ensureTracking = async () => {
@@ -309,9 +612,14 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         if (!running) {
           await startBackgroundTracking();
         }
-        if (active) setTracking(true);
-      } catch {
-        if (active) setTracking(false);
+        if (active) { setTracking(true); setTrackingIssue(null); }
+      } catch (e) {
+        // startBackgroundTracking throws a precise, actionable message — keep
+        // it. Discarding it is what made the fix helper useless.
+        if (active) {
+          setTracking(false);
+          setTrackingIssue(e instanceof Error ? e.message : null);
+        }
       }
     };
 
@@ -335,6 +643,9 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     // in-app check every minute while the dashboard is open (strike spacing
     // is enforced inside checkLocationAndWarn, so this cannot spam).
     void startLocationWatch();
+    // Inbox heartbeat: announces permission decisions with the app closed.
+    // Independent of shift/tracking state — it dies only at logout.
+    void startInboxPoller();
     void checkLocationAndWarn();
     const watchId = setInterval(() => void checkLocationAndWarn(), 60_000);
     const id = setInterval(fetchPos, 20_000);
@@ -348,6 +659,11 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         loadToday();
         ensureTracking();
         fetchPos();
+        // Check location health straight away rather than waiting up to a
+        // minute for the interval. Android throttles the background task hard,
+        // so opening the app is often the first reliable chance to notice that
+        // location has been off — and to deliver the warning for it.
+        void checkLocationAndWarn();
       }
     });
     return () => {
@@ -363,7 +679,8 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     loadHistory();
     loadDailyUpdate();
     loadTrackingEnabled();
-  }, [loadToday, loadHistory, loadDailyUpdate, loadTrackingEnabled]);
+    loadPermissions();
+  }, [loadToday, loadHistory, loadDailyUpdate, loadTrackingEnabled, loadPermissions]);
 
   // OS-level "shift over, please clock out" notifications — they fire on the
   // lock screen even with the app closed, exactly 9 hours after clock-in.
@@ -378,15 +695,39 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     }
   }, [attendance?.clock_in_utc, clockedIn, clockedOut, loading]);
 
-  // Auto attendance (plant staff): after the day's first MANUAL clock-in the
-  // phone watches the work-site geofence — leaving clocks out, returning
-  // clocks in again. Gated on todayLoaded: acting on the initial empty state
-  // would stop monitoring on every app open, permanently killing re-entry
-  // auto clock-in during a break. While auto-clocked-out (our own pending
-  // flag), monitoring is re-ensured and missed events are reconciled.
+  // MORNING REMINDER — "you have not clocked in yet", each working day.
+  //
+  // Armed whenever they are not currently on the clock and dropped the moment
+  // they are, so nobody is nagged about a day they have already started. It is
+  // re-armed on the next app open, which is also what puts tomorrow's back
+  // after today's clock-out.
+  //
+  // Their own working days are passed through so it stays quiet on their day
+  // off; with no roster on the phone it reminds every morning, which is the
+  // honest default when there is nothing to read.
+  useEffect(() => {
+    if (loading || hasConsent !== true) return;
+    if (clockedIn && !clockedOut) {
+      void cancelClockInReminders();
+    } else {
+      void scheduleClockInReminders(shift?.working_days ?? null);
+    }
+  }, [clockedIn, clockedOut, loading, hasConsent, shift?.working_days]);
+
+  // Auto attendance: after the day's first MANUAL clock-in the phone watches
+  // the work-site geofence. LEAVING clocks out — for everyone with a fence, so
+  // nobody stays on the clock after walking off site. RETURNING clocks back in
+  // only for plant staff, whose day may legitimately have several sessions;
+  // that rule lives in the geofence task itself, so it is safe to run the
+  // watch for single-session employees too.
+  //
+  // Gated on todayLoaded: acting on the initial empty state would stop
+  // monitoring on every app open, permanently killing re-entry auto clock-in
+  // during a break. While auto-clocked-out (our own pending flag), monitoring
+  // is re-ensured and missed events are reconciled.
   useEffect(() => {
     if (loading || hasConsent !== true || !todayLoaded) return;
-    if (!multiSession || !fenceLocation || !trackingEnabled) {
+    if (!fenceLocation || !trackingEnabled) {
       void stopGeofenceAutoMode();
       return;
     }
@@ -438,7 +779,10 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     setError(null);
     try {
       const coords = await getCoords();
-      await apiFetch('/api/attendance/clock-in', { method: 'POST', body: coords });
+      await apiFetch('/api/attendance/clock-in', {
+        method: 'POST',
+        body: coords,
+      });
       // Only start location tracking if the admin enabled it for this employee.
       if (trackingEnabled) {
         await startBackgroundTracking();
@@ -457,6 +801,30 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       refresh();
       toast('Clocked in successfully ✓');
     } catch (e) {
+      // Away from the work site — refused, with no way through it from here.
+      // A reason box used to open at this point and let them in; it is gone,
+      // because it was being used to step straight back onto the clock from
+      // the spot the fence had just closed the day at.
+      //
+      // Shown as an alert rather than a toast because it asks them to DO
+      // something — walk back to the site — and a toast is gone before they
+      // have finished reading it. The server's message carries the site, the
+      // radius and how far out they are, so it says how far there is to walk.
+      if (e instanceof ApiError
+          && (e.code === 'outside_fence' || e.code === 'fence_closed_day')) {
+        setBusy(false);
+        Alert.alert(
+          e.code === 'fence_closed_day'
+            ? 'Come back to the site to clock in'
+            : 'You are not at your work site',
+          `${e.message}
+
+If you are working away from the site today, ask your `
+            + 'manager to approve on-duty work for you.',
+          [{ text: 'OK' }],
+        );
+        return;
+      }
       const msg = e instanceof Error ? e.message : 'Clock-in failed.';
       setError(msg);
       toast(msg);
@@ -480,7 +848,9 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     setBusy(true);
     setError(null);
     try {
-      const coords = await getCoords();
+      // allowUnknown: a phone that cannot see where it is must still be able to
+      // end its owner's day. The alternative is the day staying open all night.
+      const coords = await getCoords({ allowUnknown: true });
       await apiFetch('/api/attendance/clock-out', { method: 'POST', body: coords });
       await stopBackgroundTracking();
       // Manual clock-out means done for the day — end geofence auto mode and
@@ -518,24 +888,199 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     }
   };
 
+  // --- Permission hours ------------------------------------------------------
+
+  const handleApplyPermission = async () => {
+    setPermError(null);
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(permDate.trim())) {
+      setPermError('Date must be YYYY-MM-DD');
+      return;
+    }
+    if (!permStart24 || !permEnd24) {
+      setPermError('Choose a From and a To time');
+      return;
+    }
+    const minutes = spanMinutes(permStart24, permEnd24);
+    if (minutes === null) {
+      setPermError('The end time must be after the start time');
+      return;
+    }
+    if (permissionBalance) {
+      if (minutes < permissionBalance.min_minutes_per_request) {
+        setPermError(`Permission must be at least ${minutesToHours(permissionBalance.min_minutes_per_request)}`);
+        return;
+      }
+      if (minutes > permissionBalance.max_minutes_per_request) {
+        setPermError(`A single permission cannot exceed ${minutesToHours(permissionBalance.max_minutes_per_request)}`);
+        return;
+      }
+      if (minutes > permissionBalance.remaining_minutes) {
+        setPermError(
+          permissionBalance.remaining_minutes <= 0
+            ? "This month's permission hours are used up"
+            : `Only ${minutesToHours(permissionBalance.remaining_minutes)} left this month`,
+        );
+        return;
+      }
+    }
+
+    setPermBusy(true);
+    try {
+      await apiFetch('/api/permissions', {
+        method: 'POST',
+        body: {
+          permission_date: permDate.trim(),
+          start_time: permStart24,
+          end_time: permEnd24,
+          reason: permReason.trim() || null,
+        },
+      });
+      setPermFormOpen(false);
+      setPermStart24(null);
+      setPermEnd24(null);
+      setPermReason('');
+      toast('Permission sent for approval ✓');
+      await loadPermissions();
+    } catch (e) {
+      setPermError(e instanceof Error ? e.message : 'Failed to apply');
+    } finally {
+      setPermBusy(false);
+    }
+  };
+
+  const handleCancelPermission = (row: PermissionRow) => {
+    Alert.alert(
+      'Withdraw request',
+      `Cancel the permission on ${dateDMY(row.permission_date)} (${clock12(row.start_time.slice(0, 5))} – ${clock12(row.end_time.slice(0, 5))})?`,
+      [
+        { text: 'Keep', style: 'cancel' },
+        {
+          text: 'Withdraw',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              try {
+                await apiFetch(`/api/permissions/${row.id}`, {
+                  method: 'PATCH',
+                  body: { action: 'cancel' },
+                });
+                toast('Request withdrawn');
+                await loadPermissions();
+              } catch (e) {
+                toast(e instanceof Error ? e.message : 'Failed to cancel');
+              }
+            })();
+          },
+        },
+      ],
+    );
+  };
+
   const handleLogout = async () => {
     await stopBackgroundTracking().catch(() => {});
     await stopGeofenceAutoMode().catch(() => {});
     await stopLocationWatch().catch(() => {});
+    await stopInboxPoller().catch(() => {});
     await cancelShiftEndReminders();
     await clearTodayCache();
     await logout();
     onLogout();
   };
 
-  // Shown when tracking is off — helps the employee re-enable background tracking.
-  const fixTracking = () => {
+  // Shown when tracking is off. Diagnoses the ACTUAL blocker and offers the
+  // one action that clears it — the old version offered battery settings for
+  // everything, so an employee whose real problem was the location permission
+  // could grant background activity all day and see the same dialog return.
+  const fixTracking = async () => {
+    // Consent first: nothing else can start without it, and no settings screen
+    // can grant it — it is a tap inside this app.
+    if (hasConsent !== true) {
+      consentActionRef.current = 'in';
+      setConsentVisible(true);
+      return;
+    }
+    const { blocker, message } = await diagnoseTracking();
+
+    // Nothing the app can see is wrong: try starting the service right now. If
+    // it starts, there was nothing to fix and saying so beats another dialog.
+    if (blocker === null) {
+      try {
+        await startBackgroundTracking();
+        setTracking(true);
+        setTrackingIssue(null);
+        toast('Tracking started ✓');
+        return;
+      } catch (e) {
+        setTrackingIssue(e instanceof Error ? e.message : null);
+      }
+    }
+
+    const retryAfter = async () => {
+      // Give the settings screen a moment to apply, then re-check so the pill
+      // turns green without the employee wondering whether it worked.
+      setTimeout(() => {
+        void (async () => {
+          const again = await diagnoseTracking();
+          if (again.blocker === null) {
+            try {
+              await startBackgroundTracking();
+              setTracking(true);
+              setTrackingIssue(null);
+              toast('Tracking started ✓');
+            } catch { /* the pill still shows the reason */ }
+          }
+        })();
+      }, 1500);
+    };
+
+    if (blocker === 'services') {
+      Alert.alert('Turn on location', `${message} Switch GPS on from the quick settings, then tap the pill again.`,
+        [{ text: 'OK' }]);
+      return;
+    }
+    if (blocker === 'notifications') {
+      Alert.alert(
+        'Allow notifications',
+        `${message}\n\nAndroid keeps the tracking service alive only while its notification can be shown. Turn Notifications on for this app.`,
+        [
+          { text: 'Open app settings', onPress: () => { void openAppSettings(); void retryAfter(); } },
+          { text: 'Cancel', style: 'cancel' },
+        ],
+      );
+      return;
+    }
+    if (blocker === 'foreground' || blocker === 'precise' || blocker === 'background') {
+      Alert.alert(
+        'Location permission needed',
+        `${message}\n\nOpen Permissions → Location and choose "Allow all the time" with Precise turned on.`,
+        [
+          {
+            text: 'Fix permission',
+            onPress: () => {
+              void (async () => {
+                // Ask directly first — on Android 11+ the OS itself sends the
+                // employee to the right settings page for "all the time".
+                await Location.requestForegroundPermissionsAsync().catch(() => null);
+                await Location.requestBackgroundPermissionsAsync().catch(() => null);
+                await retryAfter();
+              })();
+            },
+          },
+          { text: 'Open app settings', onPress: () => { void openAppSettings(); void retryAfter(); } },
+          { text: 'Cancel', style: 'cancel' },
+        ],
+      );
+      return;
+    }
+
+    // Permissions are all in order — this is battery management.
     Alert.alert(
-      'Turn on background tracking',
-      'Your phone is stopping the app from tracking in the background. Allow it to run in the background, then it will keep recording your location.',
+      'Allow background activity',
+      `${message}\n\nAllow it to run in the background. On Oppo, Realme, Vivo and Xiaomi phones also turn on "Auto-start" and set Battery to "Don't optimise" for this app.`,
       [
-        { text: 'Allow background', onPress: () => { void requestIgnoreBatteryOptimization(); } },
-        { text: 'Open app settings', onPress: () => { void openAppSettings(); } },
+        { text: 'Allow background', onPress: () => { void requestIgnoreBatteryOptimization(); void retryAfter(); } },
+        { text: 'Open app settings', onPress: () => { void openAppSettings(); void retryAfter(); } },
         { text: 'Cancel', style: 'cancel' },
       ],
     );
@@ -570,6 +1115,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
           setError('Location consent is required to mark attendance.');
         }}
       />
+
       <View style={styles.header}>
         <View style={styles.brandRow}>
           <View style={styles.logo}>
@@ -596,13 +1142,38 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         <Text style={styles.date}>{dateStr}</Text>
         <Text style={styles.clock}>{timeStr}</Text>
 
+        {/* How far from the work site, refreshed with the 20s position poll.
+            When the fence is armed, being outside means clock-in will be
+            REFUSED — say so before they tap, not after, and say how far there
+            is to walk. It used to promise a reason box; there is no longer one
+            to promise. */}
+        {fenceLocation && liveCoords && (() => {
+          const toRad = (d: number) => (d * Math.PI) / 180;
+          const dLat = toRad(fenceLocation.latitude - liveCoords.lat);
+          const dLng = toRad(fenceLocation.longitude - liveCoords.lng);
+          const a = Math.sin(dLat / 2) ** 2 +
+            Math.cos(toRad(liveCoords.lat)) * Math.cos(toRad(fenceLocation.latitude)) * Math.sin(dLng / 2) ** 2;
+          const dist = Math.round(6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+          const inside = dist <= fenceLocation.radius_meters;
+          const distText = dist >= 1000 ? `${(dist / 1000).toFixed(1)} km` : `${dist} m`;
+          return (
+            <View style={[styles.fenceBanner, inside ? styles.fenceBannerIn : styles.fenceBannerOut]}>
+              <Text style={[styles.fenceBannerText, inside ? styles.fenceBannerTextIn : styles.fenceBannerTextOut]}>
+                {inside
+                  ? `✓ At your work site — ${distText} from centre (limit ${fenceLocation.radius_meters} m)`
+                  : `⚠ Away from your work site — ${distText} away. You cannot clock in from here.`}
+              </Text>
+            </View>
+          );
+        })()}
+
         {/* TODAY */}
         <View style={styles.card}>
           <Text style={styles.cardLabel}>TODAY</Text>
           <View style={styles.statsRow}>
             <View style={styles.statCol}>
               <Text style={styles.statLabel}>Clock In</Text>
-              <Text style={styles.statValue}>{timeOnly(attendance?.clock_in_utc ?? null)}</Text>
+              <Text style={styles.statValue}>{timeOnly(attendance?.first_clock_in_utc ?? attendance?.clock_in_utc ?? null)}</Text>
             </View>
             <View style={styles.statCol}>
               <Text style={styles.statLabel}>Clock Out</Text>
@@ -610,9 +1181,63 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
             </View>
             <View style={styles.statCol}>
               <Text style={styles.statLabel}>Hours</Text>
-              <Text style={styles.statValue}>{minutesToHours(liveWorkedMinutes)}</Text>
+              <Text style={styles.statValue}>{minutesToHours(liveCreditedMinutes)}</Text>
             </View>
           </View>
+
+          {/* EVERY clock-in and clock-out of the day, always — not only once
+              there are two of them.
+
+              It used to appear at length > 1, so the first session of the day
+              was invisible and the list arrived out of nowhere on the second.
+              The row above shows the day's FIRST in and LAST out, which is a
+              summary; this is the record, and the record is the point.
+
+              Falls back to the attendance row when the audit log has no
+              sessions to pair (an older day, or entries that failed to write):
+              a clock-in that happened must never show an empty list. */}
+          {(() => {
+            const sessions = todaySessions.length
+              ? todaySessions
+              : attendance?.clock_in_utc
+                ? [{
+                    in_utc: attendance.first_clock_in_utc ?? attendance.clock_in_utc,
+                    out_utc: attendance.clock_out_utc ?? null,
+                    out_kind: null as string | null,
+                  }]
+                : [];
+            if (!sessions.length) return null;
+            // Just the times: in to out, one line each. No numbering and no
+            // reason the session ended — asked for plainly, and the times are
+            // what anyone is checking here anyway. The reason a day was closed
+            // by the fence still lives on the admin's Notifications page and in
+            // the day-wise report.
+            return (
+              <View style={styles.sessionList}>
+                {/* PLURAL. "Clock In / Clock Out" reads as the two buttons —
+                    one action each — when the list underneath is every time
+                    they clocked in and out today. The heading has to describe
+                    a list, not an action. */}
+                <Text style={styles.sessionHeading}>Clock-ins &amp; Clock-outs</Text>
+                {sessions.map((sess, i) => (
+                  <Text key={`${sess.in_utc}-${i}`} style={styles.sessionRow}>
+                    <Text style={styles.sessionTime}>{timeOnly(sess.in_utc)}</Text>
+                    <Text style={styles.sessionJoin}>{'   to   '}</Text>
+                    <Text style={styles.sessionTime}>
+                      {sess.out_utc ? timeOnly(sess.out_utc) : 'still in'}
+                    </Text>
+                  </Text>
+                ))}
+              </View>
+            );
+          })()}
+
+          {todayPermissionMinutes > 0 && (
+            <Text style={styles.permissionNote}>
+              Includes approved permission: {minutesToHours(liveWorkedMinutes)} worked +{' '}
+              {minutesToHours(todayPermissionMinutes)} permission
+            </Text>
+          )}
 
           {scheduleLine(shift) && <Text style={styles.schedule}>{scheduleLine(shift)}</Text>}
 
@@ -642,14 +1267,22 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
             <TouchableOpacity style={styles.action} onPress={handleClockIn} disabled={busy} activeOpacity={0.8}>
               {busy ? <ActivityIndicator color={colors.text} /> : (
                 <Text style={styles.actionText}>
-                  {clockedOut ? '⏻  Clock In Again' : '⏻  Clock In'}
+                  {clockedOut ? '→  Clock In Again' : '→  Clock In'}
                 </Text>
               )}
             </TouchableOpacity>
           )}
+          {/* Say the reminder exists. A notification nobody was told to expect
+              reads as the app misbehaving the first time it appears. */}
+          {!clockedIn && (
+            <Text style={styles.reminderNote}>
+              We&apos;ll remind you at {REMINDER_HOUR > 12 ? REMINDER_HOUR - 12 : REMINDER_HOUR}
+              :00 {REMINDER_HOUR >= 12 ? 'pm' : 'am'} if you have not clocked in.
+            </Text>
+          )}
           {clockedIn && !clockedOut && (
             <TouchableOpacity style={styles.action} onPress={handleClockOut} disabled={busy} activeOpacity={0.8}>
-              {busy ? <ActivityIndicator color={colors.text} /> : <Text style={styles.actionText}>⏻  Clock Out</Text>}
+              {busy ? <ActivityIndicator color={colors.text} /> : <Text style={styles.actionText}>←  Clock Out</Text>}
             </TouchableOpacity>
           )}
           {clockedIn && clockedOut && !multiSession && <Text style={styles.done}>Attendance completed for today ✓</Text>}
@@ -661,6 +1294,177 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
             <Text style={styles.warnText}>⚠️ You clocked in outside the designated work location.</Text>
           </View>
         )}
+
+        {/* Permission hours — apply here, an admin approves */}
+        <View style={[styles.card, { marginTop: 20 }]}>
+          <View style={styles.permHeader}>
+            <View style={styles.permHeaderText}>
+              <Text style={styles.cardTitle}>Permission Hours</Text>
+              <Text style={styles.permSubtitle}>
+                Short time off inside a working day. Approved hours count towards your day&apos;s hours.
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.permApplyBtn}
+              onPress={() => { setPermError(null); setPermDate(today); setPermFormOpen(o => !o); }}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.permApplyText}>{permFormOpen ? 'Close' : 'Apply'}</Text>
+            </TouchableOpacity>
+          </View>
+
+          {permissionBalance && (
+            <View style={styles.statsRow}>
+              {/* "Left this month" used to lead this row. Permission quantity
+                  is unlimited now — every request stands on the manager's
+                  approval — so a countdown that always reads ~744h would only
+                  confuse. */}
+              <View style={styles.statCol}>
+                <Text style={styles.statLabel}>Approved</Text>
+                <Text style={styles.statValue}>{minutesToHours(permissionBalance.used_minutes)}</Text>
+              </View>
+              <View style={styles.statCol}>
+                <Text style={styles.statLabel}>Awaiting</Text>
+                <Text style={styles.statValue}>{minutesToHours(permissionBalance.pending_minutes)}</Text>
+              </View>
+            </View>
+          )}
+
+          {permFormOpen && (
+            <View style={styles.permForm}>
+              <Text style={styles.permFieldLabel}>Date</Text>
+              <TouchableOpacity style={styles.permInput} onPress={() => setPermDateOpen(true)}>
+                <Text style={styles.permDateText}>{permDateLabel}</Text>
+              </TouchableOpacity>
+              {/* Applying for a future day has always been allowed — the
+                  calendar has no upper bound and the server takes up to 90 days
+                  ahead — but it was hidden behind opening the calendar and
+                  knowing to look. Tomorrow is the one people actually want, so
+                  it is one tap. */}
+              <View style={styles.permQuickRow}>
+                {([['Today', 0], ['Tomorrow', 1]] as const).map(([label, offset]) => {
+                  const ymd = istCalendarYmd(new Date(Date.now() + offset * 86_400_000));
+                  const on = permDate === ymd;
+                  return (
+                    <TouchableOpacity
+                      key={label}
+                      style={[styles.permQuickBtn, on && styles.permQuickBtnOn]}
+                      onPress={() => setPermDate(ymd)}
+                    >
+                      <Text style={[styles.permQuickText, on && styles.permQuickTextOn]}>{label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <DatePicker
+                visible={permDateOpen}
+                value={permDate}
+                minYmd={permMinDate}
+                onPick={setPermDate}
+                onClose={() => setPermDateOpen(false)}
+              />
+              {/* Tap to open the clock. Nothing here is typed, so there is no
+                  half-entered time to validate and no AM/PM to forget. */}
+              <View style={styles.permTimeRow}>
+                <View style={styles.permTimeCol}>
+                  <Text style={styles.permFieldLabel}>From</Text>
+                  <TouchableOpacity style={styles.permInput} onPress={() => setPermTimeOpen('start')}>
+                    <Text style={permStart24 ? styles.permDateText : styles.permTimePlaceholder}>
+                      {timeLabel(permStart24)}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+                <View style={styles.permTimeCol}>
+                  <Text style={styles.permFieldLabel}>To</Text>
+                  <TouchableOpacity style={styles.permInput} onPress={() => setPermTimeOpen('end')}>
+                    <Text style={permEnd24 ? styles.permDateText : styles.permTimePlaceholder}>
+                      {timeLabel(permEnd24)}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+              <TimePicker
+                visible={permTimeOpen !== null}
+                title={permTimeOpen === 'end' ? 'To' : 'From'}
+                // Opening "To" with the start time already showing saves the
+                // usual case: an hour or two later on the same dial.
+                value={(permTimeOpen === 'end' ? permEnd24 ?? permStart24 : permStart24) ?? ''}
+                onPick={hhmm => {
+                  if (permTimeOpen === 'end') setPermEnd24(hhmm);
+                  else setPermStart24(hhmm);
+                }}
+                onClose={() => setPermTimeOpen(null)}
+              />
+              {permStart24 != null && permEnd24 != null && spanMinutes(permStart24, permEnd24) !== null && (
+                <Text style={styles.permDuration}>
+                  Duration: {minutesToHours(spanMinutes(permStart24, permEnd24))}
+                </Text>
+              )}
+              <Text style={styles.permFieldLabel}>Reason</Text>
+              <TextInput
+                style={[styles.permInput, styles.permReasonInput]}
+                value={permReason}
+                onChangeText={setPermReason}
+                placeholder="Bank work, doctor visit…"
+                placeholderTextColor={colors.textFaint}
+                multiline
+                maxLength={500}
+                textAlignVertical="top"
+              />
+              {permError && (
+                <View style={styles.errorBox}>
+                  <Text style={styles.errorText}>{permError}</Text>
+                </View>
+              )}
+              <TouchableOpacity
+                style={[styles.saveBtn, permBusy && { opacity: 0.6 }]}
+                onPress={handleApplyPermission}
+                disabled={permBusy}
+                activeOpacity={0.85}
+              >
+                {permBusy
+                  ? <ActivityIndicator color="#fff" />
+                  : <Text style={styles.saveBtnText}>Submit for Approval</Text>}
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {permissions.length === 0 ? (
+            <Text style={styles.empty}>No permission requests this month.</Text>
+          ) : (
+            permissions.map(p => (
+              <View key={p.id} style={styles.permRow}>
+                <View style={styles.permRowMain}>
+                  <Text style={styles.permRowTitle}>
+                    {dateDMY(p.permission_date)} · {clock12(p.start_time.slice(0, 5))} – {clock12(p.end_time.slice(0, 5))}
+                  </Text>
+                  <Text style={styles.permRowSub}>
+                    {minutesToHours(Number(p.minutes))}
+                    {p.reason ? ` · ${p.reason}` : ''}
+                    {p.status === 'rejected' && p.review_notes ? ` · ${p.review_notes}` : ''}
+                  </Text>
+                </View>
+                <View style={styles.permRowRight}>
+                  <Text
+                    style={[
+                      styles.permStatus,
+                      p.status === 'approved' && { color: colors.greenText },
+                      p.status === 'pending' && { color: '#fbbf24' },
+                      p.status === 'rejected' && { color: colors.redText },
+                    ]}
+                  >
+                    {p.status}
+                  </Text>
+                  {p.status === 'pending' && (
+                    <TouchableOpacity onPress={() => handleCancelPermission(p)}>
+                      <Text style={styles.permCancel}>Withdraw</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              </View>
+            ))
+          )}
+        </View>
 
         {/* Daily Work Update */}
         <View style={[styles.card, { marginTop: 20 }]}>
@@ -696,12 +1500,14 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
           <TouchableOpacity
             style={styles.trackPill}
             activeOpacity={tracking ? 1 : 0.7}
-            onPress={tracking ? undefined : fixTracking}
+            onPress={tracking ? undefined : () => { void fixTracking(); }}
             disabled={tracking}
           >
             <View style={[styles.dot, { backgroundColor: tracking ? colors.greenText : colors.textFaint }]} />
             <Text style={[styles.trackText, { color: tracking ? colors.greenText : '#fbbf24' }]}>
-              {tracking ? 'Location tracking is on' : 'Location tracking is off — tap to fix'}
+              {tracking
+                ? 'Location tracking is on'
+                : `${trackingIssue ?? 'Location tracking is off'} — tap to fix`}
             </Text>
           </TouchableOpacity>
         )}
@@ -755,7 +1561,16 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
                 </View>
                 <Text style={[styles.histCell, styles.colTime]}>{timeOnly(r.clock_in_utc)}</Text>
                 <Text style={[styles.histCell, styles.colTime]}>{timeOnly(r.clock_out_utc)}</Text>
-                <Text style={[styles.histCell, styles.colHrs, styles.histHrs]}>{minutesToHours(r.total_minutes)}</Text>
+                <View style={styles.colHrsWrap}>
+                  <Text style={[styles.histCell, styles.histHrs]}>
+                    {minutesToHours(r.credited_minutes ?? r.total_minutes)}
+                  </Text>
+                  {!!r.permission_minutes && (
+                    <Text style={styles.histPermission}>
+                      +{minutesToHours(Number(r.permission_minutes))} P
+                    </Text>
+                  )}
+                </View>
               </View>
             ))
           )}
@@ -808,6 +1623,7 @@ const styles = StyleSheet.create({
   action: { borderWidth: 1, borderColor: colors.borderInput, borderRadius: 12, paddingVertical: 16, alignItems: 'center', marginTop: 20 },
   actionText: { color: colors.text, fontSize: 16, fontWeight: '600' },
   done: { color: colors.greenText, textAlign: 'center', marginTop: 20, fontSize: 15, fontWeight: '600' },
+  reminderNote: { color: colors.textFaint, textAlign: 'center', marginTop: 10, fontSize: 12 },
   textarea: {
     borderWidth: 1,
     borderColor: colors.borderInput,
@@ -835,9 +1651,77 @@ const styles = StyleSheet.create({
   colDate: { flex: 1.4 },
   colTime: { flex: 1, textAlign: 'left' },
   colHrs: { flex: 1, textAlign: 'right' },
+  colHrsWrap: { flex: 1, alignItems: 'flex-end' },
   histDate: { color: colors.text, fontSize: 13, fontWeight: '600' },
   histStatus: { fontSize: 12, marginTop: 2, textTransform: 'lowercase' },
   histCell: { color: colors.textLabel, fontSize: 13 },
   histHrs: { color: colors.text, fontWeight: '700' },
+  histPermission: { color: colors.accent, fontSize: 11, marginTop: 2 },
   empty: { color: colors.textMuted, fontSize: 14, paddingVertical: 12 },
+
+  // --- Permission hours ------------------------------------------------------
+  permissionNote: { color: colors.accent, fontSize: 12, marginTop: 10 },
+  permHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 },
+  permHeaderText: { flex: 1 },
+  permSubtitle: { color: colors.textMuted, fontSize: 12, marginTop: -8, marginBottom: 14, lineHeight: 17 },
+  permApplyBtn: { backgroundColor: colors.brand, borderRadius: 10, paddingVertical: 8, paddingHorizontal: 16 },
+  permApplyText: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  permForm: { marginTop: 16, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 14 },
+  permFieldLabel: { color: colors.textLabel, fontSize: 13, fontWeight: '600', marginBottom: 6 },
+  permInput: {
+    borderWidth: 1,
+    borderColor: colors.borderInput,
+    backgroundColor: colors.bg,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    color: colors.text,
+    fontSize: 15,
+    marginBottom: 12,
+  },
+  permReasonInput: { minHeight: 64 },
+  permTimeRow: { flexDirection: 'row', gap: 12 },
+  permTimeCol: { flex: 1 },
+  fenceBanner: { borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10, marginTop: 14, borderWidth: 1 },
+  fenceBannerIn: { backgroundColor: 'rgba(22,163,74,0.12)', borderColor: 'rgba(22,163,74,0.4)' },
+  fenceBannerOut: { backgroundColor: 'rgba(239,68,68,0.12)', borderColor: 'rgba(239,68,68,0.4)' },
+  fenceBannerText: { fontSize: 13, lineHeight: 18 },
+  fenceBannerTextIn: { color: '#86efac' },
+  fenceBannerTextOut: { color: '#fca5a5' },
+  sessionList: { marginTop: 12, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 10, gap: 7 },
+  sessionHeading: {
+    color: colors.textLabel, fontSize: 12, fontWeight: '700',
+    letterSpacing: 0.4, textTransform: 'uppercase', marginBottom: 3,
+  },
+  sessionRow: { fontSize: 15, flexShrink: 1 },
+  sessionTime: { color: colors.text, fontSize: 15, fontWeight: '700' },
+  // "to" is bold and full-strength as well — asked for plainly. It was quieter
+  // so the times would stand out; one weight throughout reads as one sentence.
+  sessionJoin: { color: colors.text, fontSize: 15, fontWeight: '700' },
+  permDateText: { color: colors.text, fontSize: 14, paddingVertical: 2 },
+  permTimePlaceholder: { color: colors.textFaint, fontSize: 14, paddingVertical: 2 },
+  permQuickRow: { flexDirection: 'row', gap: 8, marginTop: 8, marginBottom: 4 },
+  permQuickBtn: {
+    paddingVertical: 5, paddingHorizontal: 12, borderRadius: 999,
+    borderWidth: 1, borderColor: colors.borderInput, backgroundColor: colors.bg,
+  },
+  permQuickBtnOn: { backgroundColor: colors.brand, borderColor: colors.brand },
+  permQuickText: { color: colors.textMuted, fontSize: 12, fontWeight: '600' },
+  permQuickTextOn: { color: '#ffffff' },
+  permDuration: { color: colors.textLabel, fontSize: 13, marginBottom: 12 },
+  permRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  permRowMain: { flex: 1 },
+  permRowTitle: { color: colors.text, fontSize: 13, fontWeight: '600' },
+  permRowSub: { color: colors.textMuted, fontSize: 12, marginTop: 3, lineHeight: 16 },
+  permRowRight: { alignItems: 'flex-end' },
+  permStatus: { fontSize: 12, fontWeight: '700', textTransform: 'lowercase', color: colors.textMuted },
+  permCancel: { color: colors.redText, fontSize: 12, marginTop: 4 },
 });

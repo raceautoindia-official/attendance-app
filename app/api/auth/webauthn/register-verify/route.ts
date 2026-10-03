@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { queryOne, query, insertAuditLog } from '@/lib/db';
-import { requireAuth } from '@/lib/auth';
+import { requireEnrolmentAuth } from '@/lib/auth';
 import { verifyRegistrationResponse, getWebAuthnConfigFromRequest } from '@/lib/webauthn';
 import { MAX_DEVICES_PER_EMPLOYEE } from '@/lib/constants';
 import type { ApiResponse, Employee } from '@/lib/types';
@@ -29,7 +29,7 @@ const RegistrationBodySchema = z.object({
 // ---------------------------------------------------------------------------
 
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request);
+  const auth = await requireEnrolmentAuth(request);
   if (auth instanceof NextResponse) return auth;
 
   let body: unknown;

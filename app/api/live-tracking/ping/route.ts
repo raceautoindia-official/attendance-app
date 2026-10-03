@@ -96,7 +96,7 @@ export async function POST(request: NextRequest) {
   const points = 'points' in parsed.data ? parsed.data.points : [parsed.data];
   const deviceNowUtc = 'points' in parsed.data ? parsed.data.device_now_utc : undefined;
 
-  const activeSession = await queryOne<LiveTrackingSession>(
+  let activeSession = await queryOne<LiveTrackingSession>(
     `SELECT id, employee_id, started_at_utc, ended_at_utc, is_active, last_ping_utc, created_at
      FROM live_tracking_sessions
      WHERE employee_id = ? AND is_active = TRUE
@@ -106,10 +106,45 @@ export async function POST(request: NextRequest) {
   );
 
   if (!activeSession) {
-    return NextResponse.json<ApiResponse>(
-      { success: false, error: 'No active live-tracking session' },
-      { status: 404 },
-    );
+    // Self-heal instead of 404. The guards above have already established that
+    // this employee is clocked in with tracking enabled — so a missing session
+    // is always some earlier fault (a server restart mid-write, an admin
+    // repair, the old stale-kill), never a reason to refuse their location.
+    //
+    // Refusing here is how the whole fleet went dark at once: the stale
+    // monitor used to end any session quiet for 3 minutes, after which every
+    // later fix bounced off this 404 for the rest of the day. The phone should
+    // not need to understand sessions to be tracked; if it can prove where an
+    // on-shift employee is, the server's job is to record it.
+    try {
+      const created = await query<{ insertId: number }>(
+        `INSERT INTO live_tracking_sessions (employee_id, started_at_utc, is_active, last_ping_utc)
+         VALUES (?, UTC_TIMESTAMP(), TRUE, UTC_TIMESTAMP())`,
+        [auth.id],
+      );
+      activeSession = await queryOne<LiveTrackingSession>(
+        `SELECT id, employee_id, started_at_utc, ended_at_utc, is_active, last_ping_utc, created_at
+         FROM live_tracking_sessions WHERE id = ?`,
+        [(created as unknown as { insertId: number }).insertId],
+      );
+    } catch (error) {
+      // A concurrent ping/start won the insert — the unique index on active
+      // sessions rejects ours; use the winner's.
+      if ((error as { code?: string })?.code !== 'ER_DUP_ENTRY') throw error;
+      activeSession = await queryOne<LiveTrackingSession>(
+        `SELECT id, employee_id, started_at_utc, ended_at_utc, is_active, last_ping_utc, created_at
+         FROM live_tracking_sessions
+         WHERE employee_id = ? AND is_active = TRUE
+         ORDER BY started_at_utc DESC LIMIT 1`,
+        [auth.id],
+      );
+    }
+    if (!activeSession) {
+      return NextResponse.json<ApiResponse>(
+        { success: false, error: 'Could not open a live-tracking session, please retry' },
+        { status: 503 },
+      );
+    }
   }
 
   const nowMs = Date.now();

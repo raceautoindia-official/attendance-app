@@ -31,6 +31,8 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [webAuthnPending, setWebAuthnPending] = useState(false);
   const [photoProofEnabled, setPhotoProofEnabled] = useState(false);
+  // The brand asset may not be in place yet — see public/brand/README.md.
+  const [logoBroken, setLogoBroken] = useState(false);
   const [photoProof, setPhotoProof] = useState<string | null>(null);
 
   const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm<FormValues>({
@@ -103,8 +105,12 @@ export default function LoginPage() {
 
       const data = json.data;
 
+      // The PIN was accepted but this account has no passkey yet. The server
+      // has issued a short-lived pending-auth cookie, so send them straight to
+      // enrolment rather than telling them to contact an administrator — which
+      // is a dead end when the person locked out is the administrator.
       if (data?.requiresPasskeySetup) {
-        setError('Passkey setup required. Please contact your administrator to grant initial access.');
+        router.push('/register-passkey?setup=1');
         return;
       }
 
@@ -129,18 +135,30 @@ export default function LoginPage() {
 
   return (
     <div className="w-full max-w-sm space-y-6">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2.5">
-          <div className="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center">
-            <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"
-              />
-            </svg>
-          </div>
-          <span className="text-lg font-bold text-slate-900 dark:text-slate-100">Attendance</span>
+      {/* The theme toggle floats to the right rather than sharing a row with
+          the logo. The lockup is SQUARE and stacks a mark over the name over
+          the tagline, so it only becomes readable at a size that would dwarf a
+          toggle sitting beside it — at the 44px a row allowed, the tagline was
+          about three pixels tall. Centred and given its own space, it reads. */}
+      <div className="relative flex justify-center pt-1">
+        {/* The logo carries the name and the tagline, so there is no text
+            beside it — a wordmark next to the word repeats itself.
+            If the file is missing it falls back to the name in text rather than
+            leaving a broken-image icon on the sign-in screen. */}
+        {logoBroken ? (
+          <span className="text-3xl font-bold text-slate-900 dark:text-slate-100">WorkLens</span>
+        ) : (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src="/brand/worklens-logo.png"
+            alt="WorkLens"
+            className="h-36 w-auto sm:h-40"
+            onError={() => setLogoBroken(true)}
+          />
+        )}
+        <div className="absolute right-0 top-0">
+          <ThemeToggle />
         </div>
-        <ThemeToggle />
       </div>
 
       <Card>

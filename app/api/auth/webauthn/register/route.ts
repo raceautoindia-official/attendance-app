@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAuth } from '@/lib/auth';
+import { requireEnrolmentAuth } from '@/lib/auth';
 import { generateRegistrationOptions, getWebAuthnConfigFromRequest } from '@/lib/webauthn';
 import type { ApiResponse, Employee } from '@/lib/types';
 
 // GET /api/auth/webauthn/register
 // Requires a valid access token — employee must have completed PIN login first.
 export async function GET(request: NextRequest) {
-  const auth = await requireAuth(request);
+  const auth = await requireEnrolmentAuth(request);
   if (auth instanceof NextResponse) return auth;
 
   // Fetch just the fields generateRegistrationOptions needs

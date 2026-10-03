@@ -28,19 +28,43 @@
 
 -- 1. Locations gain a state code so regional holidays can be matched to a site.
 --    NULL means "not specified" — such a site sees national holidays only.
-ALTER TABLE locations
-  ADD COLUMN state_code VARCHAR(5) NULL AFTER address;
+SET @need := (SELECT COUNT(*) = 0 FROM INFORMATION_SCHEMA.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'locations'
+    AND COLUMN_NAME = 'state_code');
+SET @sql := IF(@need,
+  'ALTER TABLE locations ADD COLUMN state_code VARCHAR(5) NULL AFTER address',
+  'DO 0');
+PREPARE st FROM @sql; EXECUTE st; DEALLOCATE PREPARE st;
+SELECT IF(@need, 'locations.state_code added', 'locations.state_code already present') AS step;
 
 -- 2. Scope a leave_records row to one location.
 --    NULL = all locations (including employees with no location assigned).
 --    Every pre-existing row is NULL, so current behaviour is unchanged.
-ALTER TABLE leave_records
-  ADD COLUMN location_id INT NULL AFTER employee_id,
-  ADD INDEX idx_leave_records_location (location_id),
-  ADD CONSTRAINT fk_leave_records_location
-    FOREIGN KEY (location_id) REFERENCES locations (id)
-    ON DELETE CASCADE
-    ON UPDATE CASCADE;
+-- Guarded: this column already exists on at least one deployment, added by hand
+-- outside any migration, so a plain ALTER would abort the whole file.
+SET @need := (SELECT COUNT(*) = 0 FROM INFORMATION_SCHEMA.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'leave_records'
+    AND COLUMN_NAME = 'location_id');
+SET @sql := IF(@need,
+  'ALTER TABLE leave_records
+     ADD COLUMN location_id INT NULL AFTER employee_id,
+     ADD INDEX idx_leave_records_location (location_id),
+     ADD CONSTRAINT fk_leave_records_location
+       FOREIGN KEY (location_id) REFERENCES locations (id)
+       ON DELETE CASCADE ON UPDATE CASCADE',
+  'DO 0');
+PREPARE st FROM @sql; EXECUTE st; DEALLOCATE PREPARE st;
+SELECT IF(@need, 'leave_records.location_id added', 'leave_records.location_id already present') AS step;
+
+-- The index and FK may be missing even when the column exists (hand-added).
+SET @need := (SELECT COUNT(*) = 0 FROM INFORMATION_SCHEMA.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'leave_records'
+    AND INDEX_NAME = 'idx_leave_records_location');
+SET @sql := IF(@need,
+  'ALTER TABLE leave_records ADD INDEX idx_leave_records_location (location_id)',
+  'DO 0');
+PREPARE st FROM @sql; EXECUTE st; DEALLOCATE PREPARE st;
+SELECT IF(@need, 'leave_records location index added', 'leave_records location index already present') AS step;
 
 -- 3. Candidate holidays. Populated from the bundled dataset in
 --    data/holidays/, or added by hand. Affects nothing on its own.

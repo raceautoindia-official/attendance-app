@@ -5,6 +5,7 @@ import {
   verifyAccessToken,
   generateRefreshTokenHash,
   clearAuthCookies,
+  revokeTokens,
 } from '@/lib/auth';
 import { REFRESH_TOKEN_COOKIE } from '@/lib/constants';
 import type { ApiResponse } from '@/lib/types';
@@ -25,6 +26,10 @@ export async function POST(request: NextRequest) {
       'DELETE FROM refresh_tokens WHERE employee_id = ?',
       [payload.id],
     );
+    // ...and invalidate the access tokens already handed out. Deleting the
+    // refresh token alone left the access token working until it expired, so a
+    // token lifted from a device outlived the logout that was meant to stop it.
+    await revokeTokens(payload.id);
   } else {
     // Access token gone / expired — try to revoke just the specific refresh token
     const refreshToken = request.cookies.get(REFRESH_TOKEN_COOKIE)?.value;

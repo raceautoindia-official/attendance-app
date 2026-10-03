@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { NextRequest, NextResponse } from 'next/server';
+import { queryOne } from './db';
 import type { ApiResponse, JWTPayload, Role } from './types';
 import {
   ACCESS_TOKEN_COOKIE,
@@ -28,11 +29,14 @@ const refreshSecret = () => requireEnv('JWT_REFRESH_SECRET');
 // Token signing
 // ---------------------------------------------------------------------------
 
-export function signAccessToken(payload: JWTPayload): string {
-  const claims: Pick<JWTPayload, 'id' | 'emp_id' | 'role'> = {
+export function signAccessToken(payload: JWTPayload & { tv?: number }): string {
+  const claims: Pick<JWTPayload, 'id' | 'emp_id' | 'role'> & { tv: number } = {
     id: payload.id,
     emp_id: payload.emp_id,
     role: payload.role,
+    // Token version — see requireAuth(). Lets logout revoke tokens that would
+    // otherwise stay valid until they expired.
+    tv: payload.tv ?? 0,
   };
   return jwt.sign(claims, accessSecret(), {
     expiresIn: ACCESS_TOKEN_EXPIRY as jwt.SignOptions['expiresIn'],
@@ -40,9 +44,19 @@ export function signAccessToken(payload: JWTPayload): string {
 }
 
 export function signRefreshToken(payload: Pick<JWTPayload, 'id'>): string {
-  return jwt.sign({ id: payload.id }, refreshSecret(), {
-    expiresIn: REFRESH_TOKEN_EXPIRY as jwt.SignOptions['expiresIn'],
-  });
+  return jwt.sign(
+    {
+      id: payload.id,
+      // A random id per token. Without it the payload is just {id, iat, exp},
+      // so two sign-ins in the same SECOND produce byte-identical tokens — and
+      // therefore identical stored hashes. A token revoked by signing out would
+      // then be indistinguishable from the fresh one issued moments later, and
+      // rotation could hand back the value it was supposed to replace.
+      jti: crypto.randomBytes(16).toString('hex'),
+    },
+    refreshSecret(),
+    { expiresIn: REFRESH_TOKEN_EXPIRY as jwt.SignOptions['expiresIn'] },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -227,7 +241,118 @@ export async function requireAuth(
     );
   }
 
+  // A token issued before the employee's last logout (or deactivation) is dead,
+  // even though its signature and expiry still check out. Without this, logging
+  // out only removed the refresh token and the access token kept working.
+  if (!(await tokenVersionCurrent(payload))) {
+    return NextResponse.json<ApiResponse>(
+      { success: false, error: 'Session ended — please sign in again' },
+      { status: 401 },
+    );
+  }
+
   return payload;
+}
+
+/**
+ * Whether the token's version still matches the employee's — and whether they
+ * are still active at all.
+ *
+ * Read from the database on every request, deliberately. An in-process cache
+ * was tried and is wrong here: route handlers do not reliably share module
+ * state, so a copy of the cache in one route kept honouring a token that
+ * logout had already revoked through another. A revocation that takes effect
+ * "in a few seconds, usually" is not a revocation. This is one lookup on a
+ * primary key, alongside the queries the routes make anyway.
+ */
+async function tokenVersionCurrent(payload: JWTPayload & { tv?: number }): Promise<boolean> {
+  if (!(await hasTokenVersionColumn())) return true;   // migration not applied yet
+
+  const row = await queryOne<{ token_version: number; is_active: number }>(
+    'SELECT token_version, is_active FROM employees WHERE id = ?',
+    [payload.id],
+  );
+  if (!row || !row.is_active) return false;
+  return Number(payload.tv ?? 0) === Number(row.token_version ?? 0);
+}
+
+/**
+ * The column arrives with a migration, so tolerate its absence.
+ *
+ * Only a POSITIVE result is memoised. Caching "missing" for the life of the
+ * process would mean applying the migration quietly did nothing until someone
+ * restarted the server — and the thing it silently disables is token
+ * revocation. A miss is re-checked, at most once every RECHECK_MS.
+ */
+const SCHEMA_RECHECK_MS = 30_000;
+let tokenVersionColumn = false;
+let tokenVersionCheckedAt = 0;
+async function hasTokenVersionColumn(): Promise<boolean> {
+  if (tokenVersionColumn) return true;
+  if (Date.now() - tokenVersionCheckedAt < SCHEMA_RECHECK_MS) return false;
+  tokenVersionCheckedAt = Date.now();
+  const row = await queryOne<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'employees'
+       AND COLUMN_NAME = 'token_version'`,
+  );
+  tokenVersionColumn = Number(row?.n ?? 0) > 0;
+  return tokenVersionColumn;
+}
+
+/** Current token version for an employee, for signing a fresh token. */
+export async function currentTokenVersion(employeeId: number): Promise<number> {
+  if (!(await hasTokenVersionColumn())) return 0;
+  const row = await queryOne<{ token_version: number }>(
+    'SELECT token_version FROM employees WHERE id = ?',
+    [employeeId],
+  );
+  return Number(row?.token_version ?? 0);
+}
+
+/**
+ * Authorise a passkey ENROLMENT request.
+ *
+ * Normally this needs a full access token, like everything else. It ALSO
+ * accepts the pending-auth cookie — proof that the PIN was verified moments
+ * ago — but only for an employee who has no passkey yet.
+ *
+ * Without that exception the first passkey can never be obtained: enrolling
+ * requires a token, and getting a token requires either a passkey or an
+ * exemption. An account with neither is simply bricked, and if it is the only
+ * administrator nobody can grant the exemption either.
+ *
+ * The "no passkey yet" restriction is what keeps this safe. Once an employee
+ * HAS a passkey it is a genuine second factor, and somebody holding only the
+ * PIN must not be able to add another one alongside it.
+ */
+export async function requireEnrolmentAuth(
+  request: NextRequest,
+): Promise<{ id: number; emp_id: string; role: Role } | NextResponse> {
+  const full = await requireAuth(request);
+  if (!(full instanceof NextResponse)) return full;
+
+  const pendingEmpId = getPendingAuthFromRequest(request);
+  if (pendingEmpId) {
+    const row = await queryOne<{ id: number; emp_id: string; role: Role; passkeys: number }>(
+      `SELECT e.id, e.emp_id, e.role,
+              (SELECT COUNT(*) FROM passkeys p WHERE p.employee_id = e.id) AS passkeys
+       FROM employees e
+       WHERE e.emp_id = ? AND e.is_active = TRUE`,
+      [pendingEmpId],
+    );
+    if (row && Number(row.passkeys) === 0) {
+      return { id: row.id, emp_id: row.emp_id, role: row.role };
+    }
+  }
+
+  return full;   // the 401/403 requireAuth already built
+}
+
+/** Invalidate every access token already issued to this employee. */
+export async function revokeTokens(employeeId: number): Promise<void> {
+  if (!(await hasTokenVersionColumn())) return;
+  await queryOne('UPDATE employees SET token_version = token_version + 1 WHERE id = ?', [employeeId]);
 }
 
 // ---------------------------------------------------------------------------

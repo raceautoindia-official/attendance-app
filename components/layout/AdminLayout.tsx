@@ -8,12 +8,14 @@ import ChatPanel from '@/components/chat/ChatPanel';
 const TITLE: Record<string, string> = {
   '/overview': 'Overview',
   '/employees': 'Employees',
-  '/attendance': 'Attendance',
+  '/attendance': 'Checkin Records',
   '/schedules': 'Schedules',
   '/leaves': 'Leave Management',
   '/holidays': 'Holiday Calendar',
+  '/permissions': 'Permission Hours',
   '/locations': 'Locations',
   '/reports': 'Reports',
+  '/audit-log': 'Audit Log',
 };
 
 function getTitle(pathname: string): string {

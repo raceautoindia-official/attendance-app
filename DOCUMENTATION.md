@@ -209,6 +209,7 @@ The `requireAuth(request, roles)` helper in `lib/auth.ts` reads those headers.
 | `employee_schedules` | Assigns a shift + location to an employee with effective dates |
 | `attendance` | Daily clock-in/out records; all times stored as UTC (`clock_in_utc`, `clock_out_utc`) |
 | `leave_records` | Leave and holiday entries; `employee_id = NULL` means company-wide holiday |
+| `permission_requests` | Permission hours — short paid absence inside a working day; applied for by the employee, approved by an admin |
 | `audit_log` | Immutable activity log for all sensitive actions |
 
 ### Important field notes
@@ -217,6 +218,45 @@ The `requireAuth(request, roles)` helper in `lib/auth.ts` reads those headers.
 - `attendance.clock_in_utc` / `clock_out_utc` — `DATETIME` stored UTC; convert to IST with `formatInTimeZone(new Date(value), 'Asia/Kolkata', ...)`
 - `leave_records.type` — `ENUM('leave', 'holiday')` — only two values at the DB level
 - `leave_records.employee_id` — nullable; `NULL` = company-wide holiday
+- `permission_requests.start_time` / `end_time` — `TIME` columns holding IST **wall-clock** times (not UTC instants); `minutes` is derived once at write time so reports never redo the arithmetic
+
+### Permission hours
+
+A permission is a short paid absence inside a working day (e.g. 10:00–12:00 for
+bank work). The employee applies from the web dashboard or the mobile app, and a
+manager / super admin approves or rejects it.
+
+Approved minutes are **credited** to that day's hours:
+
+```
+credited = LEAST(worked + approved_permission, GREATEST(worked, required))
+```
+
+- `worked` — `attendance.total_minutes` (what was actually clocked)
+- `required` — the day's shift length (`shifts.required_hours`, else `end_time − start_time`, else 9 h)
+- The `LEAST` stops double counting when the employee stayed clocked in through the permission window
+- The `GREATEST` keeps a day that legitimately ran long from being trimmed
+- A day with no clock-in earns nothing — permission tops up, it never stands in for attendance
+
+`total_minutes` is never mutated; `permission_minutes` and `credited_minutes` are
+derived at read time by `lib/permissions.ts`, so the raw clocked time stays
+auditable. Every read path degrades to zero permission minutes when the
+migration has not been run yet (same defensive pattern as the multi-session
+columns).
+
+Policy limits live in `lib/constants.ts` and are all env-overridable:
+
+| Constant | Default | Meaning |
+|----------|---------|---------|
+| `PERMISSION_MIN_MINUTES` | 15 | Shortest slice that can be requested |
+| `PERMISSION_MAX_MINUTES_PER_REQUEST` | 120 | Longest single permission |
+| `PERMISSION_MAX_MINUTES_PER_MONTH` | 120 | Monthly entitlement (pending + approved both consume it) |
+| `PERMISSION_MAX_PAST_DAYS` | 30 | How far back a permission may be dated |
+| `PERMISSION_MAX_FUTURE_DAYS` | 90 | How far ahead a permission may be dated |
+
+Server-side rules: no overlapping live requests on the same date, no
+self-approval (a manager's own request goes to a super admin), and the monthly
+cap is re-checked at approval time against already-approved minutes.
 
 ---
 
@@ -284,11 +324,21 @@ All protected routes require a valid JWT. The proxy injects `x-employee-id` and 
 | POST | `/api/leaves` | manager, super_admin | Create leave or holiday record |
 | DELETE | `/api/leaves/[id]` | manager (own team), super_admin | Delete leave record |
 
+### Permissions
+
+| Method | Path | Access | Description |
+|--------|------|--------|-------------|
+| GET | `/api/permissions` | all roles | List; employee sees own, manager sees own + team, super_admin sees all. Filters: `status`, `from_date`, `to_date`, `employee_id` |
+| POST | `/api/permissions` | all roles | Apply for permission hours. Employees file for themselves (`pending`); an admin filing for a team member records it already `approved` |
+| PATCH | `/api/permissions/[id]` | all roles | `{action: 'approve' \| 'reject' \| 'cancel'}` — approve/reject is admin-only and never on your own request; cancel withdraws your own pending request |
+| DELETE | `/api/permissions/[id]` | owner (pending), super_admin | Delete a request |
+| GET | `/api/permissions/balance` | all roles | Monthly entitlement: used / pending / remaining. Params: `month=YYYY-MM`, `employee_id` |
+
 ### Reports
 
 | Method | Path | Access | Description |
 |--------|------|--------|-------------|
-| GET | `/api/reports/summary` | manager, super_admin | JSON summary by employee |
+| GET | `/api/reports/summary` | manager, super_admin | JSON summary by employee, including `total_permission_minutes` and `total_minutes_credited` |
 | GET | `/api/reports/csv` | manager, super_admin | Download CSV; params: `from_date`, `to_date`, `employee_id` |
 | GET | `/api/reports/pdf` | manager, super_admin | Download PDF; same params |
 

@@ -168,6 +168,12 @@ export async function PUT(
     entity_id: recordId,
     performed_by: auth.id,
     details: {
+      // The subject of the edit, not the admin who made it — performed_by
+      // already records that.
+      employee_id: existing.employee_id,
+      emp_id: existing.emp_id,
+      employee_name: existing.employee_name,
+      work_date: existing.work_date,
       before: {
         clock_in_utc: existing.clock_in_utc,
         clock_out_utc: existing.clock_out_utc,

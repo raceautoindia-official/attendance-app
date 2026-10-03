@@ -5,6 +5,8 @@ import './src/location/tracking';
 import './src/location/geofenceAuto';
 import './src/location/locationWatch';
 
+import { initNotifications } from './src/notifications/setup';
+
 import React, { useCallback, useEffect, useState } from 'react';
 import { View, Text, TouchableOpacity, ActivityIndicator, StatusBar, StyleSheet } from 'react-native';
 import { getAccessToken } from './src/storage/tokens';
@@ -30,6 +32,18 @@ export default function App() {
     }
     const ok = await authenticateBiometric('Unlock Attendance');
     setUnlocked(ok);
+  }, []);
+
+  // Notification channels, the foreground handler, and the one prompt for
+  // POST_NOTIFICATIONS — done ONCE, here, at launch.
+  //
+  // It used to be asked for at clock-in, inside the shift-reminder module. The
+  // warnings that matter most are raised from background tasks, which cannot
+  // show a permission dialog at all — so on a phone where clock-in had never
+  // taken that path, every away-from-site warning was posted into a void with
+  // no error to show for it.
+  useEffect(() => {
+    void initNotifications();
   }, []);
 
   useEffect(() => {
@@ -71,9 +85,13 @@ export default function App() {
     );
   }
 
+  // translucent + transparent so the status bar sits OVER the app's own dark
+  // background instead of a system-drawn strip. The app draws edge to edge
+  // (edgeToEdgeEnabled=true, and Android 15 enforces it), so the header pads
+  // itself down past the status bar — see STATUS_BAR_PAD in DashboardScreen.
   return (
     <>
-      <StatusBar barStyle="light-content" />
+      <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
       {!authed ? (
         <LoginScreen onLoggedIn={onLoggedIn} />
       ) : !unlocked ? (

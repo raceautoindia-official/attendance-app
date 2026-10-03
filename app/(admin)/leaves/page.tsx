@@ -18,6 +18,25 @@ import type { Employee, ApiResponse } from '@/lib/types';
 import { formatDateOnly } from '@/lib/date';
 import { useCurrentUser } from '@/lib/useCurrentUser';
 
+interface WorkedOnDay {
+  employee_id: number;
+  employee_name: string;
+  emp_id: string;
+  clock_in_utc: string | null;
+  clock_out_utc: string | null;
+  worked_minutes: number | null;
+}
+
+interface DayPermission {
+  employee_id: number;
+  request_type: string;
+  start_time: string;
+  end_time: string;
+  minutes: number;
+  status: string;
+  reason: string | null;
+}
+
 interface LeaveRow {
   id: number;
   employee_id: number | null;
@@ -26,6 +45,40 @@ interface LeaveRow {
   notes: string | null;
   employee_name: string | null;
   employee_emp_id: string | null;
+  /** Anyone who actually worked this date. A holiday does not mean nobody
+   *  came in, and the hours were previously buried in an attendance row. */
+  worked_on_day?: WorkedOnDay[];
+  permissions?: DayPermission[];
+}
+
+interface MonthlyRow {
+  employee_id: number;
+  employee_name: string;
+  emp_id: string;
+  casual: number;
+  sick: number;
+  earned: number;
+  other: number;
+  total_leave: number;
+  holidays_worked: number;
+  holiday_minutes_worked: number;
+  absent: number;
+  present: number;
+  permission_minutes: number;
+}
+
+function hm(mins: number | null | undefined): string {
+  if (mins == null) return '—';
+  return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+}
+
+function istTime(iso: string | null): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleTimeString('en-IN', {
+    timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true,
+  });
 }
 
 const LEAVE_BADGE: Record<string, 'info' | 'success' | 'warning' | 'danger' | 'neutral'> = {
@@ -74,10 +127,21 @@ export default function LeavesPage() {
   const today = format(new Date(), 'yyyy-MM-dd');
   const firstOfMonth = format(new Date(new Date().getFullYear(), new Date().getMonth(), 1), 'yyyy-MM-dd');
 
-  const [view, setView] = useState<'records' | 'quotas'>('records');
+  const [view, setView] = useState<'records' | 'monthly' | 'quotas'>('records');
+  const [month, setMonth] = useState(() => format(new Date(), 'yyyy-MM'));
   const [fromDate, setFromDate] = useState(firstOfMonth);
   const [toDate, setToDate] = useState(today);
   const [page, setPage] = useState(1);
+
+  const { data: monthlyData, isLoading: monthlyLoading } = useQuery({
+    queryKey: ['leaves', 'monthly', month],
+    queryFn: async () => {
+      const res = await fetch(`/api/leaves/monthly?month=${month}`);
+      return res.json() as Promise<ApiResponse<{ month: string; employees: MonthlyRow[] }>>;
+    },
+    enabled: view === 'monthly',
+  });
+  const monthly = monthlyData?.data?.employees ?? [];
   const [addOpen, setAddOpen] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
@@ -158,7 +222,7 @@ export default function LeavesPage() {
     <div className="space-y-4">
       {/* View toggle: dated records vs yearly entitlements */}
       <div className="flex gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 p-1 w-fit">
-        {([['records', 'Leave Records'], ['quotas', 'Yearly Quotas']] as const).map(([key, label]) => (
+        {([['records', 'Leave Records'], ['monthly', 'Monthly Record'], ['quotas', 'Yearly Quotas']] as const).map(([key, label]) => (
           <button
             key={key}
             onClick={() => setView(key)}
@@ -174,6 +238,103 @@ export default function LeavesPage() {
       </div>
 
       {view === 'quotas' && <LeaveQuotasPanel canEdit={isSuperAdmin} />}
+
+      {view === 'monthly' && (
+        <>
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="flex flex-col gap-1">
+              <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Month</label>
+              <input
+                type="month"
+                value={month}
+                onChange={e => setMonth(e.target.value)}
+                className={selectClass + ' w-44'}
+              />
+            </div>
+          </div>
+
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            Casual and sick leave are counted as LEAVE, never as absent. Absent means a
+            working day with no clock-in and nothing excusing it.
+          </p>
+
+          {monthlyLoading ? (
+            <div className="flex justify-center py-12"><Spinner /></div>
+          ) : (
+            <Table
+              columns={[
+                {
+                  key: 'employee_name',
+                  header: 'Employee',
+                  render: r => (
+                    <div>
+                      <p className="font-medium text-slate-800 dark:text-slate-200">{(r as MonthlyRow).employee_name}</p>
+                      <p className="text-xs text-slate-400">{(r as MonthlyRow).emp_id}</p>
+                    </div>
+                  ),
+                },
+                { key: 'casual', header: 'Casual', render: r => (r as MonthlyRow).casual || '—' },
+                { key: 'sick', header: 'Sick', render: r => (r as MonthlyRow).sick || '—' },
+                { key: 'earned', header: 'Earned', render: r => (r as MonthlyRow).earned || '—' },
+                { key: 'other', header: 'Other', render: r => (r as MonthlyRow).other || '—' },
+                {
+                  key: 'total_leave',
+                  header: 'Total Leave',
+                  render: r => (
+                    <span className="font-semibold text-blue-600 dark:text-blue-400 tabular-nums">
+                      {(r as MonthlyRow).total_leave}
+                    </span>
+                  ),
+                },
+                {
+                  key: 'holidays_worked',
+                  header: 'Worked On Holiday',
+                  render: r => {
+                    const row = r as MonthlyRow;
+                    if (!row.holidays_worked) return <span className="text-slate-400">—</span>;
+                    return (
+                      <span className="tabular-nums text-amber-600 dark:text-amber-400">
+                        {row.holidays_worked} day{row.holidays_worked === 1 ? '' : 's'}
+                        <span className="text-slate-400"> · {hm(row.holiday_minutes_worked)}</span>
+                      </span>
+                    );
+                  },
+                },
+                {
+                  key: 'permission_minutes',
+                  header: 'Permission',
+                  render: r => {
+                    const m = (r as MonthlyRow).permission_minutes;
+                    return m ? <span className="tabular-nums">{hm(m)}</span>
+                      : <span className="text-slate-400">—</span>;
+                  },
+                },
+                {
+                  key: 'present',
+                  header: 'Present',
+                  render: r => (
+                    <span className="tabular-nums text-green-600 dark:text-green-400">
+                      {(r as MonthlyRow).present}
+                    </span>
+                  ),
+                },
+                {
+                  key: 'absent',
+                  header: 'Absent',
+                  render: r => {
+                    const n = (r as MonthlyRow).absent;
+                    return n
+                      ? <span className="tabular-nums text-red-600 dark:text-red-400">{n}</span>
+                      : <span className="text-slate-400">—</span>;
+                  },
+                },
+              ]}
+              data={monthly as object[]}
+              emptyMessage="No employees for this month."
+            />
+          )}
+        </>
+      )}
 
       {view === 'records' && (
       <>
@@ -217,6 +378,62 @@ export default function LeavesPage() {
                     {(r as LeaveRow).leave_type}
                   </Badge>
                 ),
+              },
+              {
+                key: 'worked_on_day',
+                header: 'Worked',
+                render: r => {
+                  const row = r as LeaveRow;
+                  const w = row.worked_on_day ?? [];
+                  // A holiday does not mean nobody came in. Before this the day
+                  // read "holiday" and the hours sat in an attendance row that
+                  // nothing on this page ever looked at.
+                  if (!w.length) return <span className="text-slate-400 text-xs">—</span>;
+                  return (
+                    <div className="space-y-0.5">
+                      {w.slice(0, 4).map(x => (
+                        <p key={x.employee_id} className="text-xs text-slate-700 dark:text-slate-300">
+                          {row.employee_id === null && (
+                            <span className="font-medium">{x.employee_name}: </span>
+                          )}
+                          <span className="tabular-nums">{hm(x.worked_minutes)}</span>
+                          <span className="text-slate-400">
+                            {' '}({istTime(x.clock_in_utc)}–{istTime(x.clock_out_utc)})
+                          </span>
+                        </p>
+                      ))}
+                      {w.length > 4 && (
+                        <p className="text-xs text-slate-400">+{w.length - 4} more</p>
+                      )}
+                    </div>
+                  );
+                },
+              },
+              {
+                key: 'permissions',
+                header: 'Permission',
+                render: r => {
+                  const ps = (r as LeaveRow).permissions ?? [];
+                  if (!ps.length) return <span className="text-slate-400 text-xs">—</span>;
+                  return (
+                    <div className="space-y-0.5">
+                      {ps.slice(0, 3).map((pm, i) => (
+                        <p key={i} className="text-xs text-slate-700 dark:text-slate-300">
+                          {pm.request_type === 'on_duty' ? 'On-duty' : 'Permission'}{' '}
+                          {pm.start_time?.slice(0, 5)}–{pm.end_time?.slice(0, 5)}
+                          <span className={
+                            pm.status === 'approved' ? ' text-green-600 dark:text-green-400'
+                              : pm.status === 'rejected' ? ' text-red-600 dark:text-red-400'
+                                : ' text-amber-600 dark:text-amber-400'
+                          }> · {pm.status}</span>
+                        </p>
+                      ))}
+                      {ps.length > 3 && (
+                        <p className="text-xs text-slate-400">+{ps.length - 3} more</p>
+                      )}
+                    </div>
+                  );
+                },
               },
               { key: 'notes', header: 'Notes', render: r => (r as LeaveRow).notes ?? '—' },
               {

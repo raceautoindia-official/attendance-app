@@ -45,6 +45,45 @@ export function workModeSelect(exists: boolean, alias = 'e'): string {
     : `'on_site' AS work_mode, FALSE AS allow_multiple_sessions`;
 }
 
+/** True once the 2026-05-29 daily-work-updates migration has run. */
+export async function hasDailyUpdatesTable(): Promise<boolean> {
+  const row = await queryOne<{ c: number }>(
+    `SELECT COUNT(*) AS c
+     FROM INFORMATION_SCHEMA.TABLES
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'daily_work_updates'`,
+  );
+  return Number(row?.c ?? 0) > 0;
+}
+
+/**
+ * What the employee wrote about that day's work, for a report row.
+ *
+ * A subquery rather than a join: an employee can post more than one update for
+ * a date, and a join would multiply their attendance row by however many they
+ * wrote — quietly inflating every total on the report. GROUP_CONCAT keeps them
+ * all on the one row instead.
+ */
+export function dailyUpdateSelect(exists: boolean, empColumn: string, dateColumn: string): string {
+  if (!exists) return 'NULL';
+  return `(SELECT GROUP_CONCAT(dwu.update_text ORDER BY dwu.created_at ASC SEPARATOR ' | ')
+             FROM daily_work_updates dwu
+            WHERE dwu.employee_id = ${empColumn}
+              AND dwu.work_date = ${dateColumn})`;
+}
+
+/** True once employees has the per-employee live-tracking toggle. */
+export async function hasLiveTrackingColumn(): Promise<boolean> {
+  const row = await queryOne<{ c: number }>(
+    `SELECT COUNT(*) AS c
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'employees'
+       AND COLUMN_NAME = 'live_tracking_enabled'`,
+  );
+  return Number(row?.c ?? 0) > 0;
+}
+
 /** True once attendance has the multi-session columns. */
 export async function hasSessionColumns(): Promise<boolean> {
   const row = await queryOne<{ c: number }>(
@@ -53,6 +92,42 @@ export async function hasSessionColumns(): Promise<boolean> {
      WHERE TABLE_SCHEMA = DATABASE()
        AND TABLE_NAME = 'attendance'
        AND COLUMN_NAME = 'banked_minutes'`,
+  );
+  return Number(row?.c ?? 0) > 0;
+}
+
+/** True once the 2026-08-11 first-clock-in migration has run. */
+export async function hasFirstClockInColumn(): Promise<boolean> {
+  const row = await queryOne<{ c: number }>(
+    `SELECT COUNT(*) AS c
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'attendance'
+       AND COLUMN_NAME = 'first_clock_in_utc'`,
+  );
+  return Number(row?.c ?? 0) > 0;
+}
+
+/** True once the 2026-08-11 out-of-fence REVIEW migration has run. */
+export async function hasOutOfFenceReviewColumns(): Promise<boolean> {
+  const row = await queryOne<{ c: number }>(
+    `SELECT COUNT(*) AS c
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'attendance'
+       AND COLUMN_NAME = 'out_of_fence_status'`,
+  );
+  return Number(row?.c ?? 0) > 0;
+}
+
+/** True once the 2026-08-11 out-of-fence-reason migration has run. */
+export async function hasOutOfFenceReasonColumn(): Promise<boolean> {
+  const row = await queryOne<{ c: number }>(
+    `SELECT COUNT(*) AS c
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'attendance'
+       AND COLUMN_NAME = 'out_of_fence_reason'`,
   );
   return Number(row?.c ?? 0) > 0;
 }

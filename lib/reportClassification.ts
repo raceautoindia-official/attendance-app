@@ -29,8 +29,9 @@
  * Nothing here writes to the database.
  */
 
+import { companyHolidays as liveCompanyHolidays } from '@/lib/workingDays';
 import { query } from '@/lib/db';
-import { formatInTimeZone } from 'date-fns-tz';
+import { toYmd as toYmdShared } from '@/lib/date';
 
 /** The kinds of day a report can show. */
 export type DayKind =
@@ -61,15 +62,8 @@ export const DAY_KIND_LABEL: Record<DayKind, string> = {
  * therefore yields "Sat May 23": no year, no numeric month. Every report that
  * did that produced an unusable date column.
  */
-export function toYmd(value: unknown): string {
-  if (value == null) return '';
-  if (typeof value === 'string') return value.slice(0, 10);
-  if (value instanceof Date) {
-    if (Number.isNaN(value.getTime())) return '';
-    return formatInTimeZone(value, 'UTC', 'yyyy-MM-dd');
-  }
-  return String(value).slice(0, 10);
-}
+/** Re-exported from lib/date.ts so there is one date formatter, not two. */
+export const toYmd = toYmdShared;
 
 /**
  * Dates in the range that are holidays for EVERY location.
@@ -84,16 +78,11 @@ export async function fetchCompanyHolidays(
   fromDate: string,
   toDate: string,
 ): Promise<Set<string>> {
-  const rows = await query<{ leave_date: Date | string }>(
-    `SELECT lr.leave_date
-       FROM leave_records lr
-      WHERE lr.employee_id IS NULL
-        AND lr.location_id IS NULL
-        AND lr.leave_type = 'holiday'
-        AND lr.leave_date BETWEEN ? AND ?`,
-    [fromDate, toDate],
-  );
-  return new Set(rows.map(r => toYmd(r.leave_date)));
+  // Delegates to lib/workingDays.ts so there is ONE definition of
+  // "company-wide holiday" in the codebase. That module is what the reports
+  // already use in production; duplicating its query here is how the reports
+  // came to disagree with each other in the first place.
+  return new Set(await liveCompanyHolidays(fromDate, toDate));
 }
 
 /**

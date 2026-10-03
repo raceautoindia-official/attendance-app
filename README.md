@@ -26,7 +26,7 @@ A production-ready attendance management system built with **Next.js 15**, **MyS
 - **Geofence-based clock-in/out** — GPS coordinates checked against work location radius
 - **Shift management** — fixed, flexible, and rotating shift types
 - **Leave & holiday management** — per-employee or company-wide
-- **Holiday calendar** - bundled Indian government/corporate holiday lists per year, observed per work location by an admin (nothing auto-applies)
+- **Permission hours** — employees apply for short time off inside a working day; admins approve, and approved hours top the day's worked time back up to the shift length
 - **Admin dashboard** — live overview, attendance editing, employee CRUD
 - **Report exports** — CSV and PDF with IST-formatted timestamps
 - **Dark mode** — full dark/light theme support
@@ -123,68 +123,6 @@ Create a `.env.local` file in the project root. All variables marked **Required*
 | `SMTP_USER` | | SMTP username / email | `alerts@yourdomain.com` |
 | `SMTP_PASS` | | SMTP password / app-password | `smtp-app-password` |
 | `ADMIN_EMAIL` | | Recipient for late/absent alerts | `admin@yourdomain.com` |
-| `OPENAI_API_KEY` | | Enables the reporting assistant. Without it the app runs normally and `/api/chat*` returns 503 | `sk-…` |
-| `OPENAI_MODEL` | | Model for the assistant (default: `gpt-5.4-mini`) | `gpt-5.4-mini` |
-| `CHAT_RATE_MAX` | | Assistant questions allowed per window (default: `30`) | `30` |
-| `CHAT_RATE_WINDOW_MINUTES` | | Assistant rate-limit window in minutes (default: `10`) | `10` |
-
-> **Reporting assistant (super admins only).** A read-only chat panel that answers
-> questions about attendance, hours, leave and shifts, and can export any report as
-> Excel, CSV or PDF. It reaches the database through a fixed set of SELECT-only
-> functions in `lib/chat/` — there is no raw-SQL path, and bank, PAN and Aadhaar
-> columns are unreachable by design. Verify a deployment with:
->
-> ```bash
-> npx tsx --env-file=.env.local scripts/verify-chat-tools.ts   # data layer, no API calls
-> npx tsx --env-file=.env.local scripts/verify-chat-export.ts  # file generation, no API calls
-> npx tsx --env-file=.env.local scripts/test-chat-live.ts gpt-5.4-mini  # behaviour — spends credits
-> ```
->
-> If the assistant's replies stream in one lump rather than word by word, Nginx is
-> buffering `/api/chat/stream`; add `proxy_buffering off;` for that path.
-
-## Holiday Calendar
-
-Admin page: **Holiday Calendar** (super admin only). Bundled yearly lists live in
-`data/holidays/IN-<year>.json`.
-
-**The model is "propose, don't apply."** Loading a year's list creates *candidates*
-in `holiday_calendar` and changes nothing an employee would notice. A day becomes
-a real holiday only when an admin observes it for a location, which writes a
-`leave_records` row and flips `attendance` for the employees in scope. Untick to
-reverse it.
-
-That separation is deliberate: observing a holiday rewrites attendance for
-everyone in scope, and attendance feeds payroll. There is no automatic sync from
-any external calendar, because no third-party feed knows which days *your*
-company closes, and a wrong date silently corrupts a day of payroll.
-
-**Per-location.** `leave_records.location_id` scopes a holiday to one work
-location; `NULL` means all locations, including employees with no location
-assigned. An employee is in scope when their schedule effective on that date
-points at the location, so a Chennai holiday leaves other sites untouched -
-`markAbsentees` honours the same rule.
-
-**Dates you must confirm.** Entries flagged `needs_verification` are lunar-calendar
-festivals (Diwali, Holi, the two Eids, Dussehra, Ayudha Puja, Onam). Their bundled
-date is a **placeholder** and the API refuses to observe them until an admin
-supplies the real date. Gregorian-fixed and solar holidays - Republic Day,
-Independence Day, Gandhi Jayanti, Christmas, New Year, May Day, Ambedkar Jayanti,
-and the Pongal cluster including Thiruvalluvar Day, Uzhavar Thirunal and Tamil New
-Year - ship ready to observe.
-
-**Updating a year's list.** Re-importing is idempotent. Rows still marked
-`source = 'bundled'` have their type, state, notes and verification flag refreshed
-from the file; rows an admin has edited (`source = 'manual'`) are never touched,
-and neither is any date. Candidates the file no longer lists are pruned - but only
-while they are unobserved, so a holiday in force is never removed from under its
-`leave_records` row.
-
-Verify a deployment (read-only on the calendar's own tables, no API calls):
-
-```bash
-npx tsx --env-file=.env.local scripts/verify-holidays.ts
-```
 
 ### Generating secrets
 
@@ -218,6 +156,18 @@ mysql -u attendance_user -p attendance_db < database/schema.sql
 # Insert default admin, manager, and sample employees
 mysql -u attendance_user -p attendance_db < database/seed.sql
 ```
+
+### Upgrading an existing database
+
+`schema.sql` is the full, current schema — an existing install instead applies
+the files in `database/migrations/` in date order, e.g.:
+
+```bash
+mysql -u attendance_user -p attendance_db < database/migrations/2026-08-04_add_permission_requests.sql
+```
+
+Until that migration runs, permission hours simply report as zero everywhere;
+nothing else breaks.
 
 ### Reset / re-seed
 

@@ -1,12 +1,41 @@
 import { formatInTimeZone, fromZonedTime } from 'date-fns-tz';
-import { TIMEZONE } from './constants';
+import { TIMEZONE, WORK_DAY_START_HOUR, OVERTIME_AFTER_MINUTES } from './constants';
+
+const hh = (h: number) => String(h).padStart(2, '0');
 
 /**
- * Returns today's calendar date in the app timezone (IST by default) as a
- * YYYY-MM-DD string. Used as the `work_date` value for attendance records.
+ * The work date (YYYY-MM-DD, app timezone) an instant belongs to.
+ *
+ * The day turns over at WORK_DAY_START_HOUR, not midnight. Anything before that
+ * hour still counts towards the PREVIOUS day, so a night that runs 22:00 → 05:00
+ * is one work day rather than two half-days split at midnight.
+ *
+ * Implemented by sliding the instant back by the boundary hour and then reading
+ * off the calendar date, which keeps it correct across DST-free IST without any
+ * special cases.
  */
-export function getWorkDateIST(): string {
-  return formatInTimeZone(new Date(), TIMEZONE, 'yyyy-MM-dd');
+export function getWorkDateIST(at: Date = new Date()): string {
+  const shifted = new Date(at.getTime() - WORK_DAY_START_HOUR * 60 * 60 * 1000);
+  return formatInTimeZone(shifted, TIMEZONE, 'yyyy-MM-dd');
+}
+
+/** UTC instant at which a work day begins (WORK_DAY_START_HOUR on that date). */
+export function workDayStartUtc(workDate: string): Date {
+  return fromZonedTime(`${workDate}T${hh(WORK_DAY_START_HOUR)}:00:00`, TIMEZONE);
+}
+
+/** UTC instant at which a work day ends — the next day's boundary. */
+export function workDayEndUtc(workDate: string): Date {
+  const next = new Date(`${workDate}T00:00:00Z`);
+  next.setUTCDate(next.getUTCDate() + 1);
+  return workDayStartUtc(next.toISOString().slice(0, 10));
+}
+
+/** The work date immediately before the given one. */
+export function previousWorkDate(workDate: string = getWorkDateIST()): string {
+  const d = new Date(`${workDate}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
 }
 
 /**
@@ -50,6 +79,81 @@ export function isLate(
   const deadline = new Date(shiftStartUtc.getTime() + graceMinutes * 60_000);
 
   return clockInUtc > deadline;
+}
+
+/**
+ * Minutes worked beyond the overtime line (OVERTIME_AFTER_MINUTES), or 0.
+ *
+ * One rule, called from everywhere overtime is reported, so the attendance
+ * list, the phone and the monthly report cannot answer differently for the
+ * same day.
+ */
+export function overtimeMinutes(workedMinutes: number | null | undefined): number {
+  if (workedMinutes == null) return 0;
+  const over = workedMinutes - OVERTIME_AFTER_MINUTES;
+  return over > 0 ? over : 0;
+}
+
+/**
+ * How many minutes past the deadline the employee arrived, or 0.
+ *
+ * The counterpart to isLate(): same shift start, same grace, but it answers
+ * "by how much" rather than "yes or no". A list that only shows a red badge
+ * tells an admin somebody was late; the number tells them whether it was two
+ * minutes or two hours, which is the difference between a note and a word.
+ *
+ * Measured from the day's FIRST clock-in. On a multi-session day the current
+ * clock_in_utc is the afternoon session's start, which is hours past any
+ * morning deadline — lateness is a property of when someone arrived, once.
+ *
+ * Returns null when lateness is not defined for the day: a flexible shift has
+ * no start time to be late against, and neither does an unscheduled employee.
+ */
+export function lateMinutes(
+  firstClockInUtc: Date | null,
+  shiftStart: string | null | undefined,
+  graceMinutes: number | null | undefined,
+  shiftType?: string | null,
+): number | null {
+  if (!firstClockInUtc || !shiftStart || shiftType === 'flexible') return null;
+  const workDate = formatInTimeZone(firstClockInUtc, TIMEZONE, 'yyyy-MM-dd');
+  const [h, m] = shiftStart.split(':').map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  const shiftStartUtc = fromZonedTime(`${workDate}T${hh(h)}:${hh(m)}:00`, TIMEZONE);
+  const deadline = shiftStartUtc.getTime() + (graceMinutes ?? 0) * 60_000;
+  const over = Math.round((firstClockInUtc.getTime() - deadline) / 60_000);
+  return over > 0 ? over : 0;
+}
+
+/**
+ * Minutes on site but not on the clock — the gaps between a day's sessions.
+ *
+ * Derived, never stored: an employee clocks out for lunch and back in after,
+ * so the break is the elapsed span minus the time actually worked. There is no
+ * break button to press and nothing to forget.
+ *
+ * For a day still open the span ends at the CURRENT session's start, not at
+ * "now" — the gaps already taken are known, and the one in progress is not a
+ * break until they come back. Otherwise the figure would tick upwards while
+ * somebody sat working.
+ */
+export function breakMinutes(
+  firstClockInUtc: Date | null,
+  clockInUtc: Date | null,
+  clockOutUtc: Date | null,
+  workedMinutes: number | null,
+  bankedMinutes: number,
+): number | null {
+  const first = firstClockInUtc ?? clockInUtc;
+  if (!first) return null;
+  // Closed day: the whole span, against everything worked in it.
+  // Open day: up to this session's start, against what earlier sessions banked.
+  const end = clockOutUtc ?? clockInUtc;
+  const worked = clockOutUtc ? workedMinutes : bankedMinutes;
+  if (!end || worked == null) return null;
+  const span = Math.round((end.getTime() - first.getTime()) / 60_000);
+  const gap = span - worked;
+  return gap > 0 ? gap : 0;
 }
 
 /**

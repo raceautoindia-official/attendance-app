@@ -54,6 +54,39 @@ export async function GET(request: NextRequest) {
     params.push(entity);
   }
 
+  // Action is free text written by the app, never by a user, but it is still
+  // bound as a parameter rather than interpolated.
+  const action = searchParams.get('action');
+  if (action) {
+    conditions.push('al.action = ?');
+    params.push(action);
+  }
+
+  // The SUBJECT of the entry, as opposed to performed_by (the actor). An
+  // employee's own clock-in has them as the actor; an admin edit or an
+  // automatic close has them only in details.employee_id. Matching both is what
+  // makes "everything that happened to this person" answerable in one query.
+  const employeeId = searchParams.get('employee_id');
+  if (employeeId) {
+    const eid = parseInt(employeeId, 10);
+    if (!isNaN(eid)) {
+      conditions.push(
+        `(al.performed_by = ? OR CAST(JSON_EXTRACT(al.details, '$.employee_id') AS UNSIGNED) = ?)`,
+      );
+      params.push(eid, eid);
+    }
+  }
+
+  // All entries about one attendance row — its full life, in order.
+  const attendanceId = searchParams.get('attendance_id');
+  if (attendanceId) {
+    const aid = parseInt(attendanceId, 10);
+    if (!isNaN(aid)) {
+      conditions.push("al.entity = 'attendance' AND al.entity_id = ?");
+      params.push(aid);
+    }
+  }
+
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
   const [countRow, rows] = await Promise.all([

@@ -3,6 +3,7 @@ import { query, queryOne } from '@/lib/db';
 import {
   verifyRefreshToken,
   signAccessToken,
+  currentTokenVersion,
   signRefreshToken,
   generateRefreshTokenHash,
   setAuthCookies,
@@ -70,6 +71,7 @@ export async function POST(request: NextRequest) {
     id: row.id,
     emp_id: row.emp_id,
     role: row.role,
+    tv: await currentTokenVersion(row.id),
   });
   const newRefreshToken = signRefreshToken({ id: row.id });
   const newHash = generateRefreshTokenHash(newRefreshToken);
