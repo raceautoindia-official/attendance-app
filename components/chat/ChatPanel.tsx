@@ -1,450 +1,176 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useCurrentUser } from '@/lib/useCurrentUser';
 import { cn } from '@/lib/cn';
+import {
+  BotMark,
+  TypingDots,
+  ToolProgress,
+  DownloadCard,
+  Markdownish,
+  SourceList,
+  toolLabel,
+} from './ChatParts';
+import type { ChatTurn, DownloadFile, Source, ToolStatus, LimitMeta } from './chatTypes';
 
 /**
- * Whether to send prior turns for context.
+ * Reporting assistant panel.
  *
- * Follow-ups ("now do September") are much nicer with history on, and the
- * assistant is required to state the period it used in every answer — which is
- * what makes a mis-carried period visible rather than silent.
+ * Interaction decisions worth knowing, because each one is a deliberate answer
+ * to a way chat UIs usually go wrong:
+ *
+ * - A Stop button exists for the whole time a reply is streaming, and stopping
+ *   KEEPS the partial text with a "Stopped" marker rather than discarding it.
+ * - Auto-scroll only follows the stream while the reader is already near the
+ *   bottom. Scroll up and it locks, and a "Jump to latest" pill appears.
+ * - Deltas are batched into one paint per frame instead of a React state update
+ *   per token, so a long answer does not thrash the DOM.
+ * - Errors say what went wrong and offer exactly one recovery action.
+ * - The transcript survives closing the panel, via sessionStorage, because losing
+ *   a conversation on close is its own small betrayal.
+ * - Every answer carries the model that produced it and what it cost.
  */
-const SEND_HISTORY = true;
 
-/** Human phrasing for each tool, shown live while it runs. */
-const TOOL_LABELS: Record<string, string> = {
-  resolve_employee: 'Finding the employee',
-  get_employee_profile: 'Reading their profile',
-  list_departments: 'Checking departments',
-  get_attendance_summary: 'Totalling attendance',
-  get_attendance_detail: 'Reading day-by-day records',
-  get_daily_snapshot: 'Checking that day',
-  get_late_arrivals: 'Counting late arrivals',
-  get_absentees: 'Counting absences',
-  get_department_rollup: 'Comparing departments',
-  get_geofence_exceptions: 'Checking geofence records',
-  get_leave_records: 'Reading leave records',
-  get_holidays: 'Checking the holiday calendar',
-  get_leave_balance: 'Working out the leave balance',
-  get_shifts: 'Reading shift setup',
-  get_schedule: 'Reading shift assignments',
-  get_live_tracking_status: 'Checking live tracking',
-  get_audit_trail: 'Reading the audit trail',
-  create_report_download: 'Building your file',
-};
+const STORAGE_KEY = 'attendance_assistant_thread_v1';
+const MAX_STORED_TURNS = 40;
+/** Matches the signed download token's TTL in lib/chat/export.ts. */
+const DOWNLOAD_TTL_MS = 15 * 60 * 1000;
 
-const toolLabel = (n: string) => TOOL_LABELS[n] ?? 'Looking that up';
-
-const SUGGESTIONS = [
-  "Who's absent today?",
-  'Late arrivals this month',
-  'Summary for last month',
-  'Compare departments',
-  'Export last month to Excel',
-  "Who's on leave this week?",
+/** Starter prompts, grouped so the real scope is legible at a glance. */
+const SUGGESTION_GROUPS: Array<{ label: string; items: string[] }> = [
+  { label: 'Today', items: ["Who's absent today?", "Who's still clocked in?"] },
+  { label: 'This month', items: ['Late arrivals this month', 'Attendance summary for last month'] },
+  { label: 'Compare', items: ['Compare departments last month', 'Who has the most absences?'] },
+  { label: 'Files', items: ['Export last month to Excel', 'Send me a PDF of last week'] },
 ];
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-interface DownloadFile {
-  download_url: string;
-  filename: string;
-  format: string;
-  report_label: string;
-  rows: number;
-  period?: string;
+/** Offered under a finished answer. Dismissible, and hidden once dismissed. */
+function followUpsFor(sources: Source[] | undefined): string[] {
+  const tools = new Set((sources ?? []).map(s => s.tool));
+  if (tools.has('create_report_download')) return ['Show the same thing on screen', 'Do last month instead'];
+  if (tools.has('get_daily_snapshot')) return ['Break that down by department', 'Send it as a file'];
+  if (tools.has('get_attendance_summary')) return ['Export that to Excel', 'Just the late arrivals'];
+  if (tools.has('get_late_arrivals') || tools.has('get_absentees')) return ['Show one person in detail', 'Export to Excel'];
+  if (tools.has('resolve_employee')) return ['Show their last 30 days', 'Their leave balance'];
+  return ['Export that to Excel', 'Narrow it to one department'];
 }
 
-interface Source {
-  tool: string;
-  rows: number | null;
-  period?: string;
-  error?: string;
-}
-
-interface ToolStatus {
-  name: string;
-  done: boolean;
-  rows?: number | null;
-  error?: string;
-}
-
-interface Turn {
-  role: 'user' | 'assistant';
-  content: string;
-  sources?: Source[];
-  downloads?: DownloadFile[];
-  failed?: boolean;
-  at: number;
-}
-
-type StreamEvent =
-  | { type: 'tool_start'; name: string }
-  | { type: 'tool_done'; name: string; rows: number | null; period?: string; error?: string }
-  | { type: 'download'; file: DownloadFile }
-  | { type: 'delta'; text: string }
-  | { type: 'done'; answer: string; traces: Array<{ name: string; rows: number | null; range_label?: string; error?: string }> }
-  | { type: 'error'; message: string };
-
-// ---------------------------------------------------------------------------
-// Minimal markdown — tables, bold, bullets. Avoids a markdown dependency for
-// the small, known subset that report answers actually use.
-// ---------------------------------------------------------------------------
-
-function renderInline(text: string, k: string) {
-  return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((part, i) => {
-    if (part.startsWith('**') && part.endsWith('**')) {
-      return (
-        <strong key={`${k}-${i}`} className="font-semibold text-slate-900 dark:text-white">
-          {part.slice(2, -2)}
-        </strong>
-      );
-    }
-    if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
-      return (
-        <code
-          key={`${k}-${i}`}
-          className="rounded bg-slate-200/70 px-1 py-0.5 font-mono text-[11px] dark:bg-slate-700/70"
-        >
-          {part.slice(1, -1)}
-        </code>
-      );
-    }
-    return <span key={`${k}-${i}`}>{part}</span>;
-  });
-}
-
-const isRow = (l: string) => l.trim().startsWith('|') && l.trim().endsWith('|');
-const isDivider = (l: string) => /^\s*\|[\s:|-]+\|\s*$/.test(l);
-const splitRow = (l: string) => l.trim().slice(1, -1).split('|').map(c => c.trim());
-
-function Markdownish({ text }: { text: string }) {
-  const lines = text.split('\n');
-  const out: React.ReactNode[] = [];
-  let i = 0;
-
-  while (i < lines.length) {
-    const line = lines[i];
-
-    if (isRow(line) && i + 1 < lines.length && isDivider(lines[i + 1])) {
-      const head = splitRow(line);
-      const body: string[][] = [];
-      i += 2;
-      while (i < lines.length && isRow(lines[i])) {
-        body.push(splitRow(lines[i]));
-        i += 1;
-      }
-      out.push(
-        <div
-          key={`t${i}`}
-          className="my-2 overflow-x-auto rounded-lg border border-slate-200/80 dark:border-slate-600/60"
-        >
-          <table className="w-full border-collapse text-[11px]">
-            <thead>
-              <tr className="bg-slate-100/80 dark:bg-slate-700/50">
-                {head.map((h, hi) => (
-                  <th
-                    key={hi}
-                    className="whitespace-nowrap px-2.5 py-1.5 text-left font-semibold text-slate-700 dark:text-slate-200"
-                  >
-                    {renderInline(h, `h${hi}`)}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {body.map((r, ri) => (
-                <tr
-                  key={ri}
-                  className="border-t border-slate-200/70 dark:border-slate-600/40"
-                >
-                  {r.map((c, ci) => (
-                    <td
-                      key={ci}
-                      className="whitespace-nowrap px-2.5 py-1.5 text-slate-600 dark:text-slate-300"
-                    >
-                      {renderInline(c, `c${ri}${ci}`)}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>,
-      );
-      continue;
-    }
-
-    if (/^\s*[-*]\s+/.test(line)) {
-      const items: string[] = [];
-      while (i < lines.length) {
-        const m = lines[i].match(/^\s*[-*]\s+(.*)$/);
-        if (!m) break;
-        items.push(m[1]);
-        i += 1;
-      }
-      out.push(
-        <ul key={`u${i}`} className="my-1.5 space-y-1 pl-1">
-          {items.map((it, ii) => (
-            <li key={ii} className="flex gap-2">
-              <span className="mt-[6px] h-1 w-1 shrink-0 rounded-full bg-blue-500/70" />
-              <span>{renderInline(it, `li${ii}`)}</span>
-            </li>
-          ))}
-        </ul>,
-      );
-      continue;
-    }
-
-    if (line.trim() === '') {
-      i += 1;
-      continue;
-    }
-
-    out.push(
-      <p key={`p${i}`} className="my-1.5 leading-[1.6]">
-        {renderInline(line, `p${i}`)}
-      </p>,
+/**
+ * sessionStorage, deliberately, not localStorage.
+ *
+ * A thread holds real names against real absences. Keeping it for the tab's
+ * lifetime covers what actually goes wrong — closing the panel, navigating to
+ * another page, an accidental reload — without leaving HR data on disk for the
+ * next person to use the machine.
+ */
+function loadThread(): ChatTurn[] {
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return (parsed as ChatTurn[]).slice(-MAX_STORED_TURNS).map(t =>
+      // Download tokens last 15 minutes. Restoring a card whose link is already
+      // dead just invites a click that fails, so drop it and keep the answer.
+      t.downloads && Date.now() - t.at > DOWNLOAD_TTL_MS ? { ...t, downloads: undefined } : t,
     );
-    i += 1;
+  } catch {
+    // Private windows, cleared site data, blocked storage — all fine, start fresh.
+    return [];
   }
-
-  return <>{out}</>;
 }
 
-// ---------------------------------------------------------------------------
-// Pieces
-// ---------------------------------------------------------------------------
-
-function BotAvatar({ busy }: { busy?: boolean }) {
-  return (
-    <div
-      className={cn(
-        'grid h-7 w-7 shrink-0 place-items-center rounded-full',
-        'bg-gradient-to-br from-blue-500 to-indigo-600 text-white shadow-sm',
-        busy && 'chat-ring',
-      )}
-    >
-      <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v2m0 14v2M5 12H3m18 0h-2M7.5 7.5 6 6m12 1.5L19.5 6M7.5 16.5 6 18m12-1.5L19.5 18" />
-        <circle cx="12" cy="12" r="3.5" />
-      </svg>
-    </div>
-  );
+function saveThread(turns: ChatTurn[]) {
+  try {
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(turns.slice(-MAX_STORED_TURNS)));
+  } catch {
+    /* storage unavailable or full — the panel still works, it just forgets */
+  }
 }
 
-function TypingDots() {
-  return (
-    <span className="inline-flex items-center gap-1">
-      {[0, 1, 2].map(i => (
-        <span
-          key={i}
-          className="chat-dot h-1.5 w-1.5 rounded-full bg-blue-500 dark:bg-blue-400"
-          style={{ animationDelay: `${i * 0.16}s` }}
-        />
-      ))}
-    </span>
-  );
+/** "2m ago" — cheaper to read at a glance than a clock time. */
+function relative(ms: number): string {
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 45) return 'just now';
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  return new Date(ms).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
 }
-
-function ToolProgress({ tools }: { tools: ToolStatus[] }) {
-  if (tools.length === 0) return null;
-  return (
-    <ul className="mb-1.5 space-y-1">
-      {tools.map((t, i) => (
-        <li
-          key={`${t.name}-${i}`}
-          className={cn(
-            'chat-rise flex items-center gap-2 rounded-md px-1.5 py-1 text-[11px]',
-            !t.done && 'chat-shimmer',
-          )}
-        >
-          {t.done ? (
-            t.error ? (
-              <svg className="h-3 w-3 shrink-0 text-amber-500" viewBox="0 0 20 20" fill="currentColor">
-                <path d="M8.5 3.5a1.7 1.7 0 0 1 3 0l5.4 9.6A1.7 1.7 0 0 1 15.4 16H4.6a1.7 1.7 0 0 1-1.5-2.9L8.5 3.5ZM10 7v4m0 2.5v.5" />
-              </svg>
-            ) : (
-              <svg className="h-3 w-3 shrink-0 text-emerald-500" viewBox="0 0 20 20" fill="currentColor">
-                <path
-                  fillRule="evenodd"
-                  d="M16.7 5.3a1 1 0 0 1 0 1.4l-7.5 7.5a1 1 0 0 1-1.4 0L3.3 9.7a1 1 0 0 1 1.4-1.4l3.8 3.8 6.8-6.8a1 1 0 0 1 1.4 0Z"
-                  clipRule="evenodd"
-                />
-              </svg>
-            )
-          ) : (
-            <svg className="chat-spin h-3 w-3 shrink-0 text-blue-500" viewBox="0 0 24 24" fill="none">
-              <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" className="opacity-20" />
-              <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
-            </svg>
-          )}
-          <span className={cn('text-slate-600 dark:text-slate-300', t.done && 'text-slate-400 dark:text-slate-500')}>
-            {toolLabel(t.name)}
-            {t.done && t.rows != null && !t.error && (
-              <span className="ml-1 text-slate-400 dark:text-slate-500">· {t.rows}</span>
-            )}
-          </span>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-const FORMAT_STYLE: Record<string, string> = {
-  xlsx: 'from-emerald-500 to-green-600',
-  csv: 'from-slate-500 to-slate-600',
-  pdf: 'from-rose-500 to-red-600',
-};
-
-function DownloadCard({ file }: { file: DownloadFile }) {
-  return (
-    <a
-      href={file.download_url}
-      download
-      className={cn(
-        'chat-pop group mt-2 flex items-center gap-2.5 rounded-xl border p-2.5 no-underline transition-all',
-        'border-slate-200 bg-white hover:border-blue-400 hover:shadow-md',
-        'dark:border-slate-600 dark:bg-slate-800 dark:hover:border-blue-500',
-      )}
-    >
-      <div
-        className={cn(
-          'grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-gradient-to-br text-[9px] font-bold text-white',
-          FORMAT_STYLE[file.format] ?? 'from-blue-500 to-indigo-600',
-        )}
-      >
-        {file.format.toUpperCase()}
-      </div>
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-[11px] font-semibold text-slate-800 dark:text-slate-100">
-          {file.report_label}
-        </p>
-        <p className="truncate text-[10px] text-slate-500 dark:text-slate-400">
-          {file.rows} row{file.rows === 1 ? '' : 's'}
-          {file.period ? ` · ${file.period}` : ''}
-        </p>
-      </div>
-      <svg
-        className="h-4 w-4 shrink-0 text-slate-400 transition-transform group-hover:translate-y-0.5 group-hover:text-blue-500"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={2}
-      >
-        <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v12m0 0 4-4m-4 4-4-4M4 20h16" />
-      </svg>
-    </a>
-  );
-}
-
-function Sources({ sources }: { sources: Source[] }) {
-  const [open, setOpen] = useState(false);
-  if (sources.length === 0) return null;
-  return (
-    <div className="mt-2 border-t border-slate-200/70 pt-1.5 dark:border-slate-600/50">
-      <button
-        type="button"
-        onClick={() => setOpen(o => !o)}
-        className="flex items-center gap-1 text-[10px] text-slate-400 transition-colors hover:text-slate-600 dark:hover:text-slate-300"
-      >
-        <svg
-          className={cn('h-2.5 w-2.5 transition-transform', open && 'rotate-90')}
-          viewBox="0 0 20 20"
-          fill="currentColor"
-        >
-          <path d="M7 5l6 5-6 5V5z" />
-        </svg>
-        {sources.length} source{sources.length === 1 ? '' : 's'}
-      </button>
-      {open && (
-        <ul className="chat-rise mt-1 space-y-0.5">
-          {sources.map((s, i) => (
-            <li key={i} className="font-mono text-[9.5px] leading-relaxed text-slate-400 dark:text-slate-500">
-              {s.tool}
-              {s.period ? ` · ${s.period}` : ''}
-              {s.rows != null ? ` · ${s.rows} rows` : ''}
-              {s.error ? ` · ${s.error}` : ''}
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function CopyButton({ text }: { text: string }) {
-  const [done, setDone] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={async () => {
-        try {
-          await navigator.clipboard.writeText(text);
-          setDone(true);
-          setTimeout(() => setDone(false), 1400);
-        } catch {
-          /* clipboard blocked — nothing useful to do */
-        }
-      }}
-      aria-label="Copy answer"
-      className="rounded p-1 text-slate-400 opacity-0 transition-all hover:bg-slate-200/60 hover:text-slate-600 focus:opacity-100 group-hover/msg:opacity-100 dark:hover:bg-slate-600/50"
-    >
-      {done ? (
-        <svg className="h-3 w-3 text-emerald-500" viewBox="0 0 20 20" fill="currentColor">
-          <path fillRule="evenodd" d="M16.7 5.3a1 1 0 0 1 0 1.4l-7.5 7.5a1 1 0 0 1-1.4 0L3.3 9.7a1 1 0 1 1 1.4-1.4l3.8 3.8 6.8-6.8a1 1 0 0 1 1.4 0Z" clipRule="evenodd" />
-        </svg>
-      ) : (
-        <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-          <rect x="9" y="9" width="11" height="11" rx="2" />
-          <path d="M5 15V5a2 2 0 0 1 2-2h10" />
-        </svg>
-      )}
-    </button>
-  );
-}
-
-const clock = (ms: number) =>
-  new Date(ms).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
-
-// ---------------------------------------------------------------------------
-// Panel
-// ---------------------------------------------------------------------------
 
 export default function ChatPanel() {
   const user = useCurrentUser();
+  const allowed = user?.role === 'super_admin';
+
   const [open, setOpen] = useState(false);
-  const [turns, setTurns] = useState<Turn[]>([]);
+  const [expanded, setExpanded] = useState(false);
+  const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
 
-  // Live state for the in-flight answer.
+  // In-flight answer state.
   const [tools, setTools] = useState<ToolStatus[]>([]);
   const [streamText, setStreamText] = useState('');
   const [streamFiles, setStreamFiles] = useState<DownloadFile[]>([]);
+  const [limit, setLimit] = useState<LimitMeta | null>(null);
+  const [atBottom, setAtBottom] = useState(true);
+  const [dismissedFollowUps, setDismissedFollowUps] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
-  const atBottomRef = useRef(true);
+  const abortRef = useRef<AbortController | null>(null);
+  // Delta buffer + rAF handle: one paint per frame, not one per token.
+  const bufRef = useRef('');
+  const rafRef = useRef<number | null>(null);
+  const loadedRef = useRef(false);
 
-  const allowed = user?.role === 'super_admin';
-
-  // Only auto-scroll when the user hasn't scrolled up to read something.
-  const onScroll = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  // Restore the transcript once, on first mount.
+  useEffect(() => {
+    if (loadedRef.current) return;
+    loadedRef.current = true;
+    const stored = loadThread();
+    if (stored.length) setTurns(stored);
   }, []);
 
   useEffect(() => {
-    if (!atBottomRef.current) return;
+    if (loadedRef.current) saveThread(turns);
+  }, [turns]);
+
+  // ---- scroll -------------------------------------------------------------
+  const onScroll = useCallback(() => {
     const el = scrollRef.current;
-    el?.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-  }, [turns, streamText, tools, streamFiles, busy]);
+    if (!el) return;
+    setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 100);
+  }, []);
+
+  const scrollToBottom = useCallback((smooth = true) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+    setAtBottom(true);
+  }, []);
+
+  useEffect(() => {
+    if (atBottom) scrollToBottom();
+  }, [turns, streamText, tools, streamFiles, busy, atBottom, scrollToBottom]);
+
+  // ---- keyboard -----------------------------------------------------------
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setOpen(o => !o);
+        return;
+      }
+      if (e.key === 'Escape' && open) {
+        if (busy) stop();
+        else setOpen(false);
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, busy]);
 
   useEffect(() => {
     if (open) setTimeout(() => taRef.current?.focus(), 120);
@@ -454,46 +180,90 @@ export default function ChatPanel() {
     const ta = taRef.current;
     if (!ta) return;
     ta.style.height = 'auto';
-    ta.style.height = `${Math.min(ta.scrollHeight, 110)}px`;
+    ta.style.height = `${Math.min(ta.scrollHeight, 128)}px`;
   }
 
-  async function ask(question: string) {
+  // ---- streaming ----------------------------------------------------------
+  function flushBuffer() {
+    rafRef.current = null;
+    if (!bufRef.current) return;
+    const chunk = bufRef.current;
+    bufRef.current = '';
+    setStreamText(prev => prev + chunk);
+  }
+
+  function pushDelta(text: string) {
+    bufRef.current += text;
+    if (rafRef.current == null) {
+      rafRef.current = requestAnimationFrame(flushBuffer);
+    }
+  }
+
+  function stop() {
+    abortRef.current?.abort();
+  }
+
+  const finishedWith = useCallback(
+    (turn: ChatTurn) => {
+      setTurns(t => [...t, turn]);
+      setTools([]);
+      setStreamText('');
+      setStreamFiles([]);
+      bufRef.current = '';
+      setDismissedFollowUps(false);
+    },
+    [],
+  );
+
+  async function ask(question: string, replacingLast = false) {
     const q = question.trim();
     if (!q || busy) return;
 
     setInput('');
     if (taRef.current) taRef.current.style.height = 'auto';
-    atBottomRef.current = true;
-    setTurns(t => [...t, { role: 'user', content: q, at: Date.now() }]);
+    setAtBottom(true);
+    setDismissedFollowUps(false);
+
+    // On regenerate, drop the previous answer but keep the question.
+    const base = replacingLast
+      ? turns.slice(0, turns.findLastIndex(t => t.role === 'user') + 1)
+      : [...turns, { role: 'user' as const, content: q, at: Date.now() }];
+    setTurns(base);
+
     setBusy(true);
     setTools([]);
     setStreamText('');
     setStreamFiles([]);
 
-    const history = SEND_HISTORY
-      ? turns.filter(t => !t.failed).slice(-6).map(t => ({ role: t.role, content: t.content }))
-      : [];
+    const history = base
+      .filter(t => !t.failed && !t.stopped)
+      .slice(-6)
+      .map(t => ({ role: t.role, content: t.content }));
+
+    const ac = new AbortController();
+    abortRef.current = ac;
+
+    let answer = '';
+    let sources: Source[] = [];
+    const files: DownloadFile[] = [];
+    let model = '';
+    let usage: ChatTurn['usage'];
+    let errored: string | null = null;
 
     const post = () =>
       fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: q, history }),
+        body: JSON.stringify({ question: q, history: history.slice(0, -1) }),
+        signal: ac.signal,
       });
-
-    const fail = (message: string) => {
-      setTurns(t => [...t, { role: 'assistant', content: message, failed: true, at: Date.now() }]);
-    };
 
     try {
       let res = await post();
 
-      // Mirror lib/api.ts: silently refresh an expired access token once.
       if (res.status === 401) {
-        const refreshed = await fetch('/api/auth/refresh', { method: 'POST' })
-          .then(r => r.ok)
-          .catch(() => false);
-        if (!refreshed) {
+        const ok = await fetch('/api/auth/refresh', { method: 'POST' }).then(r => r.ok).catch(() => false);
+        if (!ok) {
           window.location.href = '/login';
           return;
         }
@@ -501,95 +271,179 @@ export default function ChatPanel() {
       }
 
       if (!res.ok || !res.body) {
-        const msg = await res
-          .json()
-          .then((j: { error?: string }) => j.error)
-          .catch(() => null);
-        fail(msg ?? 'Could not reach the assistant.');
+        const msg = await res.json().then((j: { error?: string }) => j.error).catch(() => null);
+        finishedWith({
+          role: 'assistant',
+          content: msg ?? `The assistant returned HTTP ${res.status}.`,
+          failed: true,
+          retryOf: q,
+          at: Date.now(),
+        });
         return;
       }
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
-      let answer = '';
-      let sources: Source[] = [];
-      const files: DownloadFile[] = [];
-      let errored: string | null = null;
 
-      // SSE frames are separated by a blank line; a frame can straddle chunks.
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-
         const frames = buffer.split('\n\n');
         buffer = frames.pop() ?? '';
 
         for (const frame of frames) {
           const line = frame.split('\n').find(l => l.startsWith('data: '));
           if (!line) continue;
-
-          let ev: StreamEvent;
+          let ev: Record<string, unknown>;
           try {
-            ev = JSON.parse(line.slice(6)) as StreamEvent;
+            ev = JSON.parse(line.slice(6));
           } catch {
             continue;
           }
 
-          if (ev.type === 'tool_start') {
-            setTools(prev => [...prev, { name: ev.name, done: false }]);
-          } else if (ev.type === 'tool_done') {
-            setTools(prev => {
-              const idx = prev.findIndex(t => t.name === ev.name && !t.done);
-              if (idx === -1) return [...prev, { name: ev.name, done: true, rows: ev.rows, error: ev.error }];
-              const next = [...prev];
-              next[idx] = { ...next[idx], done: true, rows: ev.rows, error: ev.error };
-              return next;
-            });
-          } else if (ev.type === 'download') {
-            files.push(ev.file);
-            setStreamFiles([...files]);
-          } else if (ev.type === 'delta') {
-            answer += ev.text;
-            setStreamText(answer);
-          } else if (ev.type === 'done') {
-            answer = ev.answer;
-            sources = ev.traces.map(t => ({
-              tool: t.name,
-              rows: t.rows,
-              period: t.range_label,
-              error: t.error,
-            }));
-          } else if (ev.type === 'error') {
-            errored = ev.message;
+          switch (ev.type) {
+            case 'meta':
+              setLimit(ev.limit as LimitMeta);
+              break;
+            case 'tool_start':
+              setTools(p => [...p, { name: String(ev.name), done: false }]);
+              break;
+            case 'tool_done':
+              setTools(p => {
+                const i = p.findIndex(t => t.name === ev.name && !t.done);
+                const next = [...p];
+                const patch = {
+                  name: String(ev.name),
+                  done: true,
+                  rows: ev.rows as number | null,
+                  period: ev.period as string | undefined,
+                  error: ev.error as string | undefined,
+                };
+                if (i === -1) next.push(patch);
+                else next[i] = patch;
+                return next;
+              });
+              break;
+            case 'download':
+              files.push(ev.file as DownloadFile);
+              setStreamFiles([...files]);
+              break;
+            case 'delta':
+              answer += String(ev.text);
+              pushDelta(String(ev.text));
+              break;
+            case 'done':
+              answer = String(ev.answer);
+              model = String(ev.model ?? '');
+              usage = ev.usage as ChatTurn['usage'];
+              sources = ((ev.traces as Array<Record<string, unknown>>) ?? []).map(t => ({
+                tool: String(t.name),
+                rows: (t.rows as number | null) ?? null,
+                period: t.range_label as string | undefined,
+                error: t.error as string | undefined,
+              }));
+              break;
+            case 'error':
+              errored = String(ev.message);
+              break;
           }
         }
       }
 
       if (errored) {
-        fail(errored);
+        finishedWith({ role: 'assistant', content: errored, failed: true, retryOf: q, at: Date.now() });
       } else {
-        setTurns(t => [
-          ...t,
-          {
-            role: 'assistant',
-            content: answer || 'No answer returned.',
-            sources,
-            downloads: files,
-            at: Date.now(),
-          },
-        ]);
+        finishedWith({
+          role: 'assistant',
+          content: answer || 'No answer returned.',
+          sources,
+          downloads: files,
+          model,
+          usage,
+          at: Date.now(),
+        });
       }
-    } catch {
-      fail('The connection dropped before I finished. Please try again.');
+    } catch (err) {
+      if ((err as Error)?.name === 'AbortError') {
+        // Keep whatever arrived. Discarding it would waste the reader's time
+        // and the tokens already spent.
+        //
+        // Read from `answer`, not the `streamText` state: this closure captured
+        // streamText at the render that created this call, so it is always
+        // stale here. `answer` accumulates every delta in scope.
+        const partial = answer.trim();
+        finishedWith({
+          role: 'assistant',
+          content: partial || '_(stopped before anything arrived)_',
+          stopped: true,
+          sources,
+          downloads: files,
+          retryOf: q,
+          at: Date.now(),
+        });
+      } else {
+        finishedWith({
+          role: 'assistant',
+          content: 'The connection dropped before the answer finished.',
+          failed: true,
+          retryOf: q,
+          at: Date.now(),
+        });
+      }
     } finally {
+      // Drop any delta frame still waiting to paint — the turn is already
+      // committed to the transcript, so painting it into the live bubble would
+      // flash text that is about to be unmounted.
+      if (rafRef.current != null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+      bufRef.current = '';
+      abortRef.current = null;
       setBusy(false);
-      setTools([]);
-      setStreamText('');
-      setStreamFiles([]);
     }
   }
+
+  function clearThread() {
+    setTurns([]);
+    try {
+      sessionStorage.removeItem(STORAGE_KEY);
+    } catch {
+      /* nothing to do */
+    }
+  }
+
+  const lastAssistant = useMemo(
+    () => [...turns].reverse().find(t => t.role === 'assistant'),
+    [turns],
+  );
+  const followUps = useMemo(
+    () => (lastAssistant && !lastAssistant.failed && !busy && !dismissedFollowUps
+      ? followUpsFor(lastAssistant.sources)
+      : []),
+    [lastAssistant, busy, dismissedFollowUps],
+  );
+
+  /**
+   * One announcement per stage, for screen readers. Marking each bubble as a
+   * live region instead would re-announce the whole restored transcript every
+   * time the panel opens, and narrate the stream token by token.
+   */
+  const statusMessage = busy
+    ? tools.length > 0 && !tools.every(t => t.done)
+      ? `Reading your records — ${toolLabel(tools[tools.length - 1].name).toLowerCase()}`
+      : streamText
+        ? 'Writing the answer'
+        : 'Working on it'
+    : lastAssistant
+      ? lastAssistant.failed
+        ? 'That request did not go through'
+        : lastAssistant.stopped
+          ? 'Stopped'
+          : 'Answer ready'
+      : '';
 
   if (!allowed) return null;
 
@@ -601,23 +455,24 @@ export default function ChatPanel() {
         <button
           type="button"
           onClick={() => setOpen(true)}
-          aria-label="Open the reporting assistant"
+          aria-label="Open the reporting assistant (Ctrl+K)"
+          title="Reporting assistant — Ctrl+K"
           className={cn(
             'group fixed bottom-20 right-4 z-40 md:bottom-6 md:right-6',
             'flex h-12 items-center gap-2.5 rounded-full pl-3.5 pr-4',
             'bg-gradient-to-br from-blue-600 to-indigo-600 text-white',
-            'shadow-lg shadow-blue-600/25 transition-all hover:shadow-xl hover:shadow-blue-600/35',
-            'hover:-translate-y-0.5 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2',
+            'shadow-lg shadow-blue-600/25 transition-all hover:-translate-y-0.5 hover:shadow-xl',
+            'focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2',
           )}
         >
           <span className="relative grid h-6 w-6 place-items-center">
-            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v2m0 14v2M5 12H3m18 0h-2M7.5 7.5 6 6m12 1.5L19.5 6M7.5 16.5 6 18m12-1.5L19.5 18" />
-              <circle cx="12" cy="12" r="3.5" />
-            </svg>
+            <BotMark className="h-5 w-5" />
             <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-emerald-400 ring-2 ring-blue-600" />
           </span>
           <span className="text-sm font-semibold">Ask</span>
+          <kbd className="ml-0.5 hidden rounded border border-white/30 px-1 text-[10px] font-medium text-blue-50 md:inline">
+            ⌘K
+          </kbd>
         </button>
       )}
 
@@ -627,9 +482,10 @@ export default function ChatPanel() {
           aria-label="Reporting assistant"
           className={cn(
             'chat-pop fixed z-50 flex flex-col overflow-hidden bg-white dark:bg-slate-900',
-            'inset-0 md:inset-auto md:bottom-6 md:right-6',
-            'md:h-[min(43rem,calc(100vh-3rem))] md:w-[27rem] md:rounded-2xl',
             'shadow-2xl ring-1 ring-slate-200 dark:ring-slate-700',
+            expanded
+              ? 'inset-0 md:inset-6 md:rounded-2xl'
+              : 'inset-0 md:inset-auto md:bottom-6 md:right-6 md:h-[min(44rem,calc(100vh-3rem))] md:w-[28rem] md:rounded-2xl',
           )}
         >
           {/* Header */}
@@ -637,10 +493,7 @@ export default function ChatPanel() {
             <div className="flex items-center gap-3">
               <div className="relative">
                 <div className="grid h-9 w-9 place-items-center rounded-full bg-white/15 backdrop-blur">
-                  <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v2m0 14v2M5 12H3m18 0h-2M7.5 7.5 6 6m12 1.5L19.5 6M7.5 16.5 6 18m12-1.5L19.5 18" />
-                    <circle cx="12" cy="12" r="3.5" />
-                  </svg>
+                  <BotMark className="h-5 w-5" />
                 </div>
                 <span
                   className={cn(
@@ -655,10 +508,12 @@ export default function ChatPanel() {
                   {busy ? (
                     <>
                       <TypingDots />
-                      <span>working on it…</span>
+                      <span>working…</span>
                     </>
+                  ) : limit ? (
+                    `${Math.max(0, limit.limit - limit.used)} of ${limit.limit} questions left this ${limit.windowMinutes}-min window`
                   ) : (
-                    'Ready — asks only your own records'
+                    'Reads your attendance records only'
                   )}
                 </p>
               </div>
@@ -666,12 +521,27 @@ export default function ChatPanel() {
                 {turns.length > 0 && !busy && (
                   <button
                     type="button"
-                    onClick={() => setTurns([])}
+                    onClick={clearThread}
                     className="rounded-lg px-2 py-1 text-[11px] text-blue-100 transition-colors hover:bg-white/15"
                   >
                     Clear
                   </button>
                 )}
+                <button
+                  type="button"
+                  onClick={() => setExpanded(e => !e)}
+                  aria-label={expanded ? 'Shrink panel' : 'Expand panel'}
+                  title={expanded ? 'Shrink' : 'Expand — easier for wide tables'}
+                  className="hidden rounded-lg p-1.5 text-blue-100 transition-colors hover:bg-white/15 md:block"
+                >
+                  <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                    {expanded ? (
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 9H4m0 0V4m0 5 6-6m5 16h5m0 0v-5m0 5-6-6" />
+                    ) : (
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4m0 0h4M4 4l6 6m10-2V4m0 0h-4m4 0-6 6M4 16v4m0 0h4m-4 0 6-6m10 6v-4m0 4h-4m4 0-6-6" />
+                    )}
+                  </svg>
+                </button>
                 <button
                   type="button"
                   onClick={() => setOpen(false)}
@@ -686,106 +556,160 @@ export default function ChatPanel() {
             </div>
           </header>
 
+          <p role="status" aria-live="polite" className="sr-only">
+            {statusMessage}
+          </p>
+
           {/* Transcript */}
-          <div
-            ref={scrollRef}
-            onScroll={onScroll}
-            className="chat-scroll flex-1 space-y-3 overflow-y-auto bg-slate-50/60 px-3.5 py-4 dark:bg-slate-900"
-          >
-            {turns.length === 0 && !busy && (
-              <div className="chat-rise pt-4 text-center">
-                <div className="mx-auto mb-3 grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-600 shadow-lg shadow-blue-500/25">
-                  <svg className="h-7 w-7 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v2m0 14v2M5 12H3m18 0h-2M7.5 7.5 6 6m12 1.5L19.5 6M7.5 16.5 6 18m12-1.5L19.5 18" />
-                    <circle cx="12" cy="12" r="3.5" />
-                  </svg>
-                </div>
-                <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
-                  {firstName ? `Hello ${firstName} 👋` : 'Hello 👋'}
-                </p>
-                <p className="mx-auto mt-1 max-w-[17rem] text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-                  Ask me anything about attendance, hours, leave or shifts. I can also put
-                  it in an Excel, CSV or PDF file for you.
-                </p>
-                <div className="mt-4 flex flex-wrap justify-center gap-1.5">
-                  {SUGGESTIONS.map((s, i) => (
+          <div className="relative flex-1 overflow-hidden">
+            <div
+              ref={scrollRef}
+              onScroll={onScroll}
+              className="chat-scroll h-full overflow-y-auto bg-slate-50/60 px-3.5 py-4 dark:bg-slate-900"
+            >
+              <div className={cn('mx-auto space-y-3', expanded && 'max-w-3xl')}>
+                {turns.length === 0 && !busy && (
+                  <div className="chat-rise pt-3 text-center">
+                    <div className="mx-auto mb-3 grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-600 shadow-lg shadow-blue-500/25">
+                      <BotMark className="h-7 w-7 text-white" />
+                    </div>
+                    <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+                      {firstName ? `Hello ${firstName}` : 'Hello'}
+                    </p>
+                    <p className="mx-auto mt-1 max-w-[19rem] text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+                      Ask about attendance, hours, leave or shifts. I read only this
+                      app&apos;s records, and I can put any answer in a file.
+                    </p>
+                    <div className="mt-4 space-y-2.5 text-left">
+                      {SUGGESTION_GROUPS.map(g => (
+                        <div key={g.label}>
+                          <p className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                            {g.label}
+                          </p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {g.items.map(s => (
+                              <button
+                                key={s}
+                                type="button"
+                                onClick={() => ask(s)}
+                                className={cn(
+                                  'rounded-full border bg-white px-2.5 py-1.5 text-[11px] font-medium transition-all',
+                                  'border-slate-200 text-slate-600 hover:-translate-y-0.5 hover:border-blue-400 hover:text-blue-600 hover:shadow-sm',
+                                  'dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-blue-500 dark:hover:text-blue-400',
+                                )}
+                              >
+                                {s}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {turns.map((t, i) =>
+                  t.role === 'user' ? (
+                    <div key={i} className="chat-rise flex justify-end">
+                      <div className="max-w-[85%]">
+                        <div className="rounded-2xl rounded-br-md bg-gradient-to-br from-blue-600 to-indigo-600 px-3.5 py-2 text-xs leading-relaxed text-white shadow-sm">
+                          {t.content}
+                        </div>
+                        <p className="mt-1 pr-1 text-right text-[9.5px] text-slate-400">{relative(t.at)}</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <AssistantTurn
+                      key={i}
+                      turn={t}
+                      onRetry={() => t.retryOf && ask(t.retryOf, true)}
+                      onRegenerate={() => {
+                        const lastQ = [...turns].reverse().find(x => x.role === 'user');
+                        if (lastQ) ask(lastQ.content, true);
+                      }}
+                      isLast={i === turns.length - 1}
+                      busy={busy}
+                    />
+                  ),
+                )}
+
+                {/* In-flight */}
+                {busy && (
+                  <div className="chat-rise flex gap-2">
+                    <BotMark className="mt-0.5 h-7 w-7 shrink-0 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 p-1.5 text-white chat-ring" />
+                    <div className="min-w-0 flex-1">
+                      <div
+                        aria-busy="true"
+                        className="rounded-2xl rounded-bl-md bg-white px-3.5 py-2.5 text-xs text-slate-700 shadow-sm ring-1 ring-slate-200/80 dark:bg-slate-800 dark:text-slate-200 dark:ring-slate-700"
+                      >
+                        <ToolProgress tools={tools} />
+                        {streamText ? (
+                          <>
+                            <Markdownish text={streamText} />
+                            <span className="chat-caret" />
+                          </>
+                        ) : (
+                          tools.length === 0 && (
+                            <div className="space-y-1.5 py-0.5">
+                              <div className="chat-skeleton-line w-3/4" />
+                              <div className="chat-skeleton-line w-1/2" />
+                            </div>
+                          )
+                        )}
+                        {streamFiles.map((f, fi) => <DownloadCard key={fi} file={f} />)}
+                      </div>
+                      <div className="mt-1.5 pl-1">
+                        <button
+                          type="button"
+                          onClick={stop}
+                          className={cn(
+                            'inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-medium transition-colors',
+                            'border-slate-300 bg-white text-slate-600 hover:border-red-400 hover:text-red-600',
+                            'dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-red-500',
+                          )}
+                        >
+                          <span className="h-2 w-2 rounded-sm bg-current" />
+                          Stop
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Dismissible follow-ups */}
+                {followUps.length > 0 && (
+                  <div className="chat-fade-up flex flex-wrap items-center gap-1.5 pl-9">
+                    {followUps.map(f => (
+                      <button
+                        key={f}
+                        type="button"
+                        onClick={() => ask(f)}
+                        className="rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-medium text-blue-700 transition-colors hover:bg-blue-100 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300"
+                      >
+                        {f}
+                      </button>
+                    ))}
                     <button
-                      key={s}
                       type="button"
-                      onClick={() => ask(s)}
-                      style={{ animationDelay: `${i * 45}ms` }}
-                      className={cn(
-                        'chat-rise rounded-full border bg-white px-2.5 py-1.5 text-[11px] font-medium transition-all',
-                        'border-slate-200 text-slate-600 hover:-translate-y-0.5 hover:border-blue-400 hover:text-blue-600 hover:shadow-sm',
-                        'dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-blue-500 dark:hover:text-blue-400',
-                      )}
+                      onClick={() => setDismissedFollowUps(true)}
+                      aria-label="Dismiss suggestions"
+                      className="rounded px-1 text-[11px] text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
                     >
-                      {s}
+                      ✕
                     </button>
-                  ))}
-                </div>
+                  </div>
+                )}
               </div>
-            )}
+            </div>
 
-            {turns.map((t, i) =>
-              t.role === 'user' ? (
-                <div key={i} className="chat-rise flex justify-end">
-                  <div className="max-w-[85%]">
-                    <div className="rounded-2xl rounded-br-md bg-gradient-to-br from-blue-600 to-indigo-600 px-3.5 py-2 text-xs leading-relaxed text-white shadow-sm">
-                      {t.content}
-                    </div>
-                    <p className="mt-1 pr-1 text-right text-[9.5px] text-slate-400">{clock(t.at)}</p>
-                  </div>
-                </div>
-              ) : (
-                <div key={i} className="chat-rise group/msg flex gap-2">
-                  <BotAvatar />
-                  <div className="min-w-0 max-w-[88%] flex-1">
-                    <div
-                      className={cn(
-                        'rounded-2xl rounded-bl-md px-3.5 py-2.5 text-xs shadow-sm',
-                        t.failed
-                          ? 'bg-red-50 text-red-700 ring-1 ring-red-200 dark:bg-red-950/40 dark:text-red-300 dark:ring-red-900'
-                          : 'bg-white text-slate-700 ring-1 ring-slate-200/80 dark:bg-slate-800 dark:text-slate-200 dark:ring-slate-700',
-                      )}
-                    >
-                      <Markdownish text={t.content} />
-                      {t.downloads?.map((f, fi) => <DownloadCard key={fi} file={f} />)}
-                      {t.sources && <Sources sources={t.sources} />}
-                    </div>
-                    <div className="mt-1 flex items-center gap-1 pl-1">
-                      <span className="text-[9.5px] text-slate-400">{clock(t.at)}</span>
-                      {!t.failed && <CopyButton text={t.content} />}
-                    </div>
-                  </div>
-                </div>
-              ),
-            )}
-
-            {/* In-flight answer */}
-            {busy && (
-              <div className="chat-rise flex gap-2">
-                <BotAvatar busy />
-                <div className="min-w-0 max-w-[88%] flex-1">
-                  <div className="rounded-2xl rounded-bl-md bg-white px-3.5 py-2.5 text-xs text-slate-700 shadow-sm ring-1 ring-slate-200/80 dark:bg-slate-800 dark:text-slate-200 dark:ring-slate-700">
-                    <ToolProgress tools={tools} />
-                    {streamText ? (
-                      <>
-                        <Markdownish text={streamText} />
-                        <span className="chat-caret" />
-                      </>
-                    ) : (
-                      tools.length === 0 && (
-                        <span className="flex items-center gap-2 text-slate-400">
-                          <TypingDots />
-                          <span className="text-[11px]">thinking…</span>
-                        </span>
-                      )
-                    )}
-                    {streamFiles.map((f, fi) => <DownloadCard key={fi} file={f} />)}
-                  </div>
-                </div>
-              </div>
+            {!atBottom && (
+              <button
+                type="button"
+                onClick={() => scrollToBottom()}
+                className="chat-jump absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full bg-slate-900/85 px-3 py-1.5 text-[11px] font-medium text-white shadow-lg backdrop-blur hover:bg-slate-900 dark:bg-slate-100/90 dark:text-slate-900"
+              >
+                Jump to latest ↓
+              </button>
             )}
           </div>
 
@@ -797,59 +721,182 @@ export default function ChatPanel() {
             }}
             className="shrink-0 border-t border-slate-200 bg-white p-2.5 dark:border-slate-700 dark:bg-slate-900"
           >
-            <div
-              className={cn(
-                'flex items-end gap-2 rounded-2xl border bg-slate-50 px-3 py-2 transition-all',
-                'border-slate-200 focus-within:border-blue-400 focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-500/20',
-                'dark:border-slate-700 dark:bg-slate-800 dark:focus-within:border-blue-500 dark:focus-within:bg-slate-800',
-              )}
-            >
-              <textarea
-                ref={taRef}
-                rows={1}
-                value={input}
-                onChange={e => {
-                  setInput(e.target.value);
-                  grow();
-                }}
-                onKeyDown={e => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    ask(input);
-                  }
-                }}
-                placeholder={busy ? 'Working on your last question…' : 'Ask about attendance, leave or shifts…'}
-                maxLength={1000}
-                disabled={busy}
+            <div className={cn('mx-auto', expanded && 'max-w-3xl')}>
+              <div
                 className={cn(
-                  'max-h-[110px] min-w-0 flex-1 resize-none bg-transparent text-xs leading-relaxed',
-                  'text-slate-800 placeholder:text-slate-400 focus:outline-none',
-                  'dark:text-slate-100 dark:placeholder:text-slate-500',
-                  'disabled:opacity-60',
-                )}
-              />
-              <button
-                type="submit"
-                disabled={busy || !input.trim()}
-                aria-label="Send"
-                className={cn(
-                  'grid h-7 w-7 shrink-0 place-items-center rounded-full transition-all',
-                  input.trim() && !busy
-                    ? 'bg-gradient-to-br from-blue-600 to-indigo-600 text-white shadow-sm hover:scale-105'
-                    : 'bg-slate-200 text-slate-400 dark:bg-slate-700 dark:text-slate-500',
+                  'flex items-end gap-2 rounded-2xl border bg-slate-50 px-3 py-2 transition-all',
+                  'border-slate-200 focus-within:border-blue-400 focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-500/20',
+                  'dark:border-slate-700 dark:bg-slate-800 dark:focus-within:border-blue-500',
                 )}
               >
-                <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M3.4 20.4l17.5-7.5a1 1 0 0 0 0-1.8L3.4 3.6a1 1 0 0 0-1.4 1.1L4 11l9 1-9 1-2 6.3a1 1 0 0 0 1.4 1.1Z" />
-                </svg>
-              </button>
+                <textarea
+                  ref={taRef}
+                  rows={1}
+                  value={input}
+                  onChange={e => {
+                    setInput(e.target.value);
+                    grow();
+                  }}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      ask(input);
+                    }
+                  }}
+                  placeholder={busy ? 'Working on your last question…' : 'Ask about attendance, leave or shifts…'}
+                  maxLength={1000}
+                  disabled={busy}
+                  className={cn(
+                    'max-h-32 min-w-0 flex-1 resize-none bg-transparent text-xs leading-relaxed',
+                    'text-slate-800 placeholder:text-slate-400 focus:outline-none',
+                    'dark:text-slate-100 dark:placeholder:text-slate-500 disabled:opacity-60',
+                  )}
+                />
+                {busy ? (
+                  <button
+                    type="button"
+                    onClick={stop}
+                    aria-label="Stop generating"
+                    className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-red-500 text-white transition-transform hover:scale-105"
+                  >
+                    <span className="h-2.5 w-2.5 rounded-sm bg-white" />
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    disabled={!input.trim()}
+                    aria-label="Send"
+                    className={cn(
+                      'grid h-7 w-7 shrink-0 place-items-center rounded-full transition-all',
+                      input.trim()
+                        ? 'bg-gradient-to-br from-blue-600 to-indigo-600 text-white shadow-sm hover:scale-105'
+                        : 'bg-slate-200 text-slate-400 dark:bg-slate-700 dark:text-slate-500',
+                    )}
+                  >
+                    <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M3.4 20.4l17.5-7.5a1 1 0 0 0 0-1.8L3.4 3.6a1 1 0 0 0-1.4 1.1L4 11l9 1-9 1-2 6.3a1 1 0 0 0 1.4 1.1Z" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+              <p className="mt-1.5 flex items-center justify-between px-1 text-[9.5px] text-slate-400 dark:text-slate-500">
+                <span>Reads your attendance records only — never invents figures.</span>
+                <span className="hidden md:inline">Enter to send · Shift+Enter newline · Esc to close</span>
+              </p>
             </div>
-            <p className="mt-1.5 px-1 text-[9.5px] text-slate-400 dark:text-slate-500">
-              Reads your attendance records only — never invents figures.
-            </p>
           </form>
         </div>
       )}
     </>
+  );
+}
+
+/** One assistant turn, with its actions, provenance and cost. */
+function AssistantTurn({
+  turn,
+  onRetry,
+  onRegenerate,
+  isLast,
+  busy,
+}: {
+  turn: ChatTurn;
+  onRetry: () => void;
+  onRegenerate: () => void;
+  isLast: boolean;
+  busy: boolean;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(turn.content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+    } catch {
+      /* clipboard blocked — nothing useful to do */
+    }
+  }
+
+  const tone = turn.failed
+    ? 'bg-red-50 text-red-700 ring-1 ring-red-200 dark:bg-red-950/40 dark:text-red-300 dark:ring-red-900'
+    : turn.stopped
+      ? 'bg-amber-50 text-amber-900 ring-1 ring-amber-200 dark:bg-amber-950/30 dark:text-amber-200 dark:ring-amber-900/60'
+      : 'bg-white text-slate-700 ring-1 ring-slate-200/80 dark:bg-slate-800 dark:text-slate-200 dark:ring-slate-700';
+
+  return (
+    <div className="chat-rise group/msg flex gap-2">
+      <BotMark className="mt-0.5 h-7 w-7 shrink-0 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 p-1.5 text-white" />
+      <div className="min-w-0 flex-1">
+        <div className={cn('rounded-2xl rounded-bl-md px-3.5 py-2.5 text-xs shadow-sm', tone)}>
+          {turn.stopped && (
+            <p className="mb-1.5 inline-flex items-center gap-1 rounded bg-amber-200/60 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-900 dark:bg-amber-900/50 dark:text-amber-200">
+              Stopped
+            </p>
+          )}
+          <Markdownish text={turn.content} />
+          {turn.downloads?.map((f, i) => <DownloadCard key={i} file={f} />)}
+          {turn.sources && turn.sources.length > 0 && <SourceList sources={turn.sources} />}
+        </div>
+
+        <div className="mt-1 flex flex-wrap items-center gap-1 pl-1">
+          <span className="text-[9.5px] text-slate-400">{relative(turn.at)}</span>
+
+          {turn.model && (
+            <span
+              title={
+                turn.usage
+                  ? `${turn.usage.prompt_tokens.toLocaleString()} in / ${turn.usage.completion_tokens.toLocaleString()} out tokens`
+                  : undefined
+              }
+              className="rounded bg-slate-100 px-1 text-[9.5px] font-medium text-slate-500 dark:bg-slate-700/60 dark:text-slate-400"
+            >
+              {turn.model}
+              {turn.usage ? ` · ${(turn.usage.prompt_tokens + turn.usage.completion_tokens).toLocaleString()} tok` : ''}
+            </span>
+          )}
+
+          {!turn.failed && (
+            <button
+              type="button"
+              onClick={copy}
+              aria-label="Copy answer"
+              className="rounded p-1 text-slate-400 opacity-0 transition-all hover:bg-slate-200/60 hover:text-slate-600 focus:opacity-100 group-hover/msg:opacity-100 dark:hover:bg-slate-600/50"
+            >
+              {copied ? (
+                <svg className="h-3 w-3 text-emerald-500" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M16.7 5.3a1 1 0 0 1 0 1.4l-7.5 7.5a1 1 0 0 1-1.4 0L3.3 9.7a1 1 0 1 1 1.4-1.4l3.8 3.8 6.8-6.8a1 1 0 0 1 1.4 0Z" clipRule="evenodd" />
+                </svg>
+              ) : (
+                <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                  <rect x="9" y="9" width="11" height="11" rx="2" />
+                  <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+                </svg>
+              )}
+            </button>
+          )}
+
+          {/* One clear recovery action, never a bare "something went wrong". */}
+          {(turn.failed || turn.stopped) && turn.retryOf && !busy && (
+            <button
+              type="button"
+              onClick={onRetry}
+              className="rounded-md border border-slate-300 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 transition-colors hover:border-blue-400 hover:text-blue-600 dark:border-slate-600 dark:text-slate-300"
+            >
+              {turn.stopped ? 'Ask again' : 'Try again'}
+            </button>
+          )}
+
+          {!turn.failed && !turn.stopped && isLast && !busy && (
+            <button
+              type="button"
+              onClick={onRegenerate}
+              className="rounded-md px-1.5 py-0.5 text-[10px] font-medium text-slate-400 opacity-0 transition-all hover:text-slate-600 group-hover/msg:opacity-100 dark:hover:text-slate-200"
+            >
+              Regenerate
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }

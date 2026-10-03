@@ -87,6 +87,13 @@ export async function POST(request: NextRequest) {
         }
       };
 
+      // First frame: how much of the rate-limit window is left, so the UI can
+      // show real usage instead of guessing. Sent before any model work starts.
+      send({
+        type: 'meta',
+        limit: { used: limit.used + 1, limit: limit.limit, windowMinutes: limit.windowMinutes },
+      } as unknown as ChatEvent);
+
       try {
         await runChatStream(ctx, question, history as ChatTurn[], event => {
           send(event);

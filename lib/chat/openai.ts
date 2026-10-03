@@ -286,7 +286,15 @@ export interface DownloadEvent {
   period?: string;
 }
 
+/** Rate-limit snapshot sent once, before any model work. */
+export interface ChatLimitMeta {
+  used: number;
+  limit: number;
+  windowMinutes: number;
+}
+
 export type ChatEvent =
+  | { type: 'meta'; limit: ChatLimitMeta }
   | { type: 'tool_start'; name: string }
   | { type: 'tool_done'; name: string; rows: number | null; period?: string; error?: string }
   | { type: 'download'; file: DownloadEvent }

@@ -124,3 +124,53 @@ body {
   }
   .chat-caret { opacity: 1; }
 }
+
+/* ---------------------------------------------------------------------------
+   Reporting assistant — additions for the advanced panel.
+   Still honours prefers-reduced-motion via the block further up this file.
+--------------------------------------------------------------------------- */
+
+@keyframes chat-skeleton {
+  0%   { background-position: -180% 0; }
+  100% { background-position: 280% 0; }
+}
+
+@keyframes chat-fade-up {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* The queued state: one shimmering line, not a fake progress bar. */
+.chat-skeleton-line {
+  height: 0.6rem;
+  border-radius: 9999px;
+  background-image: linear-gradient(
+    90deg,
+    rgb(226 232 240) 0%,
+    rgb(241 245 249) 45%,
+    rgb(226 232 240) 90%
+  );
+  background-size: 220% 100%;
+  animation: chat-skeleton 1.4s linear infinite;
+}
+.dark .chat-skeleton-line {
+  background-image: linear-gradient(
+    90deg,
+    rgb(51 65 85) 0%,
+    rgb(71 85 105) 45%,
+    rgb(51 65 85) 90%
+  );
+}
+
+.chat-fade-up { animation: chat-fade-up 0.18s ease-out both; }
+
+/* Jump-to-latest pill */
+.chat-jump {
+  animation: chat-fade-up 0.18s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-skeleton-line,
+  .chat-fade-up,
+  .chat-jump { animation: none !important; }
+}
