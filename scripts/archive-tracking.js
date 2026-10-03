@@ -48,8 +48,13 @@ const zlib = require('zlib');
 const crypto = require('crypto');
 
 const ROOT = path.join(__dirname, '..');
-const envPath = path.join(ROOT, '.env.local');
-if (fs.existsSync(envPath)) {
+// Deployments differ: a local checkout uses .env.local, the production server
+// uses .env. Reading only .env.local meant this script silently loaded NOTHING
+// on the server - no DB credentials - so it died with Access denied for user ''.
+// First file wins per key, so .env.local still overrides .env where both exist.
+for (const envName of ['.env.local', '.env']) {
+  const envPath = path.join(ROOT, envName);
+  if (!fs.existsSync(envPath)) continue;
   for (const line of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
     const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*)$/.exec(line);
     if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
