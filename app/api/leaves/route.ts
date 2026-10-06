@@ -5,6 +5,7 @@ import { requireAuth } from '@/lib/auth';
 import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from '@/lib/constants';
 import { hasPermissionTable, hasOnDutyColumn } from '@/lib/permissions';
 import type { ApiResponse, LeaveRecord } from '@/lib/types';
+import { lockFor, MonthLockedError } from '@/lib/monthClose';
 
 // ---------------------------------------------------------------------------
 // Validation
@@ -222,6 +223,17 @@ export async function POST(request: NextRequest) {
     return NextResponse.json<ApiResponse>(
       { success: false, error: 'leave_date must be YYYY-MM-DD' },
       { status: 400 },
+    );
+  }
+
+  // Declaring or removing leave inside a closed month changes figures that
+  // were already signed off, so it is refused the same way an attendance edit
+  // is. Checked before any write.
+  const leaveLock = await lockFor(normalizedLeaveDate);
+  if (leaveLock) {
+    return NextResponse.json<ApiResponse>(
+      { success: false, error: new MonthLockedError(leaveLock, normalizedLeaveDate).message },
+      { status: 409 },
     );
   }
 

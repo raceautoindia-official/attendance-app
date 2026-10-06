@@ -1,11 +1,12 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Card from '@/components/ui/Card';
 import Badge from '@/components/ui/Badge';
 import Input from '@/components/ui/Input';
 import Spinner from '@/components/ui/Spinner';
+import Button from '@/components/ui/Button';
 import type { ApiResponse, Employee } from '@/lib/types';
 import Chart from '@/components/charts/Chart';
 import type { ChartSpec } from '@/lib/charts/types';
@@ -72,6 +73,8 @@ interface LedgerDay {
   notes: string | null;
 }
 
+type Closure = NonNullable<Ledger['closure']>;
+
 interface Ledger {
   employee: { id: number; emp_id: string; name: string; department: string | null; role: string; is_active: boolean };
   period: { from_date: string; to_date: string; label: string };
@@ -99,6 +102,14 @@ interface Ledger {
     has_open_days: boolean;
   };
   standard: { stated_minutes: number; roster_minutes: number; difference_minutes: number };
+  closure: {
+    period_month: string;
+    closed_through: string;
+    is_closed: boolean;
+    closed_by_name: string | null;
+    closed_at: string;
+    notes: string | null;
+  } | null;
   days: LedgerDay[];
   warnings: string[];
 }
@@ -231,6 +242,10 @@ export default function HoursPage() {
         </div>
       </Card>
 
+      {/* Closing the month. Lives here because this is the page somebody is on
+          when they decide the month looks right. */}
+      {mode === 'month' && <MonthCloseCard month={month} />}
+
       {employeeId == null && (
         <Card>
           <p className="py-8 text-center text-sm text-slate-500 dark:text-slate-400">
@@ -322,6 +337,31 @@ function Statement({ ledger }: { ledger: Ledger }) {
           )}
           {ledger.standing !== 'counted' && (
             <Badge variant="neutral">{ledger.standing === 'dormant' ? 'No activity' : 'Not counted'}</Badge>
+          )}
+        </div>
+
+        {/* Whether these figures are final. A reader deciding pay needs to know
+            the difference between "reviewed and signed off" and "still moving". */}
+        <div className="mt-3">
+          {ledger.closure?.is_closed ? (
+            <p className="flex flex-wrap items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300">
+              <span aria-hidden>🔒</span>
+              <strong className="font-semibold">Closed.</strong>
+              These figures are final — signed off
+              {ledger.closure.closed_by_name ? ` by ${ledger.closure.closed_by_name}` : ''} on{' '}
+              {new Date(ledger.closure.closed_at).toLocaleDateString('en-IN', {
+                day: 'numeric', month: 'short', year: 'numeric',
+              })}
+              . Attendance for this period cannot be edited unless the month is reopened.
+              {ledger.closure.notes ? ` ${ledger.closure.notes}` : ''}
+            </p>
+          ) : (
+            <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+              <strong className="font-semibold">Open.</strong>{' '}
+              This period has not been closed, so the figures can still change —
+              a correction or a late clock-out will move them. Close the month
+              once it has been reviewed to make it final.
+            </p>
           )}
         </div>
 
@@ -600,5 +640,151 @@ function Line({ label, value }: { label: string; value: string }) {
       <span className="text-slate-500 dark:text-slate-400">{label}</span>
       <span className="font-medium tabular-nums text-slate-800 dark:text-slate-100">{value}</span>
     </div>
+  );
+}
+
+
+/**
+ * Close or reopen a month.
+ *
+ * Warnings from the server are shown but do not block: the app does not know
+ * the whole story — an open session may be a night shift mid-run, a zero-hour
+ * employee may be a known leaver — so it reports what it noticed and leaves the
+ * decision with the person signing the month off.
+ */
+function MonthCloseCard({ month }: { month: string }) {
+  const qc = useQueryClient();
+  const [notes, setNotes] = useState('');
+  const [reason, setReason] = useState('');
+  const [reopening, setReopening] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
+
+  const { data: closure, isLoading } = useQuery({
+    queryKey: ['month-closure', month],
+    queryFn: async () => {
+      const res = await fetch(`/api/month-close?month=${month}`);
+      const json: ApiResponse<{ closure: Closure | null }> = await res.json();
+      if (!json.success) throw new Error(json.error ?? 'Could not read the closure');
+      return json.data?.closure ?? null;
+    },
+  });
+
+  const close = useMutation({
+    mutationFn: async () => {
+      const res = await fetch('/api/month-close', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ month, notes: notes || null }),
+      });
+      const json: ApiResponse<{ warnings: string[] }> = await res.json();
+      if (!json.success) throw new Error(json.error ?? 'Could not close the month');
+      return json.data;
+    },
+    onSuccess: data => {
+      setError(null);
+      setWarnings(data?.warnings ?? []);
+      setNotes('');
+      qc.invalidateQueries({ queryKey: ['month-closure', month] });
+      qc.invalidateQueries({ queryKey: ['hours-ledger'] });
+    },
+    onError: (e: Error) => { setError(e.message); setWarnings([]); },
+  });
+
+  const reopen = useMutation({
+    mutationFn: async () => {
+      const res = await fetch('/api/month-close', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ month, reason }),
+      });
+      const json: ApiResponse<unknown> = await res.json();
+      if (!json.success) throw new Error(json.error ?? 'Could not reopen the month');
+      return json.data;
+    },
+    onSuccess: () => {
+      setError(null);
+      setReason('');
+      setReopening(false);
+      qc.invalidateQueries({ queryKey: ['month-closure', month] });
+      qc.invalidateQueries({ queryKey: ['hours-ledger'] });
+    },
+    onError: (e: Error) => setError(e.message),
+  });
+
+  if (isLoading) return null;
+  const isClosed = Boolean(closure?.is_closed);
+
+  return (
+    <Card>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <h2 className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+            {isClosed ? 'This month is closed' : 'Close this month'}
+          </h2>
+          <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+            {isClosed
+              ? `Signed off${closure?.closed_by_name ? ` by ${closure.closed_by_name}` : ''} on `
+                + `${new Date(closure!.closed_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}. `
+                + 'Attendance and leave for this period are read-only.'
+              : 'Once reviewed, close it so the figures stop moving. Attendance and leave '
+                + 'for the period become read-only, and reopening is recorded.'}
+          </p>
+        </div>
+
+        {isClosed ? (
+          <Button variant="secondary" onClick={() => setReopening(v => !v)}>
+            {reopening ? 'Cancel' : 'Reopen'}
+          </Button>
+        ) : (
+          <div className="flex items-end gap-2">
+            <Input
+              label="Note (optional)"
+              value={notes}
+              onChange={e => setNotes(e.target.value)}
+              placeholder="e.g. payroll run 28th"
+              className="w-52"
+            />
+            <Button onClick={() => close.mutate()} disabled={close.isPending}>
+              {close.isPending ? 'Closing…' : 'Close month'}
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {reopening && (
+        <div className="mt-3 flex items-end gap-2 border-t border-slate-200 pt-3 dark:border-slate-700">
+          <Input
+            label="Why is it being reopened?"
+            value={reason}
+            onChange={e => setReason(e.target.value)}
+            placeholder="e.g. correcting Reena's 12 Sept clock-out"
+            className="flex-1"
+          />
+          <Button
+            variant="danger"
+            onClick={() => reopen.mutate()}
+            disabled={reopen.isPending || reason.trim().length < 5}
+          >
+            {reopen.isPending ? 'Reopening…' : 'Reopen month'}
+          </Button>
+        </div>
+      )}
+
+      {error && <p className="mt-2 text-xs text-red-600 dark:text-red-400">{error}</p>}
+
+      {warnings.length > 0 && (
+        <ul className="mt-3 space-y-1 border-t border-slate-200 pt-3 dark:border-slate-700">
+          <li className="text-xs font-medium text-slate-600 dark:text-slate-300">
+            Closed. Worth knowing:
+          </li>
+          {warnings.map((w, i) => (
+            <li key={i} className="flex gap-2 text-xs text-amber-700 dark:text-amber-400">
+              <span aria-hidden>⚠</span><span>{w}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
   );
 }

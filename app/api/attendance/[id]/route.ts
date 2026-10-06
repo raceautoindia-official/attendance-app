@@ -4,6 +4,8 @@ import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import { toMySQLDatetime } from '@/lib/attendance';
 import type { ApiResponse, AttendanceRecord, AttendanceStatus } from '@/lib/types';
+import { lockFor, MonthLockedError } from '@/lib/monthClose';
+import { toYmd } from '@/lib/date';
 
 // ---------------------------------------------------------------------------
 // Validation
@@ -88,6 +90,23 @@ export async function PUT(
         { status: 403 },
       );
     }
+  }
+
+  // 3b. Is the month closed?
+  //
+  // Checked BEFORE anything is written: a row that was changed and then
+  // complained about is worse than one that was refused. Clock-in and clock-out
+  // are deliberately NOT guarded — you cannot clock into a past month, and the
+  // mobile app must never be refused for a reason it cannot explain.
+  const locked = await lockFor(toYmd(existing.work_date));
+  if (locked) {
+    return NextResponse.json<ApiResponse>(
+      {
+        success: false,
+        error: new MonthLockedError(locked, toYmd(existing.work_date)).message,
+      },
+      { status: 409 },
+    );
   }
 
   // 4. Resolve updated values (fall back to existing when not provided)

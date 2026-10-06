@@ -294,3 +294,20 @@ SELECT
   CONCAT(COUNT(*), ' shift(s)') AS result,
   'Each one reduces its required hours by that many minutes per working day' AS detail
 FROM shifts WHERE unpaid_break_minutes IS NOT NULL;
+
+SELECT
+  '2026-10-06_month_closures' AS migration,
+  CASE WHEN total = 1 THEN 'APPLIED' ELSE 'MISSING' END AS result,
+  CONCAT(total, '/1 tables') AS detail
+FROM (
+  SELECT COUNT(*) AS total FROM INFORMATION_SCHEMA.TABLES
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'month_closures'
+) t;
+
+-- Which periods are frozen. A locked month refuses attendance and leave edits,
+-- so this is the first thing to check when an edit is being rejected.
+SELECT
+  'INFO closed months' AS check_name,
+  COALESCE(GROUP_CONCAT(DATE_FORMAT(period_month, '%Y-%m') ORDER BY period_month SEPARATOR ', '), 'none') AS result,
+  'Attendance and leave inside these are read-only until reopened' AS detail
+FROM month_closures WHERE is_closed = TRUE;

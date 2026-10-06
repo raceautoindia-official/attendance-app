@@ -12,7 +12,7 @@ measured, not estimated; where a figure is a judgement call it says so.
 | 1 — hours clarity and shortage | **Done, local only, not deployed.** `lib/hoursLedger.ts`, `/api/reports/hours-ledger`, the Working Hours page, month dropdowns, and per-day Required/Short columns in the existing Day-by-day tab. 88 new checks, 195 in total, all passing. |
 | 2 — assistant accuracy | **Done, local only, not deployed.** All four defects fixed at the cause: `employee_ids` threaded through the exports, a `get_hours_ledger` tool so derived figures exist to be read, fuzzy name matching with "did you mean", and empty results that say *which* kind of empty they are. 33 offline checks plus 12 live model checks, all passing. |
 | 3 — visuals | **Done, local only, not deployed.** Dependency-free SVG charts (bar, column, line, pie, stacked bar) against a colour-vision-validated palette, a `build_chart` tool that takes data and never markup, charts rendered in the assistant panel, and a worked-against-required chart on the Working Hours page. 47 offline checks plus 16 live model checks. |
-| 4 — the futuristic layer | Not started. |
+| 4 — the futuristic layer | **In progress, local only.** Month close and lock is done (item 1, the biggest). Items 2–7 — regularisation requests, exception-first dashboard, anomaly flags, scheduled month-end email, trend comparison, pay-ready export — not started. |
 
 Decisions taken (§6): break policy is **net work with a nullable per-shift
 allowance**; the standard is **roster-derived, displayed against the stated

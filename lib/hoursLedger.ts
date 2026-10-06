@@ -2,6 +2,7 @@ import { query, queryOne } from '@/lib/db';
 import { STANDARD_MONTHLY_MINUTES } from '@/lib/constants';
 import { toYmd } from '@/lib/date';
 import { istToday } from '@/lib/chat/dates';
+import { lockFor, type MonthClosure } from '@/lib/monthClose';
 import { breakMinutes, lateMinutes } from '@/lib/attendance';
 import { hasOnDutyColumn, hasPermissionTable, timeOffOnly } from '@/lib/permissions';
 import { hasFirstClockInColumn } from '@/lib/employeeDetails';
@@ -189,6 +190,12 @@ export interface HoursLedger {
     /** Difference between what the roster asks and the stated norm. */
     difference_minutes: number;
   };
+  /**
+   * The closure locking this period, if any. Non-null means the figures are
+   * final: they were reviewed and signed off, and cannot change without the
+   * month being reopened on the record.
+   */
+  closure: MonthClosure | null;
   days: LedgerDay[];
   /** Anything the reader needs to know before trusting the numbers. */
   warnings: string[];
@@ -585,6 +592,10 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
     warnings.push('This employee is inactive.');
   }
 
+  // Locked by the END of the period: a part-month close locks what it covers,
+  // and a statement that straddles the boundary is still partly provisional.
+  const closure = await lockFor(toDate);
+
   return {
     employee: {
       id: employee.id, emp_id: employee.emp_id, name: employee.name,
@@ -604,6 +615,7 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
       roster_minutes: t.scheduled_minutes,
       difference_minutes: t.scheduled_minutes - STANDARD_MONTHLY_MINUTES,
     },
+    closure,
     days,
     warnings,
   };

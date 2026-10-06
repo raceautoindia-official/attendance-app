@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import type { ApiResponse, LeaveRecord } from '@/lib/types';
+import { lockFor, MonthLockedError } from '@/lib/monthClose';
+import { toYmd } from '@/lib/date';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -24,6 +26,17 @@ export async function DELETE(request: NextRequest, context: Params) {
     return NextResponse.json<ApiResponse>(
       { success: false, error: 'Leave record not found' },
       { status: 404 },
+    );
+  }
+
+  // Removing leave from a closed month would silently change a signed-off
+  // figure — the same reason an attendance edit is refused there.
+  const leaveDate = toYmd(existing.leave_date);
+  const lock = await lockFor(leaveDate);
+  if (lock) {
+    return NextResponse.json<ApiResponse>(
+      { success: false, error: new MonthLockedError(lock, leaveDate).message },
+      { status: 409 },
     );
   }
 
