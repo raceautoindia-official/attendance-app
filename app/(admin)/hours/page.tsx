@@ -759,9 +759,17 @@ function MonthCloseCard({ month }: { month: string }) {
         </div>
 
         {isClosed ? (
-          <Button variant="secondary" onClick={() => setReopening(v => !v)}>
-            {reopening ? 'Cancel' : 'Reopen'}
-          </Button>
+          <div className="flex items-center gap-2">
+            <a
+              href={`/api/reports/payroll-pack?month=${month}&format=xlsx`}
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 no-underline transition-colors hover:border-blue-400 hover:text-blue-600 dark:border-slate-600 dark:text-slate-200"
+            >
+              Download pack
+            </a>
+            <Button variant="secondary" onClick={() => setReopening(v => !v)}>
+              {reopening ? 'Cancel' : 'Reopen'}
+            </Button>
+          </div>
         ) : (
           <div className="flex items-end gap-2">
             <Input
