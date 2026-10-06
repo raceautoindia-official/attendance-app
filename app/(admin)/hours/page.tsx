@@ -52,7 +52,7 @@ function dayNum(date: string): string {
 interface LedgerDay {
   date: string;
   weekday: string;
-  kind: 'working' | 'week_off' | 'holiday' | 'leave';
+  kind: 'working' | 'week_off' | 'holiday' | 'leave' | 'future';
   kind_label: string | null;
   status: string | null;
   clock_in_utc: string | null;
@@ -83,11 +83,12 @@ interface Ledger {
   standing: 'counted' | 'dormant' | 'excluded';
   standing_reason: string | null;
   totals: {
-    calendar_days: number; working_days: number; week_off_days: number;
+    calendar_days: number; working_days: number; scheduled_working_days: number;
+    future_days: number; week_off_days: number;
     holiday_days: number; leave_days: number;
     days_present: number; days_late: number; days_absent: number;
     days_worked: number; days_short: number;
-    required_minutes: number; worked_minutes: number; break_minutes: number;
+    required_minutes: number; scheduled_minutes: number; worked_minutes: number; break_minutes: number;
     permission_minutes: number; credited_minutes: number;
     shortage_minutes: number; overtime_minutes: number; net_minutes: number; late_minutes: number;
     avg_worked_minutes_per_day: number | null;
@@ -120,6 +121,7 @@ const KIND_BADGE: Record<LedgerDay['kind'], { variant: 'success' | 'warning' | '
   week_off: { variant: 'neutral', label: 'Week off' },
   holiday: { variant: 'success', label: 'Holiday' },
   leave: { variant: 'warning', label: 'Leave' },
+  future: { variant: 'neutral', label: 'Not yet' },
 };
 
 export default function HoursPage() {
@@ -342,7 +344,13 @@ function Statement({ ledger }: { ledger: Ledger }) {
 
       {/* The four numbers that matter */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Figure label="Required" value={hm(t.required_minutes)} note={`${t.working_days} working days`} />
+        <Figure
+          label={t.future_days > 0 ? 'Required so far' : 'Required'}
+          value={hm(t.required_minutes)}
+          note={t.future_days > 0
+            ? `${t.working_days} of ${t.scheduled_working_days} working days · full period ${hm(t.scheduled_minutes)}`
+            : `${t.working_days} working days`}
+        />
         <Figure label="Worked" value={hm(t.worked_minutes)} note={`over ${t.days_worked} days`} />
         <Figure
           label={monthShort > 0 ? 'Short for the month' : 'Ahead for the month'}
@@ -364,7 +372,10 @@ function Statement({ ledger }: { ledger: Ledger }) {
         </h2>
         <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs sm:grid-cols-3 lg:grid-cols-5">
           <Line label="Days in period" value={String(t.calendar_days)} />
-          <Line label="Working days" value={String(t.working_days)} />
+          <Line
+            label={t.future_days > 0 ? 'Working days so far' : 'Working days'}
+            value={t.future_days > 0 ? `${t.working_days} of ${t.scheduled_working_days}` : String(t.working_days)}
+          />
           <Line label="Week offs" value={String(t.week_off_days)} />
           <Line label="Holidays" value={String(t.holiday_days)} />
           <Line label="Leave taken" value={String(t.leave_days)} />
@@ -385,8 +396,8 @@ function Statement({ ledger }: { ledger: Ledger }) {
               : ledger.policy.gross_minutes_per_day == null
                 ? 'no shift is rostered, so nothing is required.'
                 : ledger.policy.unpaid_break_minutes
-                  ? `${hm(ledger.policy.gross_minutes_per_day)} on the clock less ${hm(ledger.policy.unpaid_break_minutes)} unpaid break = ${hm(ledger.policy.net_minutes_per_day)} per working day, × ${t.working_days} working days.`
-                  : `${hm(ledger.policy.net_minutes_per_day)} per working day × ${t.working_days} working days. No unpaid break is deducted.`}
+                  ? `${hm(ledger.policy.gross_minutes_per_day)} on the clock less ${hm(ledger.policy.unpaid_break_minutes)} unpaid break = ${hm(ledger.policy.net_minutes_per_day)} per working day, × ${t.scheduled_working_days} working days in the period.`
+                  : `${hm(ledger.policy.net_minutes_per_day)} per working day × ${t.scheduled_working_days} working days in the period. No unpaid break is deducted.`}
           </p>
           <p>
             <strong className="font-semibold">Against the company standard:</strong>{' '}
@@ -475,8 +486,10 @@ function Statement({ ledger }: { ledger: Ledger }) {
                         <span
                           className="ml-1 cursor-help text-slate-400 underline decoration-dotted underline-offset-2"
                           title={
-                            `Clocked in and out ${d.sessions} times on this day, rather than once. `
-                            + `The time shown is the final clock-out.`
+                            `Clocked in and out ${d.sessions} times on this day, rather than once — `
+                            + `for example going out for lunch and coming back. `
+                            + `"In" is the first clock-in of the day and "Out" is the final clock-out, `
+                            + `so the hours worked are the sessions added together, not the gap between these two times.`
                             + (d.break_minutes
                               ? ` ${hm(d.break_minutes)} passed between sessions and is not counted as worked time.`
                               : '')
@@ -520,8 +533,10 @@ function Statement({ ledger }: { ledger: Ledger }) {
             <p className="text-[11px] text-slate-500 dark:text-slate-400">
               <span className="mr-1 text-slate-400 underline decoration-dotted underline-offset-2">×2</span>
               means the person clocked in and out more than once that day — for
-              example going out for lunch and back. The time shown is their final
-              clock-out, and the gap between sessions is not counted as worked time.
+              example going out for lunch and back. <strong>In</strong> is their first
+              clock-in and <strong>Out</strong> is their final clock-out, so
+              <strong>Worked</strong> is the sessions added together, not the gap
+              between those two times. Time between sessions is not counted as worked.
             </p>
           </div>
         )}

@@ -1,6 +1,7 @@
 import { query, queryOne } from '@/lib/db';
 import { STANDARD_MONTHLY_MINUTES } from '@/lib/constants';
 import { toYmd } from '@/lib/date';
+import { istToday } from '@/lib/chat/dates';
 import { breakMinutes, lateMinutes } from '@/lib/attendance';
 import { hasOnDutyColumn, hasPermissionTable, timeOffOnly } from '@/lib/permissions';
 import { hasFirstClockInColumn } from '@/lib/employeeDetails';
@@ -44,8 +45,15 @@ import {
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
 
-/** What kind of day it was, independent of whether anybody clocked in. */
-export type DayKind = 'working' | 'week_off' | 'holiday' | 'leave';
+/**
+ * What kind of day it was, independent of whether anybody clocked in.
+ *
+ * 'future' is a working day that has not happened yet. Without it, opening the
+ * current month showed every remaining day as a full 9h shortfall — on the 6th
+ * of October that was 22 days short and 185h unworked, for a month six days
+ * old. A day nobody could have worked yet cannot be a shortage.
+ */
+export type DayKind = 'working' | 'week_off' | 'holiday' | 'leave' | 'future';
 
 export interface LedgerDay {
   /** YYYY-MM-DD */
@@ -104,7 +112,15 @@ export type LedgerStanding = 'counted' | 'dormant' | 'excluded';
 
 export interface LedgerTotals {
   calendar_days: number;
+  /** Working days that have ALREADY happened — the basis for every comparison. */
   working_days: number;
+  /**
+   * Working days in the whole period, including ones still to come. For a past
+   * month this equals `working_days`; for the current month it is larger.
+   */
+  scheduled_working_days: number;
+  /** Working days still in the future. */
+  future_days: number;
   week_off_days: number;
   holiday_days: number;
   leave_days: number;
@@ -115,7 +131,10 @@ export interface LedgerTotals {
   days_worked: number;
   /** Days with a requirement that fell short of it. */
   days_short: number;
+  /** Required over the days that have happened. Shortage is measured against this. */
   required_minutes: number;
+  /** Required over the WHOLE period, future days included. */
+  scheduled_minutes: number;
   worked_minutes: number;
   break_minutes: number;
   permission_minutes: number;
@@ -347,13 +366,17 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
 
   const days: LedgerDay[] = [];
   const t: LedgerTotals = {
-    calendar_days: 0, working_days: 0, week_off_days: 0, holiday_days: 0, leave_days: 0,
+    calendar_days: 0, working_days: 0, scheduled_working_days: 0, future_days: 0,
+    week_off_days: 0, holiday_days: 0, leave_days: 0,
     days_present: 0, days_late: 0, days_absent: 0, days_worked: 0, days_short: 0,
-    required_minutes: 0, worked_minutes: 0, break_minutes: 0, permission_minutes: 0,
+    required_minutes: 0, scheduled_minutes: 0, worked_minutes: 0, break_minutes: 0, permission_minutes: 0,
     credited_minutes: 0, shortage_minutes: 0, overtime_minutes: 0, net_minutes: 0, late_minutes: 0,
     avg_worked_minutes_per_day: null, shortest_day: null, longest_day: null,
     has_open_days: false,
   };
+
+  // Anything after today in IST has not happened yet — see DayKind 'future'.
+  const today = istToday();
 
   const dates = eachDate(fromDate, toDate);
   t.calendar_days = dates.length;
@@ -385,13 +408,20 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
     } else if (row?.status === 'leave') {
       kind = 'leave';
       kindLabel = 'Leave';
+    } else if (date > today) {
+      // A working day that has not arrived yet. It is still scheduled — it
+      // counts towards what the month will ask for — but nobody can be short
+      // of hours they have not had the chance to work.
+      kind = 'future';
+      kindLabel = 'Not yet';
     } else {
       kind = 'working';
     }
 
-    // Only a working day demands anything. A holiday, week off or approved
-    // leave asks for nothing, so it can never produce a shortage — the bug this
-    // whole exercise started from was a Sunday counted as a missed holiday.
+    // Only a working day that has already happened demands anything. A holiday,
+    // week off, approved leave or future date asks for nothing, so none of them
+    // can produce a shortage — the bug this whole exercise started from was a
+    // Sunday counted as a missed holiday.
     const required = kind === 'working'
       ? (shifts.length ? (rosteredToday ?? 0) : null)
       : 0;
@@ -433,7 +463,16 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
     days.push({
       date, weekday, kind, kind_label: kindLabel,
       status: row?.status ?? null,
-      clock_in_utc: row?.clock_in_utc ? new Date(row.clock_in_utc).toISOString() : null,
+      // The FIRST clock-in of the day, not the last.
+      //
+      // On a multi-session day `clock_in_utc` holds the most recent session's
+      // start, so showing it made rows self-contradictory: Reena on 1 Oct read
+      // "in 06:08 pm, out 06:40 pm, worked 7h 54m" when she actually started at
+      // 09:53 am. `first_clock_in_utc` is the start of the day, which is what a
+      // day row means by "in" — the same COALESCE the daily report uses.
+      clock_in_utc: row?.first_clock_in_utc
+        ? new Date(row.first_clock_in_utc).toISOString()
+        : row?.clock_in_utc ? new Date(row.clock_in_utc).toISOString() : null,
       clock_out_utc: row?.clock_out_utc ? new Date(row.clock_out_utc).toISOString() : null,
       sessions: Number(row?.session_count ?? 0),
       required_minutes: required,
@@ -450,6 +489,13 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
 
     // Totals
     if (kind === 'working') t.working_days += 1;
+    if (kind === 'future') t.future_days += 1;
+    // Scheduled covers the whole period: days worked so far AND days still to
+    // come, so "the month asks 216h" stays true on the 6th of the month.
+    if (kind === 'working' || kind === 'future') {
+      t.scheduled_working_days += 1;
+      t.scheduled_minutes += shifts.length ? (rosteredToday ?? 0) : 0;
+    }
     if (kind === 'week_off') t.week_off_days += 1;
     if (kind === 'holiday') t.holiday_days += 1;
     if (kind === 'leave') t.leave_days += 1;
@@ -520,6 +566,12 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
   if (t.has_open_days) {
     warnings.push('One or more days are still open — those hours are provisional until clock-out.');
   }
+  if (t.future_days > 0) {
+    warnings.push(
+      `This period is still running: ${t.future_days} working day${t.future_days === 1 ? '' : 's'} `
+      + 'have not happened yet and are not counted as shortage. Figures are month-to-date.',
+    );
+  }
   if (policy.mixed) {
     warnings.push('This employee holds shifts with different working days, so there is no single hours-per-day figure.');
   }
@@ -546,8 +598,11 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
     totals: t,
     standard: {
       stated_minutes: STANDARD_MONTHLY_MINUTES,
-      roster_minutes: t.required_minutes,
-      difference_minutes: t.required_minutes - STANDARD_MONTHLY_MINUTES,
+      // The WHOLE period's ask, not just the elapsed part — "does this month
+      // work out to the 225h standard" is a question about the month, and
+      // comparing a part-month against a monthly norm would always look short.
+      roster_minutes: t.scheduled_minutes,
+      difference_minutes: t.scheduled_minutes - STANDARD_MONTHLY_MINUTES,
     },
     days,
     warnings,

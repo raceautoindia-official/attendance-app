@@ -320,6 +320,48 @@ async function main() {
     const missing = await buildHoursLedger({ employeeId: 99_999_999, fromDate: FROM, toDate: TO });
     eq('an unknown employee returns null, not an empty ledger', missing, null);
 
+    // ---- a month still in progress -----------------------------------------
+    // Opening the CURRENT month used to show every remaining day as a full
+    // shortfall: on the 6th of October that read as 22 days short and 185h
+    // unworked, for a month six days old. Nobody can be short of hours they
+    // have not had the chance to work yet.
+    console.log('\n— days that have not happened yet are not a shortage —');
+    const todayIst = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(new Date());
+    const [cy, cm] = todayIst.split('-');
+    const lastOfMonth = new Date(Date.UTC(Number(cy), Number(cm), 0)).getUTCDate();
+    const current = (await buildHoursLedger({
+      employeeId: f.onTarget,
+      fromDate: `${cy}-${cm}-01`,
+      toDate: `${cy}-${cm}-${String(lastOfMonth).padStart(2, '0')}`,
+    }))!;
+    const futureDays = current.days.filter(d => d.date > todayIst);
+    check('the current month contains future days to test with', futureDays.length > 0,
+      `${futureDays.length} day(s) after ${todayIst}`);
+    check('every future day is marked as such',
+      futureDays.every(d => d.kind === 'future' || d.kind === 'week_off' || d.kind === 'holiday'),
+      futureDays.map(d => d.kind).join(','));
+    check('no future day requires anything',
+      futureDays.every(d => (d.required_minutes ?? 0) === 0));
+    check('no future day produces a shortage',
+      futureDays.every(d => d.shortage_minutes === 0));
+    check('required-so-far is less than the full period requirement',
+      current.totals.required_minutes < current.totals.scheduled_minutes,
+      `${current.totals.required_minutes} so far vs ${current.totals.scheduled_minutes} scheduled`);
+    check('the full period still counts every working day',
+      current.totals.scheduled_working_days > current.totals.working_days,
+      `${current.totals.working_days} elapsed of ${current.totals.scheduled_working_days}`);
+    check('a warning says the figures are month-to-date',
+      current.warnings.some(w => w.includes('month-to-date')), current.warnings.join(' | '));
+    check('the standard comparison uses the WHOLE period, not just elapsed days',
+      current.standard.roster_minutes === current.totals.scheduled_minutes);
+
+    // A finished month must be unaffected by any of that.
+    eq('a completed month has no future days', a.totals.future_days, 0);
+    eq('…and its scheduled total equals its required total',
+      a.totals.scheduled_minutes, a.totals.required_minutes);
+
     // ---- the stated standard ----------------------------------------------
     console.log('\n— roster figure against the stated norm —');
     eq('stated standard', a.standard.stated_minutes, STANDARD_MONTHLY_MINUTES);
