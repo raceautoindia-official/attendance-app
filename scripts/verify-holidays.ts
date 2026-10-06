@@ -68,8 +68,22 @@ async function main() {
   const verified = list.filter(h => !h.needs_verification);
   const unverified = list.filter(h => h.needs_verification);
   ok('fixed vs variable split', `${verified.length} fixed, ${unverified.length} need verification`);
-  if (list.every(h => !h.observed_anywhere)) ok('nothing observed by default', 'importing changed no attendance');
-  else bad('default state', 'something is already observed after a plain import');
+  // The guarantee is that IMPORTING observes nothing — not that the database
+  // has never had a holiday observed. This originally asserted the latter,
+  // which only held on a virgin database and broke the moment the suite ran
+  // against a copy of production, where admins have legitimately observed
+  // holidays. Re-import and check that the observed set did not grow.
+  const observedBefore = (await listHolidays(2026)).filter(h => h.observed_anywhere).length;
+  await importBundledYear(2026);
+  const observedAfter = (await listHolidays(2026)).filter(h => h.observed_anywhere).length;
+  if (observedAfter === observedBefore) {
+    ok('importing observes nothing by itself',
+      observedBefore === 0
+        ? 'none observed, and the import added none'
+        : `${observedBefore} already observed by an admin, and the import added none`);
+  } else {
+    bad('default state', `importing changed the observed count ${observedBefore} → ${observedAfter}`);
+  }
 
   console.log('\n— verification gate —');
   const lunar = unverified[0];

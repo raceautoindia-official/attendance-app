@@ -120,8 +120,25 @@ export interface LedgerTotals {
   break_minutes: number;
   permission_minutes: number;
   credited_minutes: number;
+  /**
+   * Sum of the per-day shortfalls — hours owed on the days that fell short,
+   * with no credit for long days elsewhere. This is the attendance-discipline
+   * figure: it answers "how much time went unworked on days that asked for it".
+   */
   shortage_minutes: number;
   overtime_minutes: number;
+  /**
+   * Credited less required across the whole period, signed. Negative means
+   * short on the month; positive means ahead.
+   *
+   * Deliberately separate from `shortage_minutes`, because the two genuinely
+   * disagree and both are wanted. Measured in September 2026: KADALI worked
+   * 318h against a 225h requirement but missed one full Monday, so his daily
+   * shortfall is 9h while his monthly net is 93h AHEAD. Reporting only the
+   * first would call the hardest worker in the company short; reporting only
+   * the second would hide a missed day behind unrelated overtime.
+   */
+  net_minutes: number;
   late_minutes: number;
   /** The figure the assistant could not previously produce. Null with no worked days. */
   avg_worked_minutes_per_day: number | null;
@@ -333,7 +350,7 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
     calendar_days: 0, working_days: 0, week_off_days: 0, holiday_days: 0, leave_days: 0,
     days_present: 0, days_late: 0, days_absent: 0, days_worked: 0, days_short: 0,
     required_minutes: 0, worked_minutes: 0, break_minutes: 0, permission_minutes: 0,
-    credited_minutes: 0, shortage_minutes: 0, overtime_minutes: 0, late_minutes: 0,
+    credited_minutes: 0, shortage_minutes: 0, overtime_minutes: 0, net_minutes: 0, late_minutes: 0,
     avg_worked_minutes_per_day: null, shortest_day: null, longest_day: null,
     has_open_days: false,
   };
@@ -457,6 +474,8 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
     }
     if (shortage > 0) t.days_short += 1;
   }
+
+  t.net_minutes = t.credited_minutes - t.required_minutes;
 
   t.avg_worked_minutes_per_day = t.days_worked > 0
     ? Math.round(t.worked_minutes / t.days_worked)

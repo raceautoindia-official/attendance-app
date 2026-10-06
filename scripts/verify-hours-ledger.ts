@@ -215,6 +215,13 @@ async function main() {
     // Each half day is 540 − 240 = 300 short.
     eq('shortage minutes', a.totals.shortage_minutes, 2 * 300);
     eq('days short', a.totals.days_short, 2);
+    // The monthly net and the daily shortfall agree here because no day ran
+    // long. They diverge for anyone who misses a day and works extra on
+    // others, which is why both are reported — see LedgerTotals.net_minutes.
+    eq('monthly net equals credited minus required',
+      a.totals.net_minutes, a.totals.credited_minutes - a.totals.required_minutes);
+    eq('monthly net matches the daily shortfall when no day ran long',
+      a.totals.net_minutes, -a.totals.shortage_minutes);
     eq('days worked', a.totals.days_worked, 24);
     eq('average worked minutes per worked day',
       a.totals.avg_worked_minutes_per_day,
@@ -274,6 +281,9 @@ async function main() {
     // which is the unavoidable benefit of the doubt for an unrecorded break.
     const a2 = (await buildHoursLedger({ employeeId: f.onTarget, fromDate: FROM, toDate: TO }))!;
     eq('full-day colleague now has overtime', a2.totals.overtime_minutes, 22 * 60);
+    check('…and is ahead on the month, not short',
+      a2.totals.net_minutes > 0,
+      `net ${a2.totals.net_minutes}, daily shortfall ${a2.totals.shortage_minutes}`);
     check('the two are no longer judged differently for the same work',
       b2.totals.shortage_minutes < b.totals.shortage_minutes,
       `${b.totals.shortage_minutes} → ${b2.totals.shortage_minutes}`);

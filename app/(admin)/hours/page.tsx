@@ -89,7 +89,7 @@ interface Ledger {
     days_worked: number; days_short: number;
     required_minutes: number; worked_minutes: number; break_minutes: number;
     permission_minutes: number; credited_minutes: number;
-    shortage_minutes: number; overtime_minutes: number; late_minutes: number;
+    shortage_minutes: number; overtime_minutes: number; net_minutes: number; late_minutes: number;
     avg_worked_minutes_per_day: number | null;
     shortest_day: { date: string; minutes: number } | null;
     longest_day: { date: string; minutes: number } | null;
@@ -254,8 +254,15 @@ export default function HoursPage() {
 
 function Statement({ ledger }: { ledger: Ledger }) {
   const t = ledger.totals;
-  const short = t.shortage_minutes;
-  const surplus = Math.max(0, t.credited_minutes - t.required_minutes);
+  // Two different, both-legitimate figures. `net` compares the month's totals,
+  // which is what "compare them against 225 hours" means. `dailyShort` adds up
+  // only the days that fell short, giving no credit for long days elsewhere.
+  // They disagree whenever someone both misses a day and works extra on others,
+  // so the page shows both rather than silently picking one.
+  const net = t.net_minutes;
+  const monthShort = net < 0 ? -net : 0;
+  const monthAhead = net > 0 ? net : 0;
+  const dailyShort = t.shortage_minutes;
 
   // The headline, in words. This is the whole point of the page: a reader who
   // does not want to do arithmetic should be able to stop reading here.
@@ -263,9 +270,9 @@ function Statement({ ledger }: { ledger: Ledger }) {
     ? `${ledger.employee.name} is not held to rostered hours for ${ledger.period.label}.`
     : ledger.standing === 'dormant'
       ? `${ledger.employee.name} did not clock in at all during ${ledger.period.label}.`
-      : short > 0
-        ? `${ledger.employee.name} worked ${hm(t.credited_minutes)} of the ${hm(t.required_minutes)} required in ${ledger.period.label} — ${hm(short)} short.`
-        : `${ledger.employee.name} met the ${hm(t.required_minutes)} required in ${ledger.period.label}${surplus > 0 ? `, with ${hm(surplus)} to spare` : ''}.`;
+      : monthShort > 0
+        ? `${ledger.employee.name} worked ${hm(t.credited_minutes)} of the ${hm(t.required_minutes)} required in ${ledger.period.label} — ${hm(monthShort)} short for the month.`
+        : `${ledger.employee.name} worked ${hm(t.credited_minutes)} against the ${hm(t.required_minutes)} required in ${ledger.period.label}${monthAhead > 0 ? ` — ${hm(monthAhead)} ahead` : ''}.`;
 
   const pct = t.required_minutes > 0
     ? Math.min(100, Math.round((t.credited_minutes / t.required_minutes) * 100))
@@ -285,8 +292,8 @@ function Statement({ ledger }: { ledger: Ledger }) {
             </p>
           </div>
           {ledger.standing === 'counted' && (
-            <Badge variant={short > 0 ? (short > 240 ? 'danger' : 'warning') : 'success'}>
-              {short > 0 ? `${hm(short)} short` : 'On target'}
+            <Badge variant={monthShort > 0 ? (monthShort > 240 ? 'danger' : 'warning') : 'success'}>
+              {monthShort > 0 ? `${hm(monthShort)} short` : monthAhead > 0 ? `${hm(monthAhead)} ahead` : 'On target'}
             </Badge>
           )}
           {ledger.standing !== 'counted' && (
@@ -309,7 +316,7 @@ function Statement({ ledger }: { ledger: Ledger }) {
             <div className="h-3 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
               <div
                 className={`h-full rounded-full transition-all ${
-                  short > 0 ? 'bg-gradient-to-r from-amber-400 to-amber-500' : 'bg-gradient-to-r from-emerald-400 to-emerald-500'
+                  monthShort > 0 ? 'bg-gradient-to-r from-amber-400 to-amber-500' : 'bg-gradient-to-r from-emerald-400 to-emerald-500'
                 }`}
                 style={{ width: `${pct}%` }}
               />
@@ -338,10 +345,10 @@ function Statement({ ledger }: { ledger: Ledger }) {
         <Figure label="Required" value={hm(t.required_minutes)} note={`${t.working_days} working days`} />
         <Figure label="Worked" value={hm(t.worked_minutes)} note={`over ${t.days_worked} days`} />
         <Figure
-          label={short > 0 ? 'Shortage' : 'Surplus'}
-          value={hm(short > 0 ? short : surplus)}
-          note={short > 0 ? `${t.days_short} day${t.days_short === 1 ? '' : 's'} fell short` : 'nothing owed'}
-          tone={short > 0 ? 'bad' : 'good'}
+          label={monthShort > 0 ? 'Short for the month' : 'Ahead for the month'}
+          value={hm(monthShort > 0 ? monthShort : monthAhead)}
+          note="month total vs requirement"
+          tone={monthShort > 0 ? 'bad' : 'good'}
         />
         <Figure
           label="Average day"
@@ -366,6 +373,8 @@ function Statement({ ledger }: { ledger: Ledger }) {
           <Line label="Absent" value={String(t.days_absent)} />
           <Line label="Permission credited" value={hm(t.permission_minutes)} />
           <Line label="Break time" value={hm(t.break_minutes)} />
+          <Line label="Unworked on short days" value={hm(dailyShort)} />
+          <Line label="Overtime on long days" value={hm(t.overtime_minutes)} />
         </div>
 
         <div className="mt-4 space-y-1.5 border-t border-slate-200 pt-3 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300">
@@ -387,6 +396,16 @@ function Statement({ ledger }: { ledger: Ledger }) {
               ? 'They agree.'
               : `That is ${hm(Math.abs(ledger.standard.difference_minutes))} ${ledger.standard.difference_minutes > 0 ? 'more' : 'less'}, because this period has ${t.working_days} working days after holidays.`}
           </p>
+          {dailyShort > 0 && monthShort === 0 && (
+            <p>
+              <strong className="font-semibold">Why both figures are shown:</strong>{' '}
+              the month total is met, but {hm(dailyShort)} went unworked on{' '}
+              {t.days_short} day{t.days_short === 1 ? '' : 's'} that asked for
+              hours, made up by {hm(t.overtime_minutes)} of overtime on other
+              days. Whether extra hours on one day settle a missed day is a
+              policy question, so neither figure is hidden.
+            </p>
+          )}
           <p className="text-slate-500 dark:text-slate-400">
             Week offs, holidays and approved leave require nothing, so they can
             never create a shortage. Approved permission is credited up to the
