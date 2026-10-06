@@ -260,6 +260,43 @@ export async function getAttendanceDetail(
     [args.employee_id, range.from, range.to],
   );
 
+  // An empty result used to be reported bare, so "there is no such employee",
+  // "they have no records in this window" and "the window was wrong" all looked
+  // identical — the model would say "0 records", and the same question asked
+  // again with an explicit month would work. Each case now says which it is.
+  //
+  // It matters most for an unstated period: the default is this_month, so on the
+  // 6th of a month that is a six-day window, and almost everything is empty.
+  const notes: string[] = [];
+  if (rows.length === 0) {
+    const who = await queryOne<{ name: string; is_active: 0 | 1 }>(
+      `SELECT name, is_active FROM employees WHERE id = ?`,
+      [args.employee_id],
+    );
+    if (!who) {
+      notes.push(
+        `There is no employee with id ${args.employee_id}. Resolve the person with `
+        + 'resolve_employee first — do not report figures for an id you guessed.',
+      );
+    } else {
+      const span = await queryOne<{ first_date: Date | string | null; last_date: Date | string | null; total: number }>(
+        `SELECT MIN(work_date) AS first_date, MAX(work_date) AS last_date, COUNT(*) AS total
+           FROM attendance WHERE employee_id = ?`,
+        [args.employee_id],
+      );
+      if (!span || Number(span.total) === 0) {
+        notes.push(`${who.name} has no attendance records at all, in any period.`);
+      } else {
+        notes.push(
+          `${who.name} has no records between ${range.from} and ${range.to}. `
+          + `Their records run from ${toYmdString(span.first_date)} to ${toYmdString(span.last_date)}. `
+          + 'Say this, and offer that period instead — do not report it as zero hours worked.',
+        );
+      }
+      if (!who.is_active) notes.push(`${who.name} is marked inactive.`);
+    }
+  }
+
   return {
     range,
     count: rows.length,
@@ -278,6 +315,7 @@ export async function getAttendanceDetail(
       is_open: r.clock_in_utc != null && r.clock_out_utc == null,
       notes: r.notes,
     })),
+    notes: notes.length ? notes : undefined,
   };
 }
 

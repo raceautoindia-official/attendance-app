@@ -43,6 +43,7 @@ import {
   REPORT_KEYS,
   EXPORT_FORMATS,
 } from './export';
+import { getHoursLedger } from './tools/hours';
 import { DATE_PRESETS } from './dates';
 import { LEAVE_TYPES } from './tools/leave';
 import type { ChatContext } from './types';
@@ -157,6 +158,38 @@ export const TOOLS: ToolSpec[] = [
     ),
     handler: (ctx, a) =>
       getAttendanceDetail(ctx, { ...a, employee_id: Number(a.employee_id) }),
+  },
+  {
+    name: 'get_hours_ledger',
+    description:
+      'Required hours vs hours actually worked for ONE employee, with the shortage already worked out. '
+      + 'Use this for ANY question about how much somebody worked, whether they are short or ahead, '
+      + 'their average working day, their longest or shortest day, how many days fell short, or how '
+      + 'their hours compare with what their shift requires. Every duration comes back both as minutes '
+      + 'and as a ready-to-quote string, so you never need to add, subtract or convert anything. '
+      + 'It returns TWO different shortage figures and they can disagree: `net_display` compares the '
+      + 'period totals, while `daily_shortfall_display` adds up only the days that fell short, giving '
+      + 'no credit for long days. Someone can be ahead for the month and still have missed a day. '
+      + 'Quote `month_verdict` for the overall position and mention the daily shortfall when it differs.',
+    parameters: schema(
+      {
+        employee_id: { type: 'integer' },
+        include_days: {
+          type: ['boolean', 'null'],
+          description:
+            'True to also return every day in the period. Leave null unless the user asked for a '
+            + 'day-by-day breakdown — the worst short days always come back regardless.',
+        },
+        ...RANGE_PROPS,
+      },
+      ['employee_id', 'include_days', ...RANGE_KEYS],
+    ),
+    handler: (ctx, a) =>
+      getHoursLedger(ctx, {
+        ...a,
+        employee_id: Number(a.employee_id),
+        include_days: a.include_days === true,
+      }),
   },
   {
     name: 'get_daily_snapshot',
@@ -317,7 +350,17 @@ export const TOOLS: ToolSpec[] = [
         employee_id: {
           type: ['integer', 'null'],
           description:
-            'Required for attendance_detail and leave_balance. Null otherwise.',
+            'The ONE employee, for attendance_detail and leave_balance only. Null otherwise.',
+        },
+        employee_ids: {
+          type: ['array', 'null'],
+          items: { type: 'integer' },
+          description:
+            'Narrow the report to these employees. ALWAYS set this when the user asked about '
+            + 'specific people — "export Reena\'s summary to Excel" is attendance_summary with '
+            + 'employee_ids: [her id], NOT the whole company. Resolve names with resolve_employee '
+            + 'first. Null means every employee. Works with attendance_summary, late_arrivals, '
+            + 'absentees, geofence_exceptions and leave_records.',
         },
         ...RANGE_PROPS,
         department: SCOPE_PROPS.department,
@@ -330,7 +373,7 @@ export const TOOLS: ToolSpec[] = [
           description: 'Calendar year — only for the leave_balance report.',
         },
       },
-      ['report', 'format', 'employee_id', ...RANGE_KEYS, 'department', 'date', 'year'],
+      ['report', 'format', 'employee_id', 'employee_ids', ...RANGE_KEYS, 'department', 'date', 'year'],
     ),
     handler: (ctx, a) =>
       createReportDownload(ctx, {

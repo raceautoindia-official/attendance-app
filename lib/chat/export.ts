@@ -31,6 +31,7 @@ import {
 } from './tools/attendance';
 import { getLeaveRecords, getLeaveBalance } from './tools/leave';
 import { requireSuperAdmin, type ChatContext } from './types';
+import { query } from '@/lib/db';
 import type { RangeInput } from './dates';
 
 /** Distinct audience so a download token is useless as an auth token. */
@@ -54,7 +55,16 @@ interface FetchResult {
 interface ReportDef {
   label: string;
   columns: Column[];
+  /** Covers exactly ONE employee, passed as `employee_id`. */
   needsEmployee?: boolean;
+  /**
+   * Honours `employee_ids`, so the report can be narrowed to specific people.
+   *
+   * Reports without this cover a fixed population — department_rollup is per
+   * department, daily_snapshot is everyone on one date — and asking them to
+   * narrow is a mistake worth reporting rather than ignoring.
+   */
+  scopable?: boolean;
   fetch: (ctx: ChatContext, args: Record<string, unknown>) => Promise<FetchResult>;
 }
 
@@ -65,6 +75,7 @@ const DEPT = { key: 'department', header: 'Department' };
 export const REPORTS: Record<string, ReportDef> = {
   attendance_summary: {
     label: 'Attendance summary',
+    scopable: true,
     columns: [
       EMP,
       NAME,
@@ -129,6 +140,7 @@ export const REPORTS: Record<string, ReportDef> = {
   },
   late_arrivals: {
     label: 'Late arrivals',
+    scopable: true,
     columns: [EMP, NAME, DEPT, { key: 'day_count', header: 'Late days' }],
     fetch: async (ctx, a) => {
       const r = await getLateArrivals(ctx, a as RangeInput);
@@ -137,6 +149,7 @@ export const REPORTS: Record<string, ReportDef> = {
   },
   absentees: {
     label: 'Absences',
+    scopable: true,
     columns: [EMP, NAME, DEPT, { key: 'day_count', header: 'Absent days' }],
     fetch: async (ctx, a) => {
       const r = await getAbsentees(ctx, a as RangeInput);
@@ -165,6 +178,7 @@ export const REPORTS: Record<string, ReportDef> = {
   },
   geofence_exceptions: {
     label: 'Out-of-geofence clock-ins',
+    scopable: true,
     columns: [
       { key: 'work_date', header: 'Date' },
       EMP,
@@ -180,6 +194,7 @@ export const REPORTS: Record<string, ReportDef> = {
   },
   leave_records: {
     label: 'Leave records',
+    scopable: true,
     columns: [
       { key: 'leave_date', header: 'Date' },
       EMP,
@@ -439,6 +454,7 @@ export async function createReportDownload(
     report: string;
     format: ExportFormat;
     employee_id?: number;
+    employee_ids?: number[];
   } & RangeInput & { department?: string; date?: string; year?: number },
 ): Promise<{ count: number; rows: DownloadOffer[]; notes?: string[] }> {
   requireSuperAdmin(ctx);
@@ -458,8 +474,40 @@ export async function createReportDownload(
     );
   }
 
-  const { report, format, ...params } = args;
-  const data = await def.fetch(ctx, params as Record<string, unknown>);
+  const { report, format, ...rest } = args;
+  const params: Record<string, unknown> = { ...rest };
+
+  // ---------------------------------------------------------------------
+  // Scoping. A supplied scope is either honoured or refused — NEVER ignored.
+  //
+  // This is the bug behind "I asked for one person's Excel and got the whole
+  // company". The schema offered `employee_id` (singular) while the multi-
+  // employee reports filter on `employee_ids` (plural), so the id was read by
+  // nothing and the file silently widened to every employee. A report that
+  // quietly answers a different question than the one asked is worse than an
+  // error, because nobody checks a file that arrived looking correct.
+  // ---------------------------------------------------------------------
+  if (!def.needsEmployee) {
+    const ids = [
+      ...(Array.isArray(args.employee_ids) ? args.employee_ids : []),
+      // Fold the singular form in too: a model that passes `employee_id` to a
+      // multi-employee report plainly means "just this person".
+      ...(Number.isInteger(args.employee_id) ? [args.employee_id as number] : []),
+    ].filter(n => Number.isInteger(n));
+    const unique = [...new Set(ids)];
+
+    if (unique.length > 0 && !def.scopable) {
+      throw new Error(
+        `The "${report}" report cannot be narrowed to particular employees — it covers `
+        + `${report === 'department_rollup' ? 'whole departments' : 'everybody for the date given'}. `
+        + `Use attendance_summary for per-employee totals, or attendance_detail for one person day by day.`,
+      );
+    }
+    if (unique.length > 0) params.employee_ids = unique;
+    delete params.employee_id;
+  }
+
+  const data = await def.fetch(ctx, params);
 
   if (data.rows.length === 0) {
     return {
@@ -480,14 +528,31 @@ export async function createReportDownload(
     params: params as Record<string, unknown>,
   });
 
+  // Name who the file covers, right on the download card. If the wrong scope
+  // was applied, this is where it becomes obvious — before the file is opened,
+  // forwarded, or used to decide somebody's pay.
+  let scopeLabel = '';
+  const scoped = params.employee_ids as number[] | undefined;
+  const singleId = def.needsEmployee ? (args.employee_id as number) : undefined;
+  const nameIds = scoped?.length ? scoped : singleId != null ? [singleId] : [];
+  if (nameIds.length > 0 && nameIds.length <= 5) {
+    const named = await query<{ name: string }>(
+      `SELECT name FROM employees WHERE id IN (${nameIds.map(() => '?').join(',')}) ORDER BY name`,
+      nameIds,
+    );
+    if (named.length) scopeLabel = ` — ${named.map(n => n.name).join(', ')}`;
+  } else if (nameIds.length > 5) {
+    scopeLabel = ` — ${nameIds.length} selected employees`;
+  }
+
   return {
     count: 1,
     rows: [
       {
         download_url: `/api/chat/download?t=${encodeURIComponent(token)}`,
-        filename: buildFilename(def.label, data.rangeLabel, format),
+        filename: buildFilename(def.label + scopeLabel, data.rangeLabel, format),
         format,
-        report_label: def.label,
+        report_label: def.label + scopeLabel,
         rows: data.rows.length,
         period: data.rangeLabel,
         expires_in_minutes: TOKEN_TTL_MINUTES,

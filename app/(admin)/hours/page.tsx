@@ -467,7 +467,21 @@ function Statement({ ledger }: { ledger: Ledger }) {
                     <td className="whitespace-nowrap px-3 py-1.5 tabular-nums text-slate-600 dark:text-slate-300">
                       {toIST(d.clock_out_utc)}
                       {d.sessions > 1 && (
-                        <span className="ml-1 text-slate-400" title={`${d.sessions} sessions${d.break_minutes ? `, ${hm(d.break_minutes)} break` : ''}`}>
+                        // "x3" means nothing on its own. The title spells it out in
+                        // full, and the dotted underline plus help cursor are what
+                        // tell a reader there is something to hover in the first
+                        // place. A legend under the table repeats it, because hover
+                        // does not exist on a touch screen.
+                        <span
+                          className="ml-1 cursor-help text-slate-400 underline decoration-dotted underline-offset-2"
+                          title={
+                            `Clocked in and out ${d.sessions} times on this day, rather than once. `
+                            + `The time shown is the final clock-out.`
+                            + (d.break_minutes
+                              ? ` ${hm(d.break_minutes)} passed between sessions and is not counted as worked time.`
+                              : '')
+                          }
+                        >
                           ×{d.sessions}
                         </span>
                       )}
@@ -498,6 +512,19 @@ function Statement({ ledger }: { ledger: Ledger }) {
             </tbody>
           </table>
         </div>
+
+        {/* Legend. Only shown when the marker actually appears, and it repeats
+            what the tooltip says because a touch screen has no hover. */}
+        {ledger.days.some(d => d.sessions > 1) && (
+          <div className="border-t border-slate-200 px-4 py-2.5 dark:border-slate-700">
+            <p className="text-[11px] text-slate-500 dark:text-slate-400">
+              <span className="mr-1 text-slate-400 underline decoration-dotted underline-offset-2">×2</span>
+              means the person clocked in and out more than once that day — for
+              example going out for lunch and back. The time shown is their final
+              clock-out, and the gap between sessions is not counted as worked time.
+            </p>
+          </div>
+        )}
       </Card>
     </div>
   );

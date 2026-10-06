@@ -33,7 +33,99 @@ export interface EmployeeCandidate {
   is_active: 0 | 1;
   work_mode: 'on_site' | 'off_site';
   display: string;
+  /** True when this came from the fuzzy pass — a guess, not a match. */
+  suggestion?: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Fuzzy fallback
+//
+// An exact LIKE match is all-or-nothing: "Reeena" finds nobody, and the honest
+// answer "no employee matches" reads as the assistant being useless when the
+// person is plainly there. With eighteen employees the whole list fits in
+// memory, so a typo can be ranked rather than refused.
+// ---------------------------------------------------------------------------
+
+/** Standard Levenshtein distance, two-row variant. */
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const curr = [i];
+    for (let j = 1; j <= b.length; j++) {
+      curr[j] = Math.min(
+        prev[j] + 1,
+        curr[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    prev = curr;
+  }
+  return prev[b.length];
+}
+
+/**
+ * Crude phonetic key, for transliterated names.
+ *
+ * Indian names reach this app spelled several ways — Reena/Rina,
+ * Shankar/Sankar, Krishna/Krisna. Dropping non-initial vowels and collapsing
+ * doubled letters makes those collide, which plain edit distance alone does
+ * not do reliably.
+ */
+function phonetic(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z]/g, '')
+    .replace(/ph/g, 'f')
+    .replace(/(.)\1+/g, '$1')
+    .replace(/(?!^)[aeiou]/g, '');
+}
+
+/** 0 = no resemblance, 1 = identical. */
+function similarity(needle: string, hay: string): number {
+  const a = needle.toLowerCase().trim();
+  const b = hay.toLowerCase().trim();
+  if (!a || !b) return 0;
+  if (b.includes(a)) return 1;
+
+  const score = (x: string, y: string) =>
+    1 - editDistance(x, y) / Math.max(x.length, y.length);
+
+  // Against the whole name, against each word of it, and phonetically. A
+  // surname typo should still find someone matched on their first name.
+  let best = score(a, b);
+  for (const word of b.split(/\s+/)) {
+    if (word) best = Math.max(best, score(a, word));
+  }
+  // Phonetic comparison, but ONLY between names starting with the same letter.
+  //
+  // Dropping non-initial vowels collapses short names hard: "Reena" and "Arun"
+  // both reduce to "rn", so a search for "Reeena" was offering Arun Pandian as
+  // a candidate. Requiring the initial to agree keeps the useful collisions
+  // (Reena/Rina, Sankar/Shankar) and drops the absurd ones.
+  const pa = phonetic(a);
+  if (pa) {
+    for (const word of [b, ...b.split(/\s+/)]) {
+      if (!word || word[0]?.toLowerCase() !== a[0]) continue;
+      const pw = phonetic(word);
+      if (pw) best = Math.max(best, score(pa, pw) * 0.95); // behind a real match
+    }
+  }
+  return best;
+}
+
+/**
+ * Below this, a "did you mean" is noise rather than help.
+ *
+ * Tuned against the real roster: genuine typos — Reeena/Reena, Krisna/Krishna,
+ * Nalni/Nalini, Arn/Arun, Derrin/Derin — all score 0.75 or better, while the
+ * coincidental near-misses that were cluttering the list (Rina→Krishna Mohan,
+ * Sankar→Venkat Manohar) sit around 0.57. A list of three names when only one
+ * is plausible makes the assistant look like it is guessing.
+ */
+const SUGGESTION_THRESHOLD = 0.62;
 
 /**
  * Find employees matching a name fragment or an exact employee ID.
@@ -70,20 +162,59 @@ export async function resolveEmployee(
     params,
   );
 
-  return {
-    count: rows.length,
-    rows: rows.map(r => ({
-      ...r,
-      display:
-        `${r.name} (${r.emp_id})` +
-        (r.department ? ` — ${r.department}` : '') +
-        (r.is_active ? '' : ' — INACTIVE'),
-    })),
-    notes: rows.length === 0
-      ? [`No employee matches "${search}".`]
-      : rows.length > 1
+  const display = (r: Omit<EmployeeCandidate, 'display' | 'suggestion'>) =>
+    `${r.name} (${r.emp_id})`
+    + (r.department ? ` — ${r.department}` : '')
+    + (r.is_active ? '' : ' — INACTIVE');
+
+  if (rows.length > 0) {
+    return {
+      count: rows.length,
+      rows: rows.map(r => ({ ...r, display: display(r) })),
+      notes: rows.length > 1
         ? ['More than one employee matched — ask which one before reporting.']
         : undefined,
+    };
+  }
+
+  // Nothing matched literally. Rank the whole roster by resemblance and offer
+  // the closest few, rather than reporting a flat "no such employee" for what
+  // is usually a typo.
+  // The same explicit columns the literal search selects. Deliberately NOT
+  // safeEmployeeSelect(), which is a wider allowlist including email and phone:
+  // a name lookup has no business returning contact details.
+  const everyone = await query<Omit<EmployeeCandidate, 'display' | 'suggestion'>>(
+    `SELECT e.id, e.emp_id, e.name, e.department, e.role, e.is_active, e.work_mode
+       FROM employees e
+      ${args.include_inactive ? '' : 'WHERE e.is_active = TRUE'}`,
+  );
+
+  const ranked = everyone
+    .map(r => ({ r, score: similarity(search, r.name) }))
+    .filter(x => x.score >= SUGGESTION_THRESHOLD)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+
+  if (ranked.length === 0) {
+    return {
+      count: 0,
+      rows: [],
+      notes: [
+        `No employee matches "${search}", and nothing on the roster is close to it.`,
+        'Do not guess. Say so, and offer to list the employees if that would help.',
+      ],
+    };
+  }
+
+  return {
+    count: ranked.length,
+    rows: ranked.map(({ r }) => ({ ...r, display: display(r), suggestion: true })),
+    notes: [
+      `No employee is spelled "${search}". These are the closest names on the roster.`,
+      ranked.length === 1
+        ? `Ask whether they meant ${ranked[0].r.name} before reporting anything. Do not assume.`
+        : 'Ask which of these they meant before reporting anything. Do not assume.',
+    ],
   };
 }
 
