@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useForm, useWatch, type Resolver } from 'react-hook-form';
+import { useForm, useWatch, type Resolver, type UseFormRegisterReturn } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -16,12 +16,55 @@ import { useCurrentUser } from '@/lib/useCurrentUser';
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
+/**
+ * The unpaid-break field.
+ *
+ * It gets its own component because it is the one setting here that silently
+ * changes everybody's required hours, and a bare number box gives no clue what
+ * it does. Leaving it empty keeps the behaviour the app had before the field
+ * existed, so the explanation says that too.
+ */
+function BreakField({
+  register, error,
+}: {
+  register: UseFormRegisterReturn;
+  error?: string;
+}) {
+  return (
+    <div>
+      <Input
+        label="Unpaid break (minutes)"
+        type="number"
+        min={0}
+        max={240}
+        placeholder="none"
+        {...register}
+        error={error}
+      />
+      <p className="mt-1 text-xs leading-snug text-slate-500 dark:text-slate-400">
+        Deducted from the shift span to get the hours actually required. A
+        09:00–18:00 shift with <strong>60</strong> here asks for 8 hours, not 9.
+        Leave it empty to deduct nothing — that is how every shift behaves today.
+        <br />
+        Set it when staff clock out for their break: their recorded break is
+        currently counted against them, while anyone who stays clocked in is not.
+      </p>
+    </div>
+  );
+}
+
 const shiftSchema = z.object({
   name: z.string().min(1, 'Required'),
   type: z.enum(['fixed', 'flexible', 'rotating']),
   start_time: z.string().optional(),
   end_time: z.string().optional(),
   required_hours: z.coerce.number().min(1).max(24).optional(),
+  // Empty means "deduct nothing", which is what every shift did before this
+  // field existed — so leaving it blank changes no figure anywhere.
+  unpaid_break_minutes: z.preprocess(
+    v => (v === '' || v === null || v === undefined ? null : v),
+    z.coerce.number().min(0).max(240).nullable(),
+  ),
   grace_minutes: z.coerce.number().min(0).max(60, 'Grace cannot exceed 60 minutes').default(10),
   working_days: z.array(z.string()).min(1, 'Select at least one day'),
 });
@@ -117,7 +160,7 @@ export default function SchedulesPage() {
   // Create shift
   const shiftForm = useForm<ShiftForm>({
     resolver: zodResolver(shiftSchema) as unknown as Resolver<ShiftForm>,
-    defaultValues: { type: 'fixed', grace_minutes: 10, working_days: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'] },
+    defaultValues: { type: 'fixed', grace_minutes: 10, unpaid_break_minutes: null, working_days: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'] },
   });
   const shiftType = useWatch({ control: shiftForm.control, name: 'type' });
   const workingDays = useWatch({ control: shiftForm.control, name: 'working_days' }) ?? [];
@@ -147,7 +190,7 @@ export default function SchedulesPage() {
   // Edit shift
   const editShiftForm = useForm<ShiftForm>({
     resolver: zodResolver(shiftSchema) as unknown as Resolver<ShiftForm>,
-    defaultValues: { type: 'fixed', grace_minutes: 10, working_days: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'] },
+    defaultValues: { type: 'fixed', grace_minutes: 10, unpaid_break_minutes: null, working_days: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'] },
   });
   const editShiftType = useWatch({ control: editShiftForm.control, name: 'type' });
   const editWorkingDays = useWatch({ control: editShiftForm.control, name: 'working_days' }) ?? [];
@@ -160,6 +203,7 @@ export default function SchedulesPage() {
       start_time: shift.start_time ?? undefined,
       end_time: shift.end_time ?? undefined,
       required_hours: shift.required_hours ?? undefined,
+      unpaid_break_minutes: shift.unpaid_break_minutes ?? null,
       grace_minutes: shift.grace_minutes,
       working_days: shift.working_days ?? [],
     });
@@ -412,6 +456,16 @@ export default function SchedulesPage() {
               header: 'Working Days',
               render: r => ((r as Shift).working_days ?? []).join(', '),
             },
+            {
+              key: 'unpaid_break_minutes',
+              header: 'Unpaid break',
+              render: r => {
+                const v = (r as Shift).unpaid_break_minutes;
+                return v == null
+                  ? <span className="text-slate-400" title="Nothing is deducted — the whole shift span is required">none</span>
+                  : <span className="tabular-nums">{v}m</span>;
+              },
+            },
             { key: 'grace_minutes', header: 'Grace', render: r => `${(r as Shift).grace_minutes}m` },
             {
               key: 'actions',
@@ -462,6 +516,11 @@ export default function SchedulesPage() {
             <Input label="Required Hours Per Day" type="number" min={1} max={24}
               {...shiftForm.register('required_hours')} error={shiftForm.formState.errors.required_hours?.message} />
           )}
+
+          <BreakField
+            register={shiftForm.register('unpaid_break_minutes')}
+            error={shiftForm.formState.errors.unpaid_break_minutes?.message}
+          />
 
           <Input label="Grace Period (minutes)" type="number" min={0} max={60}
             {...shiftForm.register('grace_minutes')} />
@@ -526,6 +585,11 @@ export default function SchedulesPage() {
               <Input label="Required Hours Per Day" type="number" min={1} max={24}
                 {...editShiftForm.register('required_hours')} error={editShiftForm.formState.errors.required_hours?.message} />
             )}
+
+            <BreakField
+              register={editShiftForm.register('unpaid_break_minutes')}
+              error={editShiftForm.formState.errors.unpaid_break_minutes?.message}
+            />
 
             <Input label="Grace Period (minutes)" type="number" min={0} max={60}
               {...editShiftForm.register('grace_minutes')} />

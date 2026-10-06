@@ -225,3 +225,72 @@ SELECT
   'Not a blocker; treated as not-current by the app' AS detail
 FROM employee_schedules
 WHERE effective_to IS NOT NULL AND effective_to < effective_from;
+
+-- ---------------------------------------------------------------------------
+-- Later migrations, added as they land. check-status is only useful if it
+-- keeps pace with database/migrations/ — a blind spot here reads as a clean
+-- bill of health.
+-- ---------------------------------------------------------------------------
+
+SELECT
+  '2026-08-04_add_permission_requests' AS migration,
+  CASE WHEN total = 1 THEN 'APPLIED' ELSE 'MISSING' END AS result,
+  CONCAT(total, '/1 tables') AS detail
+FROM (
+  SELECT COUNT(*) AS total FROM INFORMATION_SCHEMA.TABLES
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'permission_requests'
+) t;
+
+SELECT
+  '2026-08-08_add_device_binding' AS migration,
+  CASE WHEN total = 1 THEN 'APPLIED' ELSE 'MISSING' END AS result,
+  CONCAT(total, '/1 tables') AS detail
+FROM (
+  SELECT COUNT(*) AS total FROM INFORMATION_SCHEMA.TABLES
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'employee_devices'
+) t;
+
+SELECT
+  '2026-08-08_add_token_version' AS migration,
+  CASE WHEN total = 1 THEN 'APPLIED' ELSE 'MISSING' END AS result,
+  CONCAT(total, '/1 columns (logout cannot revoke tokens without it)') AS detail
+FROM (
+  SELECT COUNT(*) AS total FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'employees'
+     AND COLUMN_NAME = 'token_version'
+) t;
+
+SELECT
+  '2026-08-11_add_first_clock_in' AS migration,
+  CASE WHEN total = 1 THEN 'APPLIED' ELSE 'MISSING' END AS result,
+  CONCAT(total, '/1 columns (without it, a multi-session day reports the LAST clock-in as its start)') AS detail
+FROM (
+  SELECT COUNT(*) AS total FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'attendance'
+     AND COLUMN_NAME = 'first_clock_in_utc'
+) t;
+
+SELECT
+  '2026-08-12_add_password_resets' AS migration,
+  CASE WHEN total = 1 THEN 'APPLIED' ELSE 'MISSING' END AS result,
+  CONCAT(total, '/1 tables') AS detail
+FROM (
+  SELECT COUNT(*) AS total FROM INFORMATION_SCHEMA.TABLES
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'password_resets'
+) t;
+
+SELECT
+  '2026-10-06_shift_unpaid_break' AS migration,
+  CASE WHEN total = 1 THEN 'APPLIED' ELSE 'MISSING' END AS result,
+  CONCAT(total, '/1 columns (NULL on every shift = no change to any existing figure)') AS detail
+FROM (
+  SELECT COUNT(*) AS total FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'shifts'
+     AND COLUMN_NAME = 'unpaid_break_minutes'
+) t;
+
+SELECT
+  'INFO shifts with a break policy set' AS check_name,
+  CONCAT(COUNT(*), ' shift(s)') AS result,
+  'Each one reduces its required hours by that many minutes per working day' AS detail
+FROM shifts WHERE unpaid_break_minutes IS NOT NULL;

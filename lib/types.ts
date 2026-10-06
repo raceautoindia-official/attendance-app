@@ -160,6 +160,15 @@ export interface Shift {
   end_time: string | null;
   /** Only meaningful for flexible shifts */
   required_hours: number | null;
+  /**
+   * Unpaid break inside the shift span, in minutes. NULL deducts nothing.
+   *
+   * A 09:00-18:00 shift occupies nine hours but, with an hour's unpaid lunch,
+   * asks for eight. It matters because `attendance.total_minutes` excludes time
+   * the employee was clocked out, so measuring someone net against a gross
+   * target penalises whoever records their break honestly.
+   */
+  unpaid_break_minutes: number | null;
   grace_minutes: number;
   working_days: string[];
   rotation_config: RotationSlot[] | null;

@@ -28,6 +28,11 @@ const UpdateShiftSchema = z.object({
     z.string().regex(/^([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/, 'end_time must be HH:MM or HH:MM:SS').nullable().optional(),
   ),
   required_hours: z.preprocess(blankToNull, z.number().min(0.5).max(24).nullable().optional()),
+  /** Unpaid break inside the span. Null deducts nothing — the pre-column behaviour. */
+  unpaid_break_minutes: z.preprocess(
+    blankToNull,
+    z.coerce.number().int().min(0).max(240).nullable().optional(),
+  ),
   grace_minutes: z.number().int().min(0).max(60).optional(),
   working_days: z.array(z.string()).min(1).optional(),
   rotation_config: z.array(z.object({
@@ -137,6 +142,7 @@ export async function PUT(request: NextRequest, context: Params) {
   if (parsed.data.start_time !== undefined) apply('start_time', parsed.data.start_time);
   if (parsed.data.end_time !== undefined) apply('end_time', parsed.data.end_time);
   if (parsed.data.required_hours !== undefined) apply('required_hours', parsed.data.required_hours);
+  if (parsed.data.unpaid_break_minutes !== undefined) apply('unpaid_break_minutes', parsed.data.unpaid_break_minutes);
   if (parsed.data.grace_minutes !== undefined) apply('grace_minutes', parsed.data.grace_minutes);
   if (parsed.data.working_days !== undefined) apply('working_days', JSON.stringify(parsed.data.working_days));
   if (parsed.data.rotation_config !== undefined) apply('rotation_config', parsed.data.rotation_config ? JSON.stringify(parsed.data.rotation_config) : null);

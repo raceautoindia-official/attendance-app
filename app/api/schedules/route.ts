@@ -15,6 +15,12 @@ const ShiftSchema = z.object({
   end_time: z.string().regex(/^([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/, 'end_time must be HH:MM or HH:MM:SS').nullable().optional(),
   required_hours: z.number().min(0.5).max(24).nullable().optional(),
   grace_minutes: z.number().int().min(0).max(60).default(10),
+  /**
+   * Unpaid break inside the shift span. NULL deducts nothing, which is the
+   * behaviour every shift had before the column existed — so leaving it unset
+   * changes no figure anywhere.
+   */
+  unpaid_break_minutes: z.number().int().min(0).max(240).nullable().optional(),
   working_days: z.array(z.string()).min(1, 'At least one working day required'),
   rotation_config: z.array(z.object({
     name: z.string(),
@@ -45,7 +51,8 @@ export async function GET(request: NextRequest) {
 
   const shifts = await query<Shift>(
     `SELECT id, name, type, start_time, end_time, required_hours,
-            grace_minutes, working_days, rotation_config, created_by, created_at
+            unpaid_break_minutes, grace_minutes, working_days, rotation_config,
+            created_by, created_at
      FROM shifts
      ORDER BY name ASC`,
   );
@@ -87,20 +94,21 @@ export async function POST(request: NextRequest) {
   }
 
   const {
-    name, type, start_time, end_time, required_hours,
+    name, type, start_time, end_time, required_hours, unpaid_break_minutes,
     grace_minutes, working_days, rotation_config,
   } = validated.data;
 
   const result = await query(
     `INSERT INTO shifts
-       (name, type, start_time, end_time, required_hours, grace_minutes,
-        working_days, rotation_config, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (name, type, start_time, end_time, required_hours, unpaid_break_minutes,
+        grace_minutes, working_days, rotation_config, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       name, type,
       start_time ?? null,
       end_time ?? null,
       required_hours ?? null,
+      unpaid_break_minutes ?? null,
       grace_minutes,
       JSON.stringify(working_days),
       rotation_config ? JSON.stringify(rotation_config) : null,
