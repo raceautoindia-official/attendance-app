@@ -11,7 +11,7 @@ measured, not estimated; where a figure is a judgement call it says so.
 | 0 — local/production parity | **Done.** Local was missing 3 tables and 7 columns; all applied locally, and the two schemas now match at 209 columns with zero drift either way. |
 | 1 — hours clarity and shortage | **Done, local only, not deployed.** `lib/hoursLedger.ts`, `/api/reports/hours-ledger`, the Working Hours page, month dropdowns, and per-day Required/Short columns in the existing Day-by-day tab. 88 new checks, 195 in total, all passing. |
 | 2 — assistant accuracy | **Done, local only, not deployed.** All four defects fixed at the cause: `employee_ids` threaded through the exports, a `get_hours_ledger` tool so derived figures exist to be read, fuzzy name matching with "did you mean", and empty results that say *which* kind of empty they are. 33 offline checks plus 12 live model checks, all passing. |
-| 3 — visuals | Not started. |
+| 3 — visuals | **Done, local only, not deployed.** Dependency-free SVG charts (bar, column, line, pie, stacked bar) against a colour-vision-validated palette, a `build_chart` tool that takes data and never markup, charts rendered in the assistant panel, and a worked-against-required chart on the Working Hours page. 47 offline checks plus 16 live model checks. |
 | 4 — the futuristic layer | Not started. |
 
 Decisions taken (§6): break policy is **net work with a nullable per-shift

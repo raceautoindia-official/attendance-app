@@ -12,6 +12,7 @@ import { openAiTools, dispatch } from './registry';
 import { SYSTEM_PROMPT, dateContext } from './prompt';
 import { istToday } from './dates';
 import { ChatForbiddenError, type ChatContext } from './types';
+import { validateChartSpec, type ChartSpec } from '@/lib/charts/types';
 
 /**
  * Configure via OPENAI_MODEL. Model names change often — set this to whatever
@@ -298,8 +299,28 @@ export type ChatEvent =
   | { type: 'tool_start'; name: string }
   | { type: 'tool_done'; name: string; rows: number | null; period?: string; error?: string }
   | { type: 'download'; file: DownloadEvent }
+  | { type: 'chart'; chart: ChartSpec }
   | { type: 'delta'; text: string }
   | { type: 'done'; answer: string; traces: ToolTrace[]; model: string; usage: ChatAnswer['usage'] };
+
+/**
+ * Pull chart specs out of a build_chart result.
+ *
+ * The spec is re-validated here even though the tool already validated it: this
+ * is the boundary where model-shaped data becomes something the browser draws,
+ * and a bad spec should be dropped rather than rendered.
+ */
+function extractCharts(name: string, result: unknown): ChartSpec[] {
+  if (name !== 'build_chart') return [];
+  const r = result as { rows?: Array<{ chart?: unknown }> } | null;
+  if (!Array.isArray(r?.rows)) return [];
+  const out: ChartSpec[] = [];
+  for (const row of r.rows) {
+    const v = validateChartSpec(row?.chart);
+    if ('spec' in v) out.push(v.spec);
+  }
+  return out;
+}
 
 /** Pull download offers out of a create_report_download result. */
 function extractDownloads(name: string, result: unknown): DownloadEvent[] {
@@ -418,7 +439,7 @@ export async function runChatStream(
             error: 'Could not parse tool arguments.',
             ms: Date.now() - started,
           };
-          return { c, trace, content: JSON.stringify({ error: trace.error }), downloads: [] };
+          return { c, trace, content: JSON.stringify({ error: trace.error }), downloads: [], charts: [] };
         }
 
         try {
@@ -443,7 +464,7 @@ export async function runChatStream(
             trace.error = 'result truncated — too large';
           }
 
-          return { c, trace, content, downloads: extractDownloads(c.name, result) };
+          return { c, trace, content, downloads: extractDownloads(c.name, result), charts: extractCharts(c.name, result) };
         } catch (err) {
           const msg =
             err instanceof ChatForbiddenError
@@ -459,12 +480,12 @@ export async function runChatStream(
             error: msg,
             ms: Date.now() - started,
           };
-          return { c, trace, content: JSON.stringify({ error: msg }), downloads: [] };
+          return { c, trace, content: JSON.stringify({ error: msg }), downloads: [], charts: [] };
         }
       }),
     );
 
-    for (const { c, trace, content, downloads } of settled) {
+    for (const { c, trace, content, downloads, charts } of settled) {
       traces.push(trace);
       onEvent({
         type: 'tool_done',
@@ -474,6 +495,7 @@ export async function runChatStream(
         error: trace.error,
       });
       for (const file of downloads) onEvent({ type: 'download', file });
+      for (const chart of charts) onEvent({ type: 'chart', chart });
       messages.push({ role: 'tool', tool_call_id: c.id, content });
     }
   }

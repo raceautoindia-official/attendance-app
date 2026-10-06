@@ -5,6 +5,8 @@
  * without either file importing the other.
  */
 
+import type { ChartSpec } from '@/lib/charts/types';
+
 export interface DownloadFile {
   download_url: string;
   filename: string;
@@ -49,6 +51,8 @@ export interface ChatTurn {
   at: number;
   sources?: Source[];
   downloads?: DownloadFile[];
+  /** Charts the assistant drew for this answer. */
+  charts?: ChartSpec[];
   /** The request failed outright; `retryOf` holds the question to re-send. */
   failed?: boolean;
   /** The reader pressed Stop. `content` is whatever had arrived by then. */

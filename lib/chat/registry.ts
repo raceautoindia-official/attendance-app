@@ -44,6 +44,8 @@ import {
   EXPORT_FORMATS,
 } from './export';
 import { getHoursLedger } from './tools/hours';
+import { buildChart } from './tools/charts';
+import { CHART_TYPES, CHART_UNITS } from '@/lib/charts/types';
 import { DATE_PRESETS } from './dates';
 import { LEAVE_TYPES } from './tools/leave';
 import type { ChatContext } from './types';
@@ -328,6 +330,73 @@ export const TOOLS: ToolSpec[] = [
       [...RANGE_KEYS, 'entity', 'performed_by'],
     ),
     handler: (ctx, a) => getAuditTrail(ctx, a),
+  },
+  {
+    name: 'build_chart',
+    description:
+      'Draw a chart of figures you have ALREADY read from another tool. Use it whenever a '
+      + 'picture answers better than a table — comparing people or departments, a share of a '
+      + 'whole, or a trend over days or months — and whenever the user asks for a chart, graph, '
+      + 'pie or visual. Every value must be copied from a tool result; never chart a number you '
+      + 'worked out or assumed. Choose the form by the job: "bar" to compare amounts between '
+      + 'people (the safe default), "column" for days or months side by side and for comparing '
+      + 'two measures such as worked against required, "line" for a trend over time, "pie" ONLY '
+      + 'for a share of a whole with at most six parts that differ clearly, "stacked_bar" for how '
+      + 'one total splits up. After calling it, describe what the chart shows in a sentence — the '
+      + 'chart itself carries the numbers.',
+    parameters: schema(
+      {
+        type: {
+          type: 'string',
+          enum: [...CHART_TYPES],
+          description: 'bar | column | line | pie | stacked_bar — see the guidance above.',
+        },
+        title: { type: 'string', description: 'What the chart shows, e.g. "Hours worked, September 2026".' },
+        subtitle: {
+          type: ['string', 'null'],
+          description: 'Optional second line, usually the period or the scope.',
+        },
+        unit: {
+          type: 'string',
+          enum: [...CHART_UNITS],
+          description:
+            'minutes (rendered as "8h 30m" — use this for any duration), hours, days, count, percent.',
+        },
+        series: {
+          type: 'array',
+          description:
+            'One entry for a single measure. Two or more to compare measures — for example a '
+            + '"Worked" series and a "Required" series sharing the same day labels. pie and '
+            + 'stacked_bar take exactly one.',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              label: { type: 'string', description: 'Series name, shown in the legend.' },
+              points: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    label: { type: 'string', description: 'The person, department, date or category.' },
+                    value: { type: 'number', description: 'The figure, in the declared unit.' },
+                  },
+                  required: ['label', 'value'],
+                },
+              },
+            },
+            required: ['label', 'points'],
+          },
+        },
+        note: {
+          type: ['string', 'null'],
+          description: 'Optional caveat printed under the chart, e.g. what the period excludes.',
+        },
+      },
+      ['type', 'title', 'subtitle', 'unit', 'series', 'note'],
+    ),
+    handler: (ctx, a) => buildChart(ctx, a),
   },
   {
     name: 'create_report_download',

@@ -7,6 +7,8 @@ import Badge from '@/components/ui/Badge';
 import Input from '@/components/ui/Input';
 import Spinner from '@/components/ui/Spinner';
 import type { ApiResponse, Employee } from '@/lib/types';
+import Chart from '@/components/charts/Chart';
+import type { ChartSpec } from '@/lib/charts/types';
 
 // ---------------------------------------------------------------------------
 // Working Hours — one employee, one month, in plain English.
@@ -276,6 +278,26 @@ function Statement({ ledger }: { ledger: Ledger }) {
         ? `${ledger.employee.name} worked ${hm(t.credited_minutes)} of the ${hm(t.required_minutes)} required in ${ledger.period.label} — ${hm(monthShort)} short for the month.`
         : `${ledger.employee.name} worked ${hm(t.credited_minutes)} against the ${hm(t.required_minutes)} required in ${ledger.period.label}${monthAhead > 0 ? ` — ${hm(monthAhead)} ahead` : ''}.`;
 
+  // Only days that asked for hours or had some worked: a column of zero for
+  // every Sunday is noise, and the month's shape is the point.
+  const chart: ChartSpec | null = useMemo(() => {
+    const days = ledger.days.filter(
+      d => (d.required_minutes ?? 0) > 0 || (d.worked_minutes ?? 0) > 0,
+    );
+    if (days.length < 2) return null;
+    return {
+      type: 'column',
+      title: 'Hours worked against hours required',
+      subtitle: `Each working day in ${ledger.period.label}`,
+      unit: 'minutes',
+      series: [
+        { label: 'Worked', points: days.map(d => ({ label: d.date.slice(8), value: d.worked_minutes ?? 0 })) },
+        { label: 'Required', points: days.map(d => ({ label: d.date.slice(8), value: d.required_minutes ?? 0 })) },
+      ],
+      note: 'Week offs, holidays and leave are left out — they require nothing.',
+    };
+  }, [ledger]);
+
   const pct = t.required_minutes > 0
     ? Math.min(100, Math.round((t.credited_minutes / t.required_minutes) * 100))
     : 0;
@@ -424,6 +446,15 @@ function Statement({ ledger }: { ledger: Ledger }) {
           </p>
         </div>
       </Card>
+
+      {/* Where the gap came from. A column per working day with what was asked
+          beside what was done says in one glance what thirty table rows say
+          slowly — and the days that caused the shortage are the short columns. */}
+      {chart && (
+        <Card>
+          <Chart spec={chart} />
+        </Card>
+      )}
 
       {/* Day by day */}
       <Card padding={false}>

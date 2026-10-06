@@ -174,3 +174,69 @@ body {
   .chat-fade-up,
   .chat-jump { animation: none !important; }
 }
+
+/* ---------------------------------------------------------------------------
+   Chart tokens
+   ---------------------------------------------------------------------------
+   The categorical slots are a FIXED ORDER, assigned by slot and never cycled:
+   the ordering is what makes the palette colour-vision-safe, not decoration.
+   Both modes were checked with the data-viz validator against their own
+   surfaces — the dark column is the same eight hues re-stepped for a dark
+   background, not an automatic inversion:
+
+     light  worst adjacent CVD ΔE 9.1, normal-vision ΔE 19.6 — all checks pass
+     dark   worst adjacent CVD ΔE 8.4, normal-vision ΔE 19.3 — all checks pass
+
+   Light mode warns on contrast for aqua, yellow and magenta (all under 3:1 on
+   a light surface). That is allowed only with "relief": every chart here ships
+   direct labels and a table view, so no value is reachable by colour alone.
+   --------------------------------------------------------------------------- */
+:root {
+  --viz-surface: #ffffff;
+  --viz-grid: #e7e5e4;
+  --viz-axis: #d6d3d1;
+
+  --viz-1: #2a78d6; /* blue    */
+  --viz-2: #eb6834; /* orange  */
+  --viz-3: #1baf7a; /* aqua    */
+  --viz-4: #eda100; /* yellow  */
+  --viz-5: #e87ba4; /* magenta */
+  --viz-6: #008300; /* green   */
+  --viz-7: #4a3aa7; /* violet  */
+  --viz-8: #e34948; /* red     */
+
+  /* Sequential blue, light → dark. One hue for magnitude. */
+  --viz-seq-1: #cde2fb;
+  --viz-seq-2: #9ec5f4;
+  --viz-seq-3: #6da7ec;
+  --viz-seq-4: #3987e5;
+  --viz-seq-5: #256abf;
+  --viz-seq-6: #184f95;
+
+  /* Status is reserved — never reused as "series 4", always with a label. */
+  --viz-good: #0ca30c;
+  --viz-warning: #fab219;
+  --viz-critical: #d03b3b;
+}
+
+.dark {
+  --viz-surface: #0f172a;
+  --viz-grid: #1e293b;
+  --viz-axis: #334155;
+
+  --viz-1: #3987e5;
+  --viz-2: #d95926;
+  --viz-3: #199e70;
+  --viz-4: #c98500;
+  --viz-5: #d55181;
+  --viz-6: #008300;
+  --viz-7: #9085e9;
+  --viz-8: #e66767;
+
+  --viz-seq-1: #184f95;
+  --viz-seq-2: #256abf;
+  --viz-seq-3: #2a78d6;
+  --viz-seq-4: #3987e5;
+  --viz-seq-5: #6da7ec;
+  --viz-seq-6: #9ec5f4;
+}

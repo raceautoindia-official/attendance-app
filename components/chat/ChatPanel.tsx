@@ -13,6 +13,8 @@ import {
   toolLabel,
 } from './ChatParts';
 import type { ChatTurn, DownloadFile, Source, ToolStatus, LimitMeta } from './chatTypes';
+import Chart from '@/components/charts/Chart';
+import type { ChartSpec } from '@/lib/charts/types';
 
 /**
  * Reporting assistant panel.
@@ -112,6 +114,7 @@ export default function ChatPanel() {
   const [tools, setTools] = useState<ToolStatus[]>([]);
   const [streamText, setStreamText] = useState('');
   const [streamFiles, setStreamFiles] = useState<DownloadFile[]>([]);
+  const [streamCharts, setStreamCharts] = useState<ChartSpec[]>([]);
   const [limit, setLimit] = useState<LimitMeta | null>(null);
   const [atBottom, setAtBottom] = useState(true);
   const [dismissedFollowUps, setDismissedFollowUps] = useState(false);
@@ -209,6 +212,8 @@ export default function ChatPanel() {
       setTools([]);
       setStreamText('');
       setStreamFiles([]);
+    setStreamCharts([]);
+      setStreamCharts([]);
       bufRef.current = '';
       setDismissedFollowUps(false);
     },
@@ -246,6 +251,7 @@ export default function ChatPanel() {
     let answer = '';
     let sources: Source[] = [];
     const files: DownloadFile[] = [];
+    const charts: ChartSpec[] = [];
     let model = '';
     let usage: ChatTurn['usage'];
     let errored: string | null = null;
@@ -330,6 +336,10 @@ export default function ChatPanel() {
               files.push(ev.file as DownloadFile);
               setStreamFiles([...files]);
               break;
+            case 'chart':
+              charts.push(ev.chart as ChartSpec);
+              setStreamCharts([...charts]);
+              break;
             case 'delta':
               answer += String(ev.text);
               pushDelta(String(ev.text));
@@ -360,6 +370,7 @@ export default function ChatPanel() {
           content: answer || 'No answer returned.',
           sources,
           downloads: files,
+          charts,
           model,
           usage,
           at: Date.now(),
@@ -380,6 +391,7 @@ export default function ChatPanel() {
           stopped: true,
           sources,
           downloads: files,
+          charts,
           retryOf: q,
           at: Date.now(),
         });
@@ -656,6 +668,7 @@ export default function ChatPanel() {
                             </div>
                           )
                         )}
+                        {streamCharts.map((c, ci) => <Chart key={ci} spec={c} />)}
                         {streamFiles.map((f, fi) => <DownloadCard key={fi} file={f} />)}
                       </div>
                       <div className="mt-1.5 pl-1">
@@ -834,6 +847,7 @@ function AssistantTurn({
             </p>
           )}
           <Markdownish text={turn.content} />
+          {turn.charts?.map((c, i) => <Chart key={i} spec={c} />)}
           {turn.downloads?.map((f, i) => <DownloadCard key={i} file={f} />)}
           {turn.sources && turn.sources.length > 0 && <SourceList sources={turn.sources} />}
         </div>
