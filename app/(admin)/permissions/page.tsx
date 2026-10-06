@@ -72,7 +72,10 @@ export default function PermissionsPage() {
   const monthStart = `${today.slice(0, 7)}-01`;
 
   const [status, setStatus] = useState<PermissionStatus | 'all'>('pending');
-  const [fromDate, setFromDate] = useState(monthStart);
+  // Empty, not monthStart: the page opens on the Pending tab, and a date floor
+  // there hides the requests that have been waiting longest. The other tabs set
+  // it to monthStart when they are selected.
+  const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
   const [employeeId, setEmployeeId] = useState('');
   const [page, setPage] = useState(1);
@@ -220,7 +223,18 @@ export default function PermissionsPage() {
           {STATUS_TABS.map(([key, label]) => (
             <button
               key={key}
-              onClick={() => { setStatus(key); setPage(1); }}
+              onClick={() => {
+                setStatus(key);
+                setPage(1);
+                // Pending is a work queue, not a date-scoped report, and the
+                // date filter defaults to the start of this month. An older
+                // request — exactly the one most needing a decision — was
+                // therefore counted by the badge and hidden from the list, so
+                // the page read "Pending 1" above an empty table. Selecting
+                // Pending clears the dates; leaving it restores the default.
+                if (key === 'pending') { setFromDate(''); setToDate(''); }
+                else if (status === 'pending') { setFromDate(monthStart); setToDate(''); }
+              }}
               className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
                 status === key
                   ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-sm'
@@ -450,7 +464,12 @@ export default function PermissionsPage() {
               },
             ]}
             data={rows as object[]}
-            emptyMessage="No permission requests for this filter."
+            emptyMessage={
+              pendingCount > 0 && (fromDate || toDate || employeeId)
+                ? `Nothing matches these filters, but ${pendingCount} request(s) are `
+                  + 'waiting for a decision outside them — clear the filters to see them.'
+                : 'No permission requests for this filter.'
+            }
           />
 
           {reviewMutation.isError && (
