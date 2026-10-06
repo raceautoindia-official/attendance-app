@@ -1,7 +1,8 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { Suspense, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useSearchParams } from 'next/navigation';
 import Card from '@/components/ui/Card';
 import Badge from '@/components/ui/Badge';
 import Input from '@/components/ui/Input';
@@ -137,13 +138,38 @@ const KIND_BADGE: Record<LedgerDay['kind'], { variant: 'success' | 'warning' | '
   future: { variant: 'neutral', label: 'Not yet' },
 };
 
+/**
+ * The Suspense boundary exists because the inner component reads the query
+ * string: Month Review deep-links here as /hours?employee=10&month=2026-09.
+ * `useSearchParams` needs one, and the alternative — reading window.location in
+ * an effect and calling setState — is the cascading-render pattern the React
+ * compiler rejects.
+ */
 export default function HoursPage() {
+  return (
+    <Suspense fallback={<Card><div className="flex justify-center py-10"><Spinner /></div></Card>}>
+      <HoursPageInner />
+    </Suspense>
+  );
+}
+
+function HoursPageInner() {
   const months = useMemo(() => recentMonths(), []);
+  const searchParams = useSearchParams();
+
+  // Seeded from the link, so arriving from Month Review lands on the right
+  // person and month rather than on an empty picker.
   const [mode, setMode] = useState<'month' | 'range'>('month');
-  const [month, setMonth] = useState(months[0].value);
+  const [month, setMonth] = useState(() => {
+    const m = searchParams.get('month');
+    return m && /^\d{4}-\d{2}$/.test(m) ? m : months[0].value;
+  });
   const [fromDate, setFromDate] = useState(`${months[0].value}-01`);
   const [toDate, setToDate] = useState(`${months[0].value}-28`);
-  const [employeeId, setEmployeeId] = useState<number | null>(null);
+  const [employeeId, setEmployeeId] = useState<number | null>(() => {
+    const e = Number(searchParams.get('employee'));
+    return Number.isInteger(e) && e > 0 ? e : null;
+  });
 
   const { data: employees } = useQuery({
     queryKey: ['employees', 'for-hours'],
