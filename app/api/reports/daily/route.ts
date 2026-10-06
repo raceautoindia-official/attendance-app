@@ -8,7 +8,7 @@ import {
   hasDailyUpdatesTable,
 } from '@/lib/employeeDetails';
 import { hasPermissionTable, hasOnDutyColumn, timeOffOnly } from '@/lib/permissions';
-import { shiftsForEmployees, workingWeekdays } from '@/lib/shifts';
+import { minutesOnWeekday, shiftsForEmployees, workingWeekdays } from '@/lib/shifts';
 import { WEEKLY_OFF_DAYS } from '@/lib/constants';
 import type { ApiResponse } from '@/lib/types';
 
@@ -38,6 +38,12 @@ interface DailyRow {
   check_out_utc: string | null;
   break_minutes: number | null;
   worked_minutes: number | null;
+  /** What the roster asked for that day. Null when no shift is rostered. */
+  required_minutes: number | null;
+  /** Worked plus approved permission, capped at the requirement. */
+  credited_minutes: number;
+  /** Required less credited. Always 0 on a week off, holiday or leave day. */
+  shortage_minutes: number;
   late_minutes: number | null;
   overtime_minutes: number;
   permission_minutes: number;
@@ -236,6 +242,28 @@ export async function GET(request: NextRequest) {
             : !isWorkingDay ? 'weekly_off'
               : a?.status ?? 'absent';
 
+      // What the day asked for, and what it fell short by.
+      //
+      // A week off, a holiday and approved leave ask for nothing, so they can
+      // never produce a shortage — that distinction is the whole reason this
+      // route walks the calendar instead of the attendance rows. Null means
+      // the employee has no roster, which is not the same as requiring zero.
+      const dayShifts = shifts.get(e.id) ?? [];
+      const permission = permByKey.get(key(e.id, d)) ?? 0;
+      const requiredMinutes = dayShifts.length === 0
+        ? null
+        : day_status === 'weekly_off' || day_status === 'leave' || day_status === 'holiday'
+          ? 0
+          : minutesOnWeekday(dayShifts, weekday);
+      // Approved permission covers an absence up to the day's requirement; it
+      // does not earn overtime beyond it.
+      const credited = requiredMinutes == null
+        ? (worked ?? 0)
+        : Math.min((worked ?? 0) + permission, Math.max(worked ?? 0, requiredMinutes));
+      const shortageMinutes = requiredMinutes == null || requiredMinutes === 0
+        ? 0
+        : Math.max(0, requiredMinutes - credited);
+
       rows.push({
         employee_id: e.id,
         employee_name: e.name,
@@ -244,6 +272,9 @@ export async function GET(request: NextRequest) {
         day: weekday,
         check_in_utc: firstIn,
         check_out_utc: a?.clock_out_utc ?? null,
+        required_minutes: requiredMinutes,
+        credited_minutes: credited,
+        shortage_minutes: shortageMinutes,
         break_minutes: breakMinutes(
           firstIn ? new Date(firstIn) : null,
           a?.clock_in_utc ? new Date(a.clock_in_utc) : null,
@@ -256,7 +287,7 @@ export async function GET(request: NextRequest) {
           a?.shift_start_time, a?.shift_grace_minutes, a?.shift_type,
         ),
         overtime_minutes: overtimeMinutes(worked),
-        permission_minutes: permByKey.get(key(e.id, d)) ?? 0,
+        permission_minutes: permission,
         leave_type: leaveType,
         day_status,
         work_update: updByKey.get(key(e.id, d)) ?? null,

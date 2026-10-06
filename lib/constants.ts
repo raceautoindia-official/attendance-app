@@ -135,6 +135,27 @@ export const OVERTIME_AFTER_MINUTES =
     ? Math.round(Number(process.env.OVERTIME_AFTER_HOURS) * 60)
     : REQUIRED_SHIFT_MINUTES;
 
+/**
+ * The company's stated monthly hours norm — the figure HR quotes, shown
+ * alongside what the roster actually works out to.
+ *
+ * It is a REFERENCE, never the requirement. The requirement is derived from the
+ * roster, because the number of working days genuinely differs month to month:
+ * September 2026 has 26 Mon-Sat days less one holiday, so 25 x 9h = 225h, which
+ * matches this default exactly. A 27-working-day month with no holiday asks 243h,
+ * and a report that claimed 225h in both would be wrong in one of them.
+ *
+ * Showing both means a mismatch is visible rather than silently resolved in
+ * favour of whichever number the reader happened to expect.
+ *
+ * Set STANDARD_MONTHLY_HOURS to change it.
+ */
+export const STANDARD_MONTHLY_HOURS =
+  Number(process.env.STANDARD_MONTHLY_HOURS) > 0
+    ? Number(process.env.STANDARD_MONTHLY_HOURS)
+    : 225;
+export const STANDARD_MONTHLY_MINUTES = Math.round(STANDARD_MONTHLY_HOURS * 60);
+
 // ---------------------------------------------------------------------------
 // Permission hours — a short paid absence inside a working day (e.g. 10:00 to
 // 12:00) that the employee applies for and an admin approves. Approved minutes

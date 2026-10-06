@@ -23,13 +23,22 @@ export interface DayShift {
   start_time: string | null;
   end_time: string | null;
   required_hours: number | string | null;
+  /** Unpaid break inside the span. NULL means deduct nothing — see below. */
+  unpaid_break_minutes?: number | null;
   grace_minutes: number;
   working_days: string[] | null;
   location_id: number | null;
   geofencing_enabled: boolean;
 }
 
-/** Length of one shift in minutes, wrapping past midnight. */
+/**
+ * GROSS length of one shift in minutes, wrapping past midnight.
+ *
+ * This is the clock WINDOW — the stretch of the day the shift occupies. It is
+ * what `shiftForClockIn` matches an arrival against, and the basis the net
+ * requirement is derived from. It is NOT what the employee owes; for that see
+ * `shiftRequiredMinutes`.
+ */
 export function shiftMinutes(shift: {
   required_hours?: number | string | null;
   start_time?: string | null;
@@ -55,6 +64,32 @@ export function shiftMinutes(shift: {
 }
 
 /**
+ * NET minutes the shift actually asks for: the gross window less any unpaid
+ * break inside it.
+ *
+ * A 09:00-18:00 shift occupies nine hours but, with a one-hour unpaid lunch,
+ * asks for eight. The distinction matters because `attendance.total_minutes`
+ * excludes time the employee was clocked out: measuring someone net and judging
+ * them against a gross target penalises whoever records their lunch honestly.
+ *
+ * `unpaid_break_minutes` is NULL on every shift until an administrator sets it,
+ * and NULL deducts nothing — so this returns exactly what `shiftMinutes` did
+ * before the column existed. The policy only takes effect when it is chosen.
+ */
+export function shiftRequiredMinutes(shift: {
+  required_hours?: number | string | null;
+  start_time?: string | null;
+  end_time?: string | null;
+  unpaid_break_minutes?: number | null;
+}): number | null {
+  const gross = shiftMinutes(shift);
+  if (gross == null) return null;
+  const unpaid = Number(shift.unpaid_break_minutes ?? 0);
+  if (!Number.isFinite(unpaid) || unpaid <= 0) return gross;
+  return Math.max(0, gross - Math.round(unpaid));
+}
+
+/**
  * The same shift assigned twice is ONE shift, not a double shift.
  *
  * employee_schedules has no unique key, and a back-dated assignment does not
@@ -72,7 +107,7 @@ function dedupeByShift(shifts: DayShift[]): DayShift[] {
 export async function shiftsForDay(employeeId: number, workDate: string): Promise<DayShift[]> {
   const rows = await query<DayShift & { working_days: unknown }>(
     `SELECT es.id AS schedule_id, s.id AS shift_id, s.name, s.type,
-            s.start_time, s.end_time, s.required_hours, s.grace_minutes,
+            s.start_time, s.end_time, s.required_hours, s.unpaid_break_minutes, s.grace_minutes,
             s.working_days, es.location_id, es.geofencing_enabled
      FROM employee_schedules es
      JOIN shifts s ON s.id = es.shift_id
@@ -114,7 +149,7 @@ export async function shiftsForEmployees(
 
   const rows = await query<DayShift & { employee_id: number; working_days: unknown }>(
     `SELECT es.employee_id, es.id AS schedule_id, s.id AS shift_id, s.name, s.type,
-            s.start_time, s.end_time, s.required_hours, s.grace_minutes,
+            s.start_time, s.end_time, s.required_hours, s.unpaid_break_minutes, s.grace_minutes,
             s.working_days, es.location_id, es.geofencing_enabled
      FROM employee_schedules es
      JOIN shifts s ON s.id = es.shift_id
@@ -135,22 +170,28 @@ export async function shiftsForEmployees(
   return out;
 }
 
-/** Total minutes rostered across every shift; null when there are none. */
+/** Total NET minutes rostered across every shift; null when there are none. */
 export function totalShiftMinutes(shifts: DayShift[] | undefined): number | null {
   if (!shifts?.length) return null;
   let total = 0;
-  for (const s of shifts) total += shiftMinutes(s) ?? REQUIRED_SHIFT_MINUTES;
+  for (const s of shifts) total += shiftRequiredMinutes(s) ?? REQUIRED_SHIFT_MINUTES;
   return total;
 }
 
-/** Length of one shift, in SQL, over an aliased `shifts` row. */
-const shiftLengthSql = (alias: string) => `COALESCE(
+/**
+ * NET required minutes for one shift, in SQL, over an aliased `shifts` row.
+ *
+ * Mirrors `shiftRequiredMinutes` exactly, including the NULL-deducts-nothing
+ * rule — the two must never disagree, because one feeds the aggregate reports
+ * and the other feeds the per-day view of the same month.
+ */
+const shiftLengthSql = (alias: string) => `GREATEST(0, COALESCE(
   ${alias}.required_hours * 60,
   IF(${alias}.start_time IS NOT NULL AND ${alias}.end_time IS NOT NULL,
      NULLIF(MOD(TIME_TO_SEC(TIMEDIFF(${alias}.end_time, ${alias}.start_time)) / 60 + 1440, 1440), 0),
      NULL),
   ${REQUIRED_SHIFT_MINUTES}
-)`;
+) - COALESCE(${alias}.unpaid_break_minutes, 0))`;
 
 /**
  * Shift ids in force for the employee on the date.
@@ -253,13 +294,13 @@ export function workingWeekdays(shifts: DayShift[]): string[] | null {
 
 const ABBR = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-/** Minutes rostered on one weekday: only the shifts that work it. */
+/** NET minutes rostered on one weekday: only the shifts that work it. */
 export function minutesOnWeekday(shifts: DayShift[], abbr: string): number {
   const defaultDays = ABBR.filter(d => !WEEKLY_OFF_DAYS.includes(d));
   let total = 0;
   for (const s of shifts) {
     const days = s.working_days?.length ? s.working_days : defaultDays;
-    if (days.includes(abbr)) total += shiftMinutes(s) ?? REQUIRED_SHIFT_MINUTES;
+    if (days.includes(abbr)) total += shiftRequiredMinutes(s) ?? REQUIRED_SHIFT_MINUTES;
   }
   return total;
 }

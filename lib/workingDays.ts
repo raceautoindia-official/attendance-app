@@ -32,9 +32,16 @@ export function weekdayCounts(fromDate: string, toDate: string): number[] {
 /** Company-wide holiday dates in the range, as YYYY-MM-DD. */
 export async function companyHolidays(fromDate: string, toDate: string): Promise<string[]> {
   const rows = await query<{ d: string }>(
+    // location_id IS NULL matters: a holiday declared for ONE site also has
+    // employee_id NULL, so without this filter a single site's holiday would be
+    // read as company-wide and cut every employee's expected hours. Today every
+    // row happens to be company-wide, but the Holiday Calendar page can create
+    // per-location observances, which makes this reachable.
+    // Site-scoped holidays are resolved per employee by fetchLocationHolidays.
     `SELECT DISTINCT DATE_FORMAT(leave_date, '%Y-%m-%d') AS d
      FROM leave_records
-     WHERE employee_id IS NULL AND leave_type = 'holiday'
+     WHERE employee_id IS NULL AND location_id IS NULL
+       AND leave_type = 'holiday'
        AND leave_date BETWEEN ? AND ?`,
     [fromDate, toDate],
   );

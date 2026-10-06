@@ -62,6 +62,17 @@ export interface EmployeeSummary {
   days_with_hours: number;
   shift_count?: number;
   shift_names?: string[];
+  /**
+   * What the roster asked for, less what was credited. Null when the employee
+   * has no shift, because there is no expectation to fall short of.
+   *
+   * Both operands were already here; the subtraction was never done, so the one
+   * figure everybody actually wanted was the one the app never showed. It is
+   * derived rather than stored so it cannot drift from its operands.
+   */
+  shortage_minutes: number | null;
+  /** Average over days that have hours — not over calendar days. */
+  avg_worked_minutes_per_day: number | null;
 }
 
 export interface SummaryReportParams {
@@ -289,8 +300,15 @@ export async function computeSummaryReport(params: SummaryReportParams): Promise
     const ownWorkingDays = workingDaysFor(workingWeekdays(shifts), counts, holidays);
     const mixed = hasMixedWorkingDays(shifts);
     const overlaps = overlappingShiftNames(shifts);
+    const expected = perDay == null ? null : expectedMinutesFor(shifts, counts, holidays);
+    const credited = Number(r.total_minutes_credited ?? 0);
+    const daysWithHours = Number(r.days_with_hours ?? 0);
     return {
       ...r,
+      shortage_minutes: expected == null ? null : Math.max(0, expected - credited),
+      avg_worked_minutes_per_day: daysWithHours > 0
+        ? Math.round(Number(r.total_minutes_worked ?? 0) / daysWithHours)
+        : null,
       total_minutes_worked: Number(r.total_minutes_worked ?? 0),
       total_permission_minutes: Number(r.total_permission_minutes ?? 0),
       total_minutes_credited: Number(r.total_minutes_credited ?? 0),
@@ -301,7 +319,7 @@ export async function computeSummaryReport(params: SummaryReportParams): Promise
       mixed_working_days: mixed,
       overlapping_shifts: overlaps.length ? overlaps : null,
       working_days: ownWorkingDays,
-      expected_minutes: perDay == null ? null : expectedMinutesFor(shifts, counts, holidays),
+      expected_minutes: expected,
       days_with_hours: Number(r.days_with_hours ?? 0),
       calendar_days: calendarDays,
       company_holidays: holidays.length,

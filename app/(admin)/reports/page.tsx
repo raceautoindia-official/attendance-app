@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import Table from '@/components/ui/Table';
@@ -26,6 +26,10 @@ interface DailyRow {
   check_out_utc: string | null;
   break_minutes: number | null;
   worked_minutes: number | null;
+  /** What the roster asked for. Null when no shift is rostered, 0 when the day asked nothing. */
+  required_minutes: number | null;
+  credited_minutes: number;
+  shortage_minutes: number;
   /** null when the day has no start time to be late against. */
   late_minutes: number | null;
   overtime_minutes: number;
@@ -139,6 +143,29 @@ export default function ReportsPage() {
 
   const [fromDate, setFromDate] = useState(firstOfMonth);
   const [toDate, setToDate] = useState(today);
+
+  /** The last 18 months, for the month jump. */
+  const monthOptions = useMemo(() => {
+    const out: Array<{ value: string; label: string }> = [];
+    const now = new Date();
+    for (let i = 0; i < 18; i++) {
+      const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+      out.push({
+        value: `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`,
+        label: d.toLocaleDateString('en-IN', { month: 'long', year: 'numeric', timeZone: 'UTC' }),
+      });
+    }
+    return out;
+  }, []);
+
+  /** Shows a month in the dropdown only when the range IS exactly that month. */
+  const monthValue = useMemo(() => {
+    if (!/^\d{4}-\d{2}-01$/.test(fromDate)) return '';
+    const ym = fromDate.slice(0, 7);
+    const [y, m] = ym.split('-').map(Number);
+    const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    return toDate === `${ym}-${String(last).padStart(2, '0')}` ? ym : '';
+  }, [fromDate, toDate]);
   const [employeeId, setEmployeeId] = useState('');
   const [empSearch, setEmpSearch] = useState('');
   const [page, setPage] = useState(1);
@@ -308,6 +335,34 @@ export default function ReportsPage() {
       {/* Filters */}
       <Card>
         <div className="flex flex-wrap gap-4 items-end">
+          {/* Jump to a whole month. The From/To inputs below are unchanged and
+              still accept any range — this only sets them, so every existing
+              way of using this page keeps working. */}
+          <div className="flex flex-col gap-1">
+            <label className="text-sm font-medium text-slate-700 dark:text-slate-300" htmlFor="month-jump">
+              Month
+            </label>
+            <select
+              id="month-jump"
+              value={monthValue}
+              onChange={e => {
+                const v = e.target.value;
+                if (!v) return;
+                const [y, m] = v.split('-').map(Number);
+                const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+                setFromDate(`${v}-01`);
+                setToDate(`${v}-${String(last).padStart(2, '0')}`);
+                setPage(1);
+              }}
+              className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+            >
+              <option value="">Custom range…</option>
+              {monthOptions.map(m => (
+                <option key={m.value} value={m.value}>{m.label}</option>
+              ))}
+            </select>
+          </div>
+
           <Input label="From" type="date" value={fromDate} onChange={e => { setFromDate(e.target.value); setPage(1); }} className="w-36" />
           <Input label="To" type="date" value={toDate} onChange={e => { setToDate(e.target.value); setPage(1); }} className="w-36" />
 
@@ -430,6 +485,28 @@ export default function ReportsPage() {
                     const m = (r as DailyRow).worked_minutes;
                     return m == null ? <span className="text-slate-400">—</span>
                       : <span className="tabular-nums font-medium">{minutesToHours(m)}</span>;
+                  },
+                },
+                {
+                  key: 'required_minutes',
+                  header: 'Required',
+                  render: r => {
+                    const m = (r as DailyRow).required_minutes;
+                    // null and 0 differ: null is "no shift rostered", 0 is
+                    // "this day asked for nothing" — a week off, holiday or leave.
+                    if (m == null) return <span className="text-slate-400" title="No shift rostered">—</span>;
+                    if (m === 0) return <span className="text-slate-400">—</span>;
+                    return <span className="tabular-nums text-slate-500 dark:text-slate-400">{minutesToHours(m)}</span>;
+                  },
+                },
+                {
+                  key: 'shortage_minutes',
+                  header: 'Short',
+                  render: r => {
+                    const m = (r as DailyRow).shortage_minutes;
+                    return m > 0
+                      ? <span className="tabular-nums font-semibold text-amber-700 dark:text-amber-400">{minutesToHours(m)}</span>
+                      : <span className="text-slate-400">—</span>;
                   },
                 },
                 {
