@@ -311,3 +311,18 @@ SELECT
   COALESCE(GROUP_CONCAT(DATE_FORMAT(period_month, '%Y-%m') ORDER BY period_month SEPARATOR ', '), 'none') AS result,
   'Attendance and leave inside these are read-only until reopened' AS detail
 FROM month_closures WHERE is_closed = TRUE;
+
+SELECT
+  '2026-10-06_regularisation_requests' AS migration,
+  CASE WHEN total = 1 THEN 'APPLIED' ELSE 'MISSING' END AS result,
+  CONCAT(total, '/1 tables') AS detail
+FROM (
+  SELECT COUNT(*) AS total FROM INFORMATION_SCHEMA.TABLES
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'regularisation_requests'
+) t;
+
+SELECT
+  'INFO pending corrections' AS check_name,
+  CONCAT(COUNT(*), ' request(s)') AS result,
+  'Attendance corrections waiting for a decision' AS detail
+FROM regularisation_requests WHERE status = 'pending';

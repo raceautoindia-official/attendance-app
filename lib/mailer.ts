@@ -458,3 +458,104 @@ export async function sendPasswordResetEmail(
     `,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Month-end summary
+// ---------------------------------------------------------------------------
+
+export interface MonthEndRow {
+  name: string;
+  emp_id: string;
+  required_display: string;
+  worked_display: string;
+  net_display: string;
+  short: boolean;
+}
+
+export interface MonthEndData {
+  month_label: string;
+  closed: boolean;
+  closed_by: string | null;
+  employees: number;
+  required_display: string;
+  worked_display: string;
+  exceptions: { critical: number; warning: number; info: number };
+  rows: MonthEndRow[];
+  checksum: string;
+  app_url: string | null;
+}
+
+/**
+ * The month's hours, to whoever signs them off.
+ *
+ * Leads with whether the month is closed, because that decides whether the
+ * figures below can still move. Only the people who are short are listed: a
+ * table of everybody is skimmed, and the point of the mail is the exceptions.
+ *
+ * Fails silently like every other mail here — a summary that did not send must
+ * never break a cron run.
+ */
+export async function sendMonthEndSummary(
+  adminEmail: string,
+  data: MonthEndData,
+): Promise<void> {
+  const shortRows = data.rows.filter(r => r.short);
+  const rowsHtml = shortRows.length
+    ? shortRows.map(r => `
+        <tr>
+          <td style="border:1px solid #e5e7eb;">${r.name} <span style="color:#6b7280;">${r.emp_id}</span></td>
+          <td style="border:1px solid #e5e7eb;text-align:right;">${r.required_display}</td>
+          <td style="border:1px solid #e5e7eb;text-align:right;">${r.worked_display}</td>
+          <td style="border:1px solid #e5e7eb;text-align:right;color:#b45309;font-weight:600;">${r.net_display}</td>
+        </tr>`).join('')
+    : `<tr><td colspan="4" style="border:1px solid #e5e7eb;color:#047857;">
+         Nobody finished the month short.
+       </td></tr>`;
+
+  const status = data.closed
+    ? `<p style="background:#ecfdf5;border-left:4px solid #047857;padding:10px;">
+         <strong>Closed.</strong> These figures are final${data.closed_by ? `, signed off by ${data.closed_by}` : ''}.
+       </p>`
+    : `<p style="background:#fffbeb;border-left:4px solid #b45309;padding:10px;">
+         <strong>Not closed.</strong> These figures can still change. Review and close
+         the month before paying from them.
+       </p>`;
+
+  await send(
+    adminEmail,
+    `Working hours — ${data.month_label}${data.closed ? '' : ' (not yet closed)'}`,
+    `
+      <p>Hi,</p>
+      <p>Working hours for <strong>${data.month_label}</strong>, across ${data.employees} employees.</p>
+      ${status}
+      <p>
+        Required <strong>${data.required_display}</strong> &middot;
+        Worked <strong>${data.worked_display}</strong>
+      </p>
+      <p>
+        Needing a decision:
+        <strong>${data.exceptions.critical}</strong> to fix,
+        <strong>${data.exceptions.warning}</strong> worth checking,
+        ${data.exceptions.info} for information.
+      </p>
+      <h3 style="margin-bottom:6px;">Short for the month</h3>
+      <table cellpadding="6" style="border-collapse:collapse;font-size:14px;">
+        <thead>
+          <tr style="background:#f3f4f6;">
+            <th style="border:1px solid #e5e7eb;text-align:left;">Employee</th>
+            <th style="border:1px solid #e5e7eb;text-align:right;">Required</th>
+            <th style="border:1px solid #e5e7eb;text-align:right;">Worked</th>
+            <th style="border:1px solid #e5e7eb;text-align:right;">Net</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+      ${data.app_url ? `<p><a href="${data.app_url}/review">Open Month Review</a></p>` : ''}
+      <p style="color:#6b7280;font-size:12px;">
+        Checksum ${data.checksum.slice(0, 16)}… &mdash; the full pack reproduces this
+        for the same figures.
+      </p>
+      <p style="color:#6b7280;font-size:12px;">Automated message from the Attendance System.</p>
+    `,
+  );
+}

@@ -76,6 +76,17 @@ interface LedgerDay {
 
 type Closure = NonNullable<Ledger['closure']>;
 
+interface Trend {
+  current: { label: string; worked_minutes: number; net_minutes: number };
+  previous: { label: string; worked_minutes: number; net_minutes: number } | null;
+  delta: { worked_minutes: number; net_minutes: number; avg_worked_minutes_per_day: number | null } | null;
+  peers: {
+    scope: 'department' | 'company'; label: string; count: number;
+    median_net_minutes: number; median_avg_minutes: number | null; rank: number;
+  } | null;
+  notes: string[];
+}
+
 interface Ledger {
   employee: { id: number; emp_id: string; name: string; department: string | null; role: string; is_active: boolean };
   period: { from_date: string; to_date: string; label: string };
@@ -513,6 +524,8 @@ function Statement({ ledger }: { ledger: Ledger }) {
         </div>
       </Card>
 
+      <TrendCard employeeId={ledger.employee.id} period={ledger.period} />
+
       {/* Where the gap came from. A column per working day with what was asked
           beside what was done says in one glance what thirty table rows say
           slowly — and the days that caused the shortage are the short columns. */}
@@ -816,6 +829,94 @@ function MonthCloseCard({ month }: { month: string }) {
             <li key={i} className="flex gap-2 text-xs text-amber-700 dark:text-amber-400">
               <span aria-hidden>⚠</span><span>{w}</span>
             </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
+
+/**
+ * This period against the last one, and against peers.
+ *
+ * Its own query because it runs a ledger per peer and is the slow part of the
+ * page; the statement should not wait for it.
+ */
+function TrendCard({
+  employeeId, period,
+}: {
+  employeeId: number;
+  period: { from_date: string; to_date: string };
+}) {
+  const { data, isLoading } = useQuery({
+    queryKey: ['hours-trend', employeeId, period.from_date, period.to_date],
+    queryFn: async () => {
+      const res = await fetch(
+        `/api/reports/hours-trend?employee_id=${employeeId}`
+        + `&from_date=${period.from_date}&to_date=${period.to_date}`,
+      );
+      const json: ApiResponse<Trend> = await res.json();
+      if (!json.success) throw new Error(json.error ?? 'Could not load the comparison');
+      return json.data!;
+    },
+  });
+
+  if (isLoading) {
+    return (
+      <Card>
+        <p className="py-3 text-center text-xs text-slate-400">Working out the comparison…</p>
+      </Card>
+    );
+  }
+  if (!data) return null;
+
+  const { previous, delta, peers, notes } = data;
+  // Signed, and explicitly: "+2h" and "-2h" mean opposite things and a bare
+  // number beside a word like "change" gets misread.
+  const signed = (m: number) => `${m > 0 ? '+' : m < 0 ? '−' : ''}${hm(Math.abs(m))}`;
+
+  return (
+    <Card>
+      <h2 className="mb-3 text-sm font-semibold text-slate-800 dark:text-slate-100">
+        How this compares
+      </h2>
+
+      {previous && delta ? (
+        <div className="grid gap-3 sm:grid-cols-3">
+          <Line label={`Worked vs ${previous.label}`} value={signed(delta.worked_minutes)} />
+          <Line
+            label="Average day"
+            value={delta.avg_worked_minutes_per_day == null
+              ? '—'
+              : signed(delta.avg_worked_minutes_per_day)}
+          />
+          <Line label={`${previous.label} total`} value={hm(previous.worked_minutes)} />
+        </div>
+      ) : (
+        <p className="text-xs text-slate-500 dark:text-slate-400">
+          No previous period to compare with.
+        </p>
+      )}
+
+      {peers && (
+        <div className="mt-3 grid gap-3 border-t border-slate-200 pt-3 dark:border-slate-700 sm:grid-cols-3">
+          <Line
+            label={`Median across ${peers.label}`}
+            value={peers.median_avg_minutes == null ? '—' : `${hm(peers.median_avg_minutes)}/day`}
+          />
+          <Line label="People compared" value={String(peers.count)} />
+          <Line
+            label="Rank by hours worked"
+            value={peers.rank > 0 ? `${peers.rank} of ${peers.count}` : '—'}
+          />
+        </div>
+      )}
+
+      {notes.length > 0 && (
+        <ul className="mt-3 space-y-1 border-t border-slate-200 pt-2 dark:border-slate-700">
+          {notes.map((n, i) => (
+            <li key={i} className="text-[11px] leading-snug text-slate-500 dark:text-slate-400">{n}</li>
           ))}
         </ul>
       )}
