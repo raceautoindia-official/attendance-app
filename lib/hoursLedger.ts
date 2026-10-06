@@ -591,6 +591,21 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
   if (!employee.is_active) {
     warnings.push('This employee is inactive.');
   }
+  // A zero here means "not tracked", not "always punctual". lateMinutes()
+  // returns null on a flexible shift, so late_minutes totals zero no matter
+  // when the person actually arrived — and reporting that as punctuality would
+  // be inventing a fact out of a missing measurement.
+  if (endShifts.length > 0 && endShifts.every(sh => sh.type === 'flexible')) {
+    const withStart = endShifts.filter(sh => sh.start_time);
+    warnings.push(
+      'Lateness is not measured on a flexible shift, so the late figures here are zero '
+      + 'because nothing is tracked — not because they were never late.'
+      + (withStart.length
+        ? ` Their shift does carry a start time of ${withStart[0].start_time?.slice(0, 5)}; `
+          + 'if that is meant to be enforced, set the shift to "fixed" in Schedules.'
+        : ''),
+    );
+  }
 
   // Locked by the END of the period: a part-month close locks what it covers,
   // and a statement that straddles the boundary is still partly provisional.

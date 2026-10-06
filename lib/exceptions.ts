@@ -332,6 +332,45 @@ export async function findExceptions(
     });
   }
 
+  // --- Flexible shifts that carry a start time -----------------------------
+  //
+  // A contradiction worth naming: `flexible` means lateness is not measured, so
+  // lateMinutes() returns null and everybody on one shows zero late days
+  // forever. But somebody set a start time and a grace period on it, which only
+  // mean something on a fixed shift — so somebody expects that start to be
+  // enforced. Until the type is settled, the late figures silently say
+  // "punctual" when they mean "not tracked".
+  const flexWithStart = await query<{
+    shift: string; start_time: string | null; grace: number; headcount: number;
+  }>(
+    `SELECT s.name AS shift, s.start_time, s.grace_minutes AS grace,
+            COUNT(DISTINCT es.employee_id) AS headcount
+       FROM shifts s
+       JOIN employee_schedules es ON es.shift_id = s.id
+        AND es.effective_from <= ? AND (es.effective_to IS NULL OR es.effective_to >= ?)
+       JOIN employees e ON e.id = es.employee_id AND e.is_active = TRUE
+      WHERE s.type = 'flexible' AND s.start_time IS NOT NULL
+      GROUP BY s.id, s.name, s.start_time, s.grace_minutes`,
+    [toDate, toDate],
+  );
+  for (const r of flexWithStart) {
+    out.push({
+      id: `flexstart:${r.shift}`,
+      type: 'shift_config',
+      severity: 'warning',
+      employee: null,
+      date: null,
+      title: `"${r.shift}" is flexible but starts at ${r.start_time?.slice(0, 5)}`,
+      detail:
+        `${r.headcount} employee(s) are on it. A flexible shift does not measure lateness, so they `
+        + `show zero late days however late they arrive — yet the shift carries a ${r.start_time?.slice(0, 5)} `
+        + `start and a ${r.grace}-minute grace period, which only mean something on a fixed shift.`,
+      action:
+        'If that start time is meant to be enforced, set the shift type to "fixed" in Schedules. '
+        + 'If arrival genuinely does not matter, clear the start time so nobody reads it as a rule.',
+    });
+  }
+
   // --- Schedules with an impossible validity window ------------------------
   const inverted = await query<{ n: number }>(
     `SELECT COUNT(*) AS n FROM employee_schedules

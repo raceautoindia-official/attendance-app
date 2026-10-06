@@ -434,11 +434,57 @@ async function rankByStatus(
     [...scope.params, range.from, range.to, status],
   );
 
+  const notes: string[] = [];
+  if (rows.length === 0) notes.push(`No ${status} records in this period.`);
+
+  // Lateness is NOT MEASURED on a flexible shift — lateMinutes() returns null
+  // for one, because "work your hours whenever" has no late. Anybody on such a
+  // shift can therefore never appear here, and a bare zero reads as "they were
+  // never late" when it means "we do not track it for them".
+  //
+  // Reported for the late ranking whether or not rows came back: a list that
+  // silently omits half the workforce is misleading even when it is not empty.
+  if (status === 'late') {
+    const flexible = await query<{ name: string; shift: string; start_time: string | null }>(
+      `SELECT DISTINCT e.name, s.name AS shift, s.start_time
+         FROM employees e
+         JOIN employee_schedules es ON es.employee_id = e.id
+          AND es.effective_from <= ?
+          AND (es.effective_to IS NULL OR es.effective_to >= ?)
+         JOIN shifts s ON s.id = es.shift_id
+        ${scope.sql ? scope.sql + ' AND' : 'WHERE'} s.type = 'flexible'
+        ORDER BY e.name`,
+      [range.to, range.to, ...scope.params],
+    );
+    if (flexible.length > 0) {
+      const names = flexible.map(f => f.name);
+      notes.push(
+        `Lateness is not measured for ${names.length} employee(s) on a flexible shift, so they `
+        + `cannot appear in this list however late they arrived: ${names.slice(0, 8).join(', ')}`
+        + `${names.length > 8 ? `, and ${names.length - 8} more` : ''}. `
+        + 'Say this plainly rather than reporting zero late days for them — zero here means '
+        + 'not tracked, not punctual. If the user wants to know when they actually arrived, '
+        + 'use get_attendance_detail and report the clock-in times.',
+      );
+      // A flexible shift carrying a start time is a contradiction worth naming:
+      // somebody configured a start, so somebody expects it to mean something.
+      const withStart = flexible.filter(f => f.start_time);
+      if (withStart.length > 0) {
+        notes.push(
+          `${withStart.map(f => `${f.name} (${f.shift}, starts ${f.start_time?.slice(0, 5)})`).join('; ')} `
+          + 'are on flexible shifts that nonetheless carry a start time. If that start time is '
+          + 'meant to be enforced, the shift should be set to "fixed" in Schedules — that is an '
+          + 'administrator decision, so mention it rather than assuming either way.',
+        );
+      }
+    }
+  }
+
   return {
     range,
     count: rows.length,
     rows: rows.map(r => ({ ...r, day_count: Number(r.day_count) })),
-    notes: rows.length === 0 ? [`No ${status} records in this period.`] : undefined,
+    notes: notes.length ? notes : undefined,
   };
 }
 
