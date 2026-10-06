@@ -41,7 +41,10 @@ SELECT
   CASE WHEN COUNT(*) >= 1 THEN 'APPLIED' ELSE 'MISSING' END AS result,
   CONCAT(COUNT(*), ' table(s)') AS detail
 FROM INFORMATION_SCHEMA.TABLES
-WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'daily_updates';
+-- daily_work_updates, not daily_updates. The wrong name here reported the
+-- migration MISSING on a database where it had plainly been applied, which
+-- invites somebody re-running it.
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'daily_work_updates';
 
 SELECT
   '2026-06-01_add_employee_live_tracking_toggle' AS migration,
@@ -289,11 +292,11 @@ FROM (
      AND COLUMN_NAME = 'unpaid_break_minutes'
 ) t;
 
-SELECT
-  'INFO shifts with a break policy set' AS check_name,
-  CONCAT(COUNT(*), ' shift(s)') AS result,
-  'Each one reduces its required hours by that many minutes per working day' AS detail
-FROM shifts WHERE unpaid_break_minutes IS NOT NULL;
+-- Guarded: a status check must be runnable BEFORE the migration it reports
+-- on, or it crashes and hides every check below it.
+SET @have := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'shifts' AND COLUMN_NAME = 'unpaid_break_minutes');
+SET @sql := IF(@have = 1, 'SELECT ''INFO shifts with a break policy set'' AS check_name, CONCAT(COUNT(*), '' shift(s)'') AS result, ''Each one reduces its required hours by that many minutes per working day'' AS detail FROM shifts WHERE unpaid_break_minutes IS NOT NULL', 'SELECT ''INFO shifts with a break policy set'' AS check_name, ''n/a'' AS result, ''column not present yet'' AS detail');
+PREPARE st FROM @sql; EXECUTE st; DEALLOCATE PREPARE st;
 
 SELECT
   '2026-10-06_month_closures' AS migration,
@@ -304,13 +307,9 @@ FROM (
    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'month_closures'
 ) t;
 
--- Which periods are frozen. A locked month refuses attendance and leave edits,
--- so this is the first thing to check when an edit is being rejected.
-SELECT
-  'INFO closed months' AS check_name,
-  COALESCE(GROUP_CONCAT(DATE_FORMAT(period_month, '%Y-%m') ORDER BY period_month SEPARATOR ', '), 'none') AS result,
-  'Attendance and leave inside these are read-only until reopened' AS detail
-FROM month_closures WHERE is_closed = TRUE;
+SET @have := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'month_closures');
+SET @sql := IF(@have = 1, 'SELECT ''INFO closed months'' AS check_name, COALESCE(GROUP_CONCAT(DATE_FORMAT(period_month, ''%Y-%m'') ORDER BY period_month SEPARATOR '', ''), ''none'') AS result, ''Attendance and leave inside these are read-only until reopened'' AS detail FROM month_closures WHERE is_closed = TRUE', 'SELECT ''INFO closed months'' AS check_name, ''n/a'' AS result, ''table not present yet'' AS detail');
+PREPARE st FROM @sql; EXECUTE st; DEALLOCATE PREPARE st;
 
 SELECT
   '2026-10-06_regularisation_requests' AS migration,
@@ -321,8 +320,6 @@ FROM (
    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'regularisation_requests'
 ) t;
 
-SELECT
-  'INFO pending corrections' AS check_name,
-  CONCAT(COUNT(*), ' request(s)') AS result,
-  'Attendance corrections waiting for a decision' AS detail
-FROM regularisation_requests WHERE status = 'pending';
+SET @have := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'regularisation_requests');
+SET @sql := IF(@have = 1, 'SELECT ''INFO pending corrections'' AS check_name, CONCAT(COUNT(*), '' request(s)'') AS result, ''Attendance corrections waiting for a decision'' AS detail FROM regularisation_requests WHERE status = ''pending''', 'SELECT ''INFO pending corrections'' AS check_name, ''n/a'' AS result, ''table not present yet'' AS detail');
+PREPARE st FROM @sql; EXECUTE st; DEALLOCATE PREPARE st;
