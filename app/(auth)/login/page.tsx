@@ -4,7 +4,6 @@ import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { useRouter } from 'next/navigation';
 import { startAuthentication } from '@simplewebauthn/browser';
 import Input from '@/components/ui/Input';
 import Button from '@/components/ui/Button';
@@ -12,6 +11,20 @@ import Card from '@/components/ui/Card';
 import ThemeToggle from '@/components/ui/ThemeToggle';
 import { storeUser } from '@/lib/user';
 import type { ApiResponse, Employee } from '@/lib/types';
+import { navigateAfterAuthChange, destinationFor } from '@/lib/authNavigate';
+
+/**
+ * Where the proxy was sending them before it asked them to sign in.
+ *
+ * Read at submit time from the live URL rather than through useSearchParams,
+ * which would push this page behind a Suspense boundary to answer a question
+ * that only matters at the moment the form is sent. destinationFor() decides
+ * whether the value is safe to honour.
+ */
+function currentRedirectParam(): string | null {
+  if (typeof window === 'undefined') return null;
+  return new URLSearchParams(window.location.search).get('redirect');
+}
 
 const schema = z.object({
   emp_id: z.string().min(1, 'Employee ID is required'),
@@ -27,7 +40,6 @@ type LoginData = {
 };
 
 export default function LoginPage() {
-  const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [webAuthnPending, setWebAuthnPending] = useState(false);
   const [photoProofEnabled, setPhotoProofEnabled] = useState(false);
@@ -67,7 +79,7 @@ export default function LoginPage() {
       }
 
       storeUser({ id: emp.id, emp_id: emp.emp_id, name: emp.name, role: emp.role });
-      router.push(emp.role === 'employee' ? '/dashboard' : '/overview');
+      navigateAfterAuthChange(destinationFor(emp.role, currentRedirectParam()));
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Passkey authentication failed';
       const lower = msg.toLowerCase();
@@ -110,7 +122,7 @@ export default function LoginPage() {
       // enrolment rather than telling them to contact an administrator — which
       // is a dead end when the person locked out is the administrator.
       if (data?.requiresPasskeySetup) {
-        router.push('/register-passkey?setup=1');
+        navigateAfterAuthChange('/register-passkey?setup=1');
         return;
       }
 
@@ -123,9 +135,9 @@ export default function LoginPage() {
       if (emp) {
         storeUser({ id: emp.id, emp_id: emp.emp_id, name: emp.name, role: emp.role });
         if (emp.role === 'employee') {
-          router.push('/register-passkey');
+          navigateAfterAuthChange('/register-passkey');
         } else {
-          router.push('/overview');
+          navigateAfterAuthChange(destinationFor(emp.role, currentRedirectParam()));
         }
       }
     } catch {

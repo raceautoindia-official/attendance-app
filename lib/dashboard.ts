@@ -256,32 +256,6 @@ export async function buildDashboard(params: { month?: string } = {}): Promise<D
     [start, periodEnd],
   );
 
-  // Hours by department: where the month's work actually went.
-  const byDept = await query<{ dept: string | null; minutes: number }>(
-    `SELECT COALESCE(NULLIF(e.department, ''), 'Unassigned') AS dept,
-            COALESCE(SUM(a.total_minutes), 0) AS minutes
-       FROM employees e
-       LEFT JOIN attendance a
-              ON a.employee_id = e.id AND a.work_date BETWEEN ? AND ?
-      WHERE e.is_active = TRUE AND e.role = 'employee'
-      GROUP BY dept HAVING minutes > 0 ORDER BY minutes DESC LIMIT 8`,
-    [start, periodEnd],
-  );
-
-  // Six months of worked hours, so this month has something to be judged
-  // against. A single month's figure answers no question on its own.
-  const trend = await query<{ m: string; minutes: number }>(
-    `SELECT DATE_FORMAT(a.work_date, '%Y-%m') AS m,
-            COALESCE(SUM(a.total_minutes), 0) AS minutes
-       FROM attendance a
-       JOIN employees e ON e.id = a.employee_id
-      WHERE a.work_date >= DATE_SUB(?, INTERVAL 5 MONTH)
-        AND a.work_date <= ?
-        AND e.is_active = TRUE AND e.role = 'employee'
-      GROUP BY m ORDER BY m`,
-    [start, periodEnd],
-  );
-
   const charts: ChartSpec[] = [];
 
   if (daily.length > 0) {
@@ -303,26 +277,12 @@ export async function buildDashboard(params: { month?: string } = {}): Promise<D
     });
   }
 
-  if (trend.length > 1) {
-    charts.push({
-      type: 'line',
-      title: 'Hours worked by month',
-      subtitle: 'Last six months',
-      unit: 'hours',
-      series: [{ label: 'Worked', points: trend.map(r => ({ label: r.m, value: hrs(Number(r.minutes)) })) }],
-      note: 'The current month is still in progress, so its point is month-to-date.',
-    });
-  }
-
-  if (byDept.length > 0) {
-    charts.push({
-      type: 'bar',
-      title: 'Hours by department',
-      subtitle: month,
-      unit: 'hours',
-      series: [{ label: 'Worked', points: byDept.map(r => ({ label: r.dept ?? 'Unassigned', value: hrs(Number(r.minutes)) })) }],
-    });
-  }
+  // The hours trend and the hours-by-department bar were removed deliberately.
+  // A home page is read at the start of the day to decide what to do, and
+  // neither answered a question anybody has then — they are reporting, and
+  // they belong on the reports page where somebody has gone looking for them.
+  // What stays is what changes an action today: who is in, who is not, and
+  // what is waiting on a decision.
 
   const todaySlices = [
     { label: 'Working now', value: stillWorking },
@@ -344,24 +304,6 @@ export async function buildDashboard(params: { month?: string } = {}): Promise<D
   }
 
   // ---- the headline figures ---------------------------------------------
-  // Month-to-date hours against the WHOLE month's target is an honest figure
-  // and a misleading one: on the 7th it reads 8% and looks like a collapse.
-  // So the comparison is scaled to the part of the month that has actually
-  // happened, and the headline says which it is.
-  const monthInProgress = periodEnd < end;
-  const daysElapsed = Number(periodEnd.slice(8)) ;
-  const daysInMonth = Number(end.slice(8));
-  const expectedToDate = monthInProgress
-    ? Math.round(statedMinutes * (daysElapsed / daysInMonth))
-    : statedMinutes;
-  const pct = expectedToDate > 0 ? Math.round((workedMinutes / expectedToDate) * 100) : 0;
-  if (monthInProgress) {
-    notes.push(
-      `${month} is still running: ${daysElapsed} of ${daysInMonth} days. Hours are compared `
-      + `against ${hrs(expectedToDate)}h, the share of the month's ${hrs(statedMinutes)}h that `
-      + 'has elapsed — not against the full month, which would read as a shortfall all month.',
-    );
-  }
   const kpis: DashboardKpi[] = [
     {
       key: 'in_today', label: 'In today', value: clockedIn, measured: true,
@@ -374,15 +316,13 @@ export async function buildDashboard(params: { month?: string } = {}): Promise<D
       hint: 'clocked in, not yet out', href: '/live-tracking', tone: 'neutral',
     },
     {
-      key: 'hours_month', label: monthInProgress ? 'Hours month to date' : 'Hours this month',
-      value: hrs(workedMinutes), measured: true,
-      hint: monthInProgress
-        ? `${pct}% of the ${hrs(expectedToDate)}h due by day ${daysElapsed}`
-        : `${pct}% of the ${hrs(statedMinutes)}h the month states`,
-      href: '/hours',
-      tone: pct >= 95 ? 'good' : pct >= 75 ? 'neutral' : 'warn',
-    },
-    {
+      key: 'absent_today', label: 'Absent today', value: notInYet, measured: true,
+      hint: holiday?.notes
+        ? 'company holiday — nobody is expected'
+        : `not clocked in${leaveToday ? `, excluding ${leaveToday} on approved leave` : ''}`,
+      href: '/attendance',
+      tone: holiday?.notes ? 'neutral' : notInYet === 0 ? 'good' : notInYet > headcount / 2 ? 'bad' : 'warn',
+    },    {
       key: 'late_days', label: 'Late days', value: Number(late?.late_days ?? 0),
       measured: measurableEmployees > 0,
       hint: measurableEmployees > 0

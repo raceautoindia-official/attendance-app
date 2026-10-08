@@ -61,21 +61,20 @@ async function main() {
     check('and no value is negative, which no chart here can mean',
       d.charts.every(c => c.series.every(se => se.points.every(p => p.value >= 0))));
 
-    console.log('\n— a month in progress is judged on the part that has happened —');
-    const hoursKpi = d.kpis.find(k => k.key === 'hours_month')!;
-    check('the hours figure exists', Boolean(hoursKpi));
-    const inProgress = d.notes.some(n => /still running/i.test(n));
-    if (inProgress) {
-      check('the label says month to date', /month to date/i.test(hoursKpi.label), hoursKpi.label);
-      check('and the comparison is to the hours due by now, not the whole month',
-        /due by day/i.test(hoursKpi.hint), hoursKpi.hint);
-      check('a note explains the scaling rather than leaving it to be inferred',
-        d.notes.some(n => /not against the full month/i.test(n)));
-    } else {
-      check('a completed month compares against the full stated figure',
-        /the month states/i.test(hoursKpi.hint), hoursKpi.hint);
-    }
-
+    console.log('\n— the home page is about today, not about reporting —');
+    // Hours trends and hours-by-department were removed from here on purpose:
+    // a home page is read to decide what to do this morning, and neither
+    // answers a question anybody has then. They live on the reports page,
+    // where somebody has gone looking for them.
+    check('no hours-reporting chart is on the home page',
+      !d.charts.some(c => /hours (worked|by)/i.test(c.title)),
+      d.charts.map(c => c.title).join(', '));
+    check('and the headline figures are about attendance, not hours',
+      !d.kpis.some(k => /hours/i.test(k.label)),
+      d.kpis.map(k => k.label).join(', '));
+    check('absent today is reported',
+      d.kpis.some(k => k.key === 'absent_today'),
+      d.kpis.map(k => k.key).join(', '));
     console.log('\n— not measured is never shown as zero —');
     const lateKpi = d.kpis.find(k => k.key === 'late_days')!;
     check('the late figure declares whether it could be measured at all',

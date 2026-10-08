@@ -170,7 +170,7 @@ export default function ReviewPage() {
                       </div>
                       {e.employee && (
                         <Link
-                          href={`/hours?employee=${e.employee.id}&month=${month}`}
+                          href={`/reports?employee=${e.employee.id}&month=${month}`}
                           className="shrink-0 rounded-lg border border-slate-300 px-2.5 py-1 text-[11px] font-medium text-slate-600 transition-colors hover:border-blue-400 hover:text-blue-600 dark:border-slate-600 dark:text-slate-300"
                         >
                           Open hours
@@ -193,7 +193,7 @@ export default function ReviewPage() {
           <Card>
             <p className="text-xs text-slate-500 dark:text-slate-400">
               Reviewed everything above?{' '}
-              <Link href="/hours" className="font-medium text-blue-600 hover:underline dark:text-blue-400">
+              <Link href="/reports" className="font-medium text-blue-600 hover:underline dark:text-blue-400">
                 Close the month
               </Link>{' '}
               on the Working Hours page to make its figures final.

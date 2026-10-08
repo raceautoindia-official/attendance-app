@@ -103,6 +103,16 @@ const blank = (): Draft => ({
   score_weight_attendance: 40, score_weight_punctuality: 30, score_weight_hours: 30,
 });
 
+interface MonthPreview {
+  month: string;
+  label: string;
+  days_in_month: number;
+  working_days: number;
+  week_offs: number;
+  holidays: number;
+  required_minutes: number | null;
+}
+
 interface ShiftMove {
   employee_id: number;
   employee_name: string;
@@ -217,6 +227,21 @@ export default function PoliciesPage() {
       const json: ApiResponse<{ shift_moves: ShiftMove[] }> = await res.json();
       if (!json.success) throw new Error(json.error ?? 'Could not preview');
       return json.data?.shift_moves ?? [];
+    },
+  });
+
+  // What the chosen shift actually produces, month by month. Asked of the
+  // server because only it knows the holiday calendar, and answered by the
+  // same three functions the hours ledger uses — so this preview cannot drift
+  // from the figures people are really judged against.
+  const { data: monthPreview } = useQuery<MonthPreview[]>({
+    queryKey: ['policy-month-preview', draft.default_shift_id],
+    enabled: Boolean(draft.default_shift_id),
+    queryFn: async () => {
+      const res = await fetch(`/api/policies/preview?shift_id=${draft.default_shift_id}&months=6`);
+      const json: ApiResponse<{ months: MonthPreview[] }> = await res.json();
+      if (!json.success) throw new Error(json.error ?? 'Could not work out the months');
+      return json.data?.months ?? [];
     },
   });
 
@@ -451,23 +476,23 @@ export default function PoliciesPage() {
                 onChange={e => set('hours_basis', e.target.value)}
                 className="h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
               >
-                <option value="roster">Roster-derived — recommended</option>
-                <option value="fixed_monthly">Fixed monthly hours</option>
+                <option value="roster">Work it out from the calendar each month (recommended)</option>
+                <option value="fixed_monthly">Always the same number of hours every month</option>
               </select>
               <span className="mt-1 block text-xs text-slate-500 dark:text-slate-400">
                 {draft.hours_basis === 'fixed_monthly'
-                  ? 'Every month requires exactly the hours below, whatever the calendar says. '
-                    + 'Predictable, but wrong for part-months and for joiners and leavers.'
-                  : 'The requirement is worked out day by day from the shift and the calendar — '
-                    + 'September 2026 is 225h, October is 243h. The figure below is shown beside '
-                    + 'it as the stated norm so a mismatch is visible.'}
-              </span>
-            </label>
+                  ? 'Every month asks for exactly the hours you type below, however many days '
+                    + 'the month actually has. Predictable for payroll, but a short month and a '
+                    + 'long month demand the same, and somebody who joins mid-month is asked for '
+                    + 'a full month of hours.'
+                  : 'Each month asks for what the calendar actually contains: the shift working '
+                    + 'days in that month, less company holidays, times the hours in a day. '
+                    + 'Longer months ask for more. The table below shows exactly what this '
+                    + 'produces, so nothing has to be taken on trust.'}
+              </span>            </label>
             <Input label="Monthly hours" type="number" step="0.5" value={String(draft.monthly_hours ?? '')}
               onChange={e => set('monthly_hours', e.target.value)} helper={POLICY_FIELD_HELP.monthly_hours} />
-            <Input label="Week offs per month" type="number" value={String(draft.week_offs_per_month ?? '')}
-              onChange={e => set('week_offs_per_month', e.target.value)}
-              helper={POLICY_FIELD_HELP.week_offs_per_month} />
+
             <label className="block sm:col-span-2">
               <span className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-300">Default shift</span>
               <select
@@ -483,6 +508,65 @@ export default function PoliciesPage() {
                 so the two can never disagree.
               </span>
             </label>
+            {/* Replaces a "week offs per month" box somebody had to type a
+                number into. That number cannot be right in more than one
+                month: October has four Sundays, November five, and a holiday
+                landing on a working day moves it again. Showing what the
+                shift really produces is both honest and more useful. */}
+            {draft.default_shift_id ? (
+              <div className="sm:col-span-2 rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800/50">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                  What this shift actually asks for
+                </p>
+                {monthPreview && monthPreview.length > 0 ? (
+                  <>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-left text-slate-500 dark:text-slate-400">
+                            <th className="pb-1 pr-3 font-medium">Month</th>
+                            <th className="pb-1 pr-3 text-right font-medium">Working days</th>
+                            <th className="pb-1 pr-3 text-right font-medium">Week offs</th>
+                            <th className="pb-1 pr-3 text-right font-medium">Holidays</th>
+                            <th className="pb-1 text-right font-medium">Hours required</th>
+                          </tr>
+                        </thead>
+                        <tbody className="text-slate-700 dark:text-slate-200">
+                          {monthPreview.map(m => (
+                            <tr key={m.month} className="border-t border-slate-200 dark:border-slate-700">
+                              <td className="py-1 pr-3">{m.label}</td>
+                              <td className="py-1 pr-3 text-right tabular-nums">{m.working_days}</td>
+                              <td className="py-1 pr-3 text-right tabular-nums">{m.week_offs}</td>
+                              <td className="py-1 pr-3 text-right tabular-nums">{m.holidays || "—"}</td>
+                              <td className="py-1 text-right tabular-nums font-medium">
+                                {m.required_minutes == null
+                                  ? "—"
+                                  : `${Math.round((m.required_minutes / 60) * 10) / 10}h`}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="mt-2 text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+                      Week offs and hours differ every month, which is why there is no box to type
+                      them into &mdash; any single number would be wrong in most months. Under
+                      <strong> work it out from the calendar</strong>, the figures above are what
+                      each month asks for. Under <strong>always the same</strong>, every month asks
+                      for the Monthly hours you set, and these figures are what it is being
+                      measured against.
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-xs text-slate-500 dark:text-slate-400">Working it out&hellip;</p>
+                )}
+              </div>
+            ) : (
+              <p className="sm:col-span-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-800/50 dark:text-slate-400">
+                Choose a default shift above and this will show exactly how many working days,
+                week offs and hours each of the next six months asks for.
+              </p>
+            )}
           </Section>
 
           {/* No half-day thresholds: the business has no half-day flow, and a

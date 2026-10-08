@@ -254,7 +254,7 @@ export default function PerformancePage() {
                       <p key={i} className="text-[11px] text-amber-700 dark:text-amber-400">{n}</p>
                     ))}
                     <Link
-                      href={`/hours?employee=${s.employee.id}&month=${month}`}
+                      href={`/reports?employee=${s.employee.id}&month=${month}`}
                       className="inline-block text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400"
                     >
                       Open their hours →

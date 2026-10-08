@@ -13,6 +13,9 @@ import Spinner from '@/components/ui/Spinner';
 import Card from '@/components/ui/Card';
 import { formatDateOnly } from '@/lib/date';
 import type { Employee, ApiResponse, AttendanceRecord } from '@/lib/types';
+import EmployeeLedger from '@/components/hours/EmployeeLedger';
+import { Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 
 /** One employee, one day — the day-wise report's row. */
 interface DailyRow {
@@ -137,12 +140,40 @@ function weekday(ymd: string) {
   });
 }
 
+/**
+ * Seeded from the URL so the links that used to point at the Working Hours
+ * page still land somewhere useful. /hours?employee=10&month=2026-09 becomes
+ * this page, that month, that person's detail already open — a redirect that
+ * dropped the parameters would technically work and would still have lost the
+ * reader their place.
+ */
 export default function ReportsPage() {
+  return (
+    <Suspense fallback={<Card><div className="flex justify-center py-10"><Spinner /></div></Card>}>
+      <ReportsPageInner />
+    </Suspense>
+  );
+}
+
+function ReportsPageInner() {
+  const searchParams = useSearchParams();
   const today = format(new Date(), 'yyyy-MM-dd');
   const firstOfMonth = format(new Date(new Date().getFullYear(), new Date().getMonth(), 1), 'yyyy-MM-dd');
 
-  const [fromDate, setFromDate] = useState(firstOfMonth);
-  const [toDate, setToDate] = useState(today);
+  // A month in the link wins over today's dates: somebody arriving from a link
+  // about September wants September, not the current month with a stale title.
+  const linkedMonth = searchParams.get('month');
+  const monthIsValid = Boolean(linkedMonth && /^\d{4}-\d{2}$/.test(linkedMonth));
+  const monthStart = monthIsValid ? `${linkedMonth}-01` : null;
+  const monthEnd = monthIsValid
+    ? (() => {
+        const [y, m] = linkedMonth!.split('-').map(Number);
+        return format(new Date(y, m, 0), 'yyyy-MM-dd');
+      })()
+    : null;
+
+  const [fromDate, setFromDate] = useState(searchParams.get('from_date') ?? monthStart ?? firstOfMonth);
+  const [toDate, setToDate] = useState(searchParams.get('to_date') ?? monthEnd ?? today);
 
   /** The last 18 months, for the month jump. */
   const monthOptions = useMemo(() => {
@@ -172,6 +203,14 @@ export default function ReportsPage() {
   const [exporting, setExporting] = useState<'csv' | 'pdf' | 'excel' | null>(null);
   const [drillDown, setDrillDown] = useState<DrillDown | null>(null);
   const [reportView, setReportView] = useState<'summary' | 'daily'>('summary');
+  // Whose day-by-day detail is open. This is what replaced the separate
+  // Working Hours page: the same question, answered without a second screen
+  // carrying its own employee picker and its own date range to keep in step.
+  const [openLedger, setOpenLedger] = useState<{ id: number; name: string } | null>(() => {
+    const e = Number(searchParams.get('employee'));
+    // The name fills in from the table once it loads; the id is what matters.
+    return Number.isInteger(e) && e > 0 ? { id: e, name: 'this employee' } : null;
+  });
 
   // DAY BY DAY, per employee. The summary answers "how was the month"; this
   // answers "what happened on the 14th", which is the question asked when a
@@ -430,6 +469,30 @@ export default function ReportsPage() {
         </div>
       </Card>
 
+      {/* One person, day by day — the whole of what the Working Hours page used
+          to be, opened from the row rather than on a screen of its own. It
+          inherits the period above, so there is no second date picker that can
+          disagree with the table it was opened from. */}
+      {openLedger && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2.5 dark:border-blue-900/50 dark:bg-blue-950/40">
+            <p className="text-sm text-blue-900 dark:text-blue-200">
+              Showing <strong>{openLedger.name}</strong> day by day, for the period above.
+            </p>
+            <button
+              onClick={() => setOpenLedger(null)}
+              className="shrink-0 text-xs font-medium text-blue-800 underline dark:text-blue-300"
+            >
+              Back to everyone
+            </button>
+          </div>
+          <EmployeeLedger
+            employeeId={openLedger.id}
+            params={`from_date=${fromDate}&to_date=${toDate}`}
+          />
+        </div>
+      )}
+
       {/* Summary table */}
       {reportView === 'daily' && (
         dailyLoading ? (
@@ -686,12 +749,21 @@ export default function ReportsPage() {
               {
                 key: 'name',
                 header: 'Employee',
-                render: r => (
-                  <div>
-                    <p className="font-medium text-slate-800 dark:text-slate-200">{(r as SummaryRow).name}</p>
-                    <p className="text-xs text-slate-400">{(r as SummaryRow).emp_id}</p>
-                  </div>
-                ),
+                render: r => {
+                  const row = r as SummaryRow;
+                  return (
+                    <button
+                      onClick={() => setOpenLedger({ id: row.id, name: row.name })}
+                      className="text-left"
+                      title="Show this person day by day"
+                    >
+                      <p className="font-medium text-slate-800 underline decoration-dotted underline-offset-2 hover:decoration-solid dark:text-slate-200">
+                        {row.name}
+                      </p>
+                      <p className="text-xs text-slate-400">{row.emp_id}</p>
+                    </button>
+                  );
+                },
               },
               {
                 key: 'work_mode',
@@ -758,11 +830,27 @@ export default function ReportsPage() {
               {
                 key: 'total_days_present',
                 header: 'Present',
-                render: r => (
-                  <span className="font-semibold text-green-600 dark:text-green-400">
-                    {(r as SummaryRow).total_days_present}
-                  </span>
-                ),
+                // A bare "24" means nothing without the days that were asked
+                // for. 24 of 25 is good; 24 of 31 is not, and the number on
+                // its own cannot tell them apart.
+                render: r => {
+                  const row = r as SummaryRow;
+                  const wd = row.working_days ?? 0;
+                  const pct = wd > 0 ? Math.round((row.total_days_present / wd) * 100) : null;
+                  return (
+                    <div>
+                      <span className="font-semibold tabular-nums text-green-600 dark:text-green-400">
+                        {row.total_days_present}
+                      </span>
+                      {wd > 0 && (
+                        <span className="text-xs tabular-nums text-slate-400"> of {wd}</span>
+                      )}
+                      {pct !== null && (
+                        <p className="text-xs tabular-nums text-slate-400">{pct}%</p>
+                      )}
+                    </div>
+                  );
+                },
               },
               {
                 key: 'total_days_late',
@@ -773,7 +861,12 @@ export default function ReportsPage() {
                   return (
                     <div>
                       <span className="font-semibold text-amber-600 dark:text-amber-400 tabular-nums">
-                        {row.total_days_late} day{row.total_days_late === 1 ? '' : 's'}
+                        {row.total_days_late}
+                        {row.total_days_present > 0 && (
+                          <span className="text-xs font-normal text-slate-400">
+                            {' '}of {row.total_days_present} attended
+                          </span>
+                        )}
                       </span>
                       {mins > 0 && (
                         <p className="text-xs text-slate-400 tabular-nums">
@@ -798,6 +891,9 @@ export default function ReportsPage() {
                       title="Show which days"
                     >
                       {n}
+                      {row.working_days ? (
+                        <span className="text-xs font-normal text-slate-400"> of {row.working_days}</span>
+                      ) : null}
                     </button>
                   );
                 },

@@ -8,6 +8,7 @@ import Card from '@/components/ui/Card';
 import { getStoredUser } from '@/lib/user';
 import type { ApiResponse } from '@/lib/types';
 import type { StoredUser } from '@/lib/user';
+import { navigateAfterAuthChange } from '@/lib/authNavigate';
 
 export default function RegisterPasskeyPage() {
   const router = useRouter();
@@ -88,7 +89,7 @@ export default function RegisterPasskeyPage() {
         setTimeout(() => router.push('/login'), 2000);
       } else {
         setMessage('Passkey registered successfully! You can now sign in with your passkey.');
-        setTimeout(() => router.push(skipDest), 2000);
+        setTimeout(() => navigateAfterAuthChange(skipDest), 2000);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Registration failed';
