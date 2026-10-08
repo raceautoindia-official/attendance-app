@@ -192,6 +192,13 @@ export const DOCUMENT_TYPES = [
   'relieving_letter',
   'education_certificate',
   'offer_letter',
+  // Government identity documents. Added alongside the database enum in
+  // 2026-10-07_policies.sql — the column accepting a value is useless while the
+  // API still rejects it, which is exactly what happened here.
+  'government_id',
+  'passport',
+  'driving_licence',
+  'voter_id',
   'other',
 ] as const;
 

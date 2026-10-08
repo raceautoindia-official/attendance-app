@@ -54,6 +54,7 @@ const empSchema = z.object({
   geofencing_enabled: z.boolean().optional(),
   live_tracking_enabled: z.boolean().optional(),
   schedule_effective_from: z.string().optional(),
+  policy_id: z.preprocess(v => (v === '' || v === null || v === undefined) ? null : Number(v), z.number().int().positive().nullable().optional()),
 });
 
 const editSchema = empSchema.omit({ pin: true }).extend({
@@ -128,6 +129,18 @@ export default function EmployeesPage() {
   });
   const shifts = shiftsData?.data?.shifts ?? [];
 
+  const { data: policiesData } = useQuery({
+    queryKey: ['policies', 'active'],
+    queryFn: async () => {
+      const res = await fetch('/api/policies');
+      return res.json() as Promise<ApiResponse<{ policies: Array<{
+        id: number; name: string; code: string; default_shift_id: number | null;
+        default_shift_name: string | null;
+      }> }>>;
+    },
+  });
+  const policies = policiesData?.data?.policies ?? [];
+
   const { data: locationsData } = useQuery({
     queryKey: ['locations', 'all'],
     queryFn: async () => {
@@ -153,6 +166,8 @@ export default function EmployeesPage() {
       schedule_effective_from: new Date().toISOString().slice(0, 10),
     },
   });
+  const [createNotes, setCreateNotes] = useState<string[]>([]);
+
   const addMutation = useMutation({
     mutationFn: async (values: EmpForm) => {
       const res = await fetch('/api/employees', {
@@ -160,11 +175,18 @@ export default function EmployeesPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(values),
       });
-      const json = await res.json() as ApiResponse;
+      const json = await res.json() as ApiResponse<{ notes?: string[] }>;
       if (!json.success) throw new Error(json.error ?? 'Failed');
       return json;
     },
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['employees'] }); setAddOpen(false); addForm.reset(); },
+    onSuccess: json => {
+      qc.invalidateQueries({ queryKey: ['employees'] });
+      setAddOpen(false);
+      addForm.reset();
+      // Which shift they ended up on, and whether the policy actually applied.
+      // Both are decided server-side, so neither is obvious from the form.
+      setCreateNotes(json.data?.notes ?? []);
+    },
   });
 
   // Phone bound to the employee being edited — see lib/deviceBinding.ts.
@@ -277,6 +299,14 @@ export default function EmployeesPage() {
 
   return (
     <div className="space-y-4">
+      {createNotes.length > 0 && (
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200">
+          <div className="space-y-0.5">
+            {createNotes.map((n, i) => <p key={i}>{n}</p>)}
+          </div>
+          <button onClick={() => setCreateNotes([])} className="text-xs underline">Dismiss</button>
+        </div>
+      )}
       {/* Absent marking derives working days from the assigned shift, so anyone
           without a schedule is silently skipped by the nightly job. */}
       {unscheduled.length > 0 && (
@@ -524,6 +554,22 @@ export default function EmployeesPage() {
               <option value="">No manager</option>
               {managers.map(m => <option key={m.id} value={m.id}>{m.name} ({m.emp_id})</option>)}
             </select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Policy</label>
+            <select {...addForm.register('policy_id')} className={selectClass}>
+              <option value="">No policy — uses the global defaults</option>
+              {policies.map(p => (
+                <option key={p.id} value={p.id}>
+                  {p.name} ({p.code}){p.default_shift_name ? ` — ${p.default_shift_name}` : ''}
+                </option>
+              ))}
+            </select>
+            <span className="text-xs text-slate-500 dark:text-slate-400">
+              Sets this person&rsquo;s monthly hours, grace and statutory flags. Leave the shift
+              below empty and the policy&rsquo;s own shift is used; choosing a shift here keeps
+              that one instead.
+            </span>
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="flex flex-col gap-1">

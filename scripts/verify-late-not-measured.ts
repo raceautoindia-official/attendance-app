@@ -157,7 +157,15 @@ async function main() {
     check('and a warning explains why that zero is not punctuality',
       led.warnings.some(w => /not measured on a flexible shift/i.test(w)),
       led.warnings.join(' | ').slice(0, 140));
+    // The totals carry the count of days lateness could be measured on, so a
+    // reader can tell '0 late' from 'never checked'. Without it the Working
+    // Hours page printed 'Late 0 (0m)' for somebody late every single day.
+    eq('no day was measurable on the flexible shift', led.totals.late_measured_days, 0);
+
     const ledFixed = (await buildHoursLedger({ employeeId: f.fixedEmp, fromDate: FROM, toDate: TO }))!;
+    check('…while the fixed employee has measurable days',
+      ledFixed.totals.late_measured_days > 0,
+      String(ledFixed.totals.late_measured_days));
     check('the fixed-shift employee gets no such warning',
       !ledFixed.warnings.some(w => /not measured/i.test(w)));
     check('…and does accrue late minutes', ledFixed.totals.late_minutes > 0,

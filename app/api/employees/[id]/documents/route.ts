@@ -8,6 +8,7 @@ import {
   MAX_DOCUMENT_BYTES,
   canAccessEmployee,
 } from '@/lib/employeeDetails';
+import { headObject, isS3Configured, keyPrefixFor, MAX_S3_BYTES } from '@/lib/documentStorage';
 import type { ApiResponse, EmployeeDocument } from '@/lib/types';
 
 type Params = { params: Promise<{ id: string }> };
@@ -76,8 +77,13 @@ const UploadSchema = z.object({
   mime_type: z.enum(DOCUMENT_MIME_TYPES as [string, ...string[]], {
     error: 'Only PDF, JPG, PNG or WebP files are allowed',
   }),
-  // Raw base64 (no data: prefix). ~4/3 of the file size.
-  data_base64: z.string().min(1, 'File data is required'),
+  // One of two upload paths, never both:
+  //   data_base64 — the original flow; bytes travel through this server and
+  //                 land in the database. Still used when no bucket is set.
+  //   s3_key      — the browser already PUT the file straight to S3 using a
+  //                 presigned URL, so only the key arrives here.
+  data_base64: z.string().min(1).optional(),
+  s3_key: z.string().min(1).max(500).optional(),
 });
 
 export async function POST(request: NextRequest, context: Params) {
@@ -112,7 +118,80 @@ export async function POST(request: NextRequest, context: Params) {
     );
   }
 
-  const { doc_type, title, file_name, mime_type } = parsed.data;
+  const { doc_type, title, file_name, mime_type, s3_key } = parsed.data;
+
+  // ---- S3 path --------------------------------------------------------
+  // The object is already in the bucket. Confirm it actually arrived before
+  // recording it: a presigned upload is handed out before the browser sends
+  // anything, so without this check a failed upload would file a document
+  // that does not exist, and nobody would find out until they opened it.
+  if (s3_key) {
+    if (!isS3Configured()) {
+      return NextResponse.json<ApiResponse>(
+        { success: false, error: 'S3 is not configured on this server.' }, { status: 503 },
+      );
+    }
+    // The key must be one this server would have issued for THIS employee.
+    // Without that check, a caller could file somebody else's object — or an
+    // arbitrary object — against this employee.
+    if (!s3_key.startsWith(`${keyPrefixFor(employeeId)}/`)) {
+      return NextResponse.json<ApiResponse>(
+        { success: false, error: 'That upload key does not belong to this employee.' }, { status: 400 },
+      );
+    }
+
+    const head = await headObject(s3_key);
+    if (!head.exists) {
+      return NextResponse.json<ApiResponse>(
+        { success: false, error: 'The file never finished uploading. Try again.' }, { status: 400 },
+      );
+    }
+    if (head.size > MAX_S3_BYTES) {
+      return NextResponse.json<ApiResponse>(
+        { success: false, error: `File is too large (max ${Math.floor(MAX_S3_BYTES / (1024 * 1024))} MB)` },
+        { status: 413 },
+      );
+    }
+
+    try {
+      const result = await query(
+        `INSERT INTO employee_documents
+           (employee_id, doc_type, title, file_name, mime_type, size_bytes,
+            file_data, storage, s3_key, uploaded_by)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, 's3', ?, ?)`,
+        [employeeId, doc_type, title, file_name, mime_type, head.size, s3_key, auth.id],
+      );
+      const insertId = (result as unknown as { insertId: number }).insertId;
+
+      await insertAuditLog({
+        action: 'employee_document_uploaded',
+        entity: 'employee',
+        entity_id: employeeId,
+        performed_by: auth.id,
+        details: { document_id: insertId, doc_type, title, file_name, size_bytes: head.size, storage: 's3' },
+        ip_address: request.headers.get('x-forwarded-for')?.split(',')[0].trim() ?? null,
+      });
+
+      const document = await queryOne<EmployeeDocument>(
+        `SELECT id, employee_id, doc_type, title, file_name, mime_type, size_bytes, uploaded_by, created_at
+         FROM employee_documents WHERE id = ?`,
+        [insertId],
+      );
+      return NextResponse.json<ApiResponse<{ document: EmployeeDocument }>>(
+        { success: true, data: { document: document! } }, { status: 201 },
+      );
+    } catch (error) {
+      if ((error as { code?: string })?.code === 'ER_NO_SUCH_TABLE') return missingTableResponse();
+      throw error;
+    }
+  }
+
+  // ---- database path (unchanged) --------------------------------------
+  if (!parsed.data.data_base64) {
+    return NextResponse.json<ApiResponse>(
+      { success: false, error: 'Provide either file data or an uploaded s3_key.' }, { status: 400 },
+    );
+  }
   // Strip an accidental data-URL prefix, then verify it decodes as base64.
   const base64 = parsed.data.data_base64.replace(/^data:[^;]+;base64,/, '');
   let sizeBytes: number;

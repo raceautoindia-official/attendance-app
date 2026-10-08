@@ -14,6 +14,7 @@ import type {
   AttendanceRecord, AttendanceStatus, ApiResponse, Employee, DayAttendanceRow,
 } from '@/lib/types';
 import { formatDateOnly } from '@/lib/date';
+import DashboardPanel from '@/components/dashboard/DashboardPanel';
 
 type DayRow = DayAttendanceRow;
 
@@ -207,6 +208,11 @@ export default function OverviewPage() {
 
   return (
     <div className="space-y-6">
+      {/* The dashboard goes FIRST: the figures that decide what to do today,
+          above the tables that answer a question somebody already has. The
+          existing widgets below are untouched. */}
+      <DashboardPanel />
+
       {/* Manager self-attendance widget */}
       {isManager && (
         <Card>

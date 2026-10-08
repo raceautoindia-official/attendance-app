@@ -3,6 +3,7 @@ import { STANDARD_MONTHLY_MINUTES } from '@/lib/constants';
 import { toYmd } from '@/lib/date';
 import { istToday } from '@/lib/chat/dates';
 import { lockFor, type MonthClosure } from '@/lib/monthClose';
+import { policyTimelineFor, type Policy } from '@/lib/policy';
 import { breakMinutes, lateMinutes } from '@/lib/attendance';
 import { hasOnDutyColumn, hasPermissionTable, timeOffOnly } from '@/lib/permissions';
 import { hasFirstClockInColumn } from '@/lib/employeeDetails';
@@ -127,6 +128,14 @@ export interface LedgerTotals {
   leave_days: number;
   days_present: number;
   days_late: number;
+  /**
+   * Days where lateness could be measured at all. Zero means nothing was
+   * checked - on a flexible shift it never is - so `days_late` of 0 must be
+   * read as 'not measured', not as 'never late'. Kept beside the count rather
+   * than folded into it, because every export and chat tool already reads
+   * `days_late` as a number.
+   */
+  late_measured_days: number;
   days_absent: number;
   /** Days with a requirement where something was clocked. */
   days_worked: number;
@@ -196,6 +205,22 @@ export interface HoursLedger {
    * month being reopened on the record.
    */
   closure: MonthClosure | null;
+  /**
+   * The rule set in force at the end of the period, or null when the employee
+   * is on none — in which case every figure above was produced exactly as it
+   * would have been before policies existed.
+   */
+  assigned_policy: {
+    id: number;
+    name: string;
+    code: string;
+    hours_basis: 'roster' | 'fixed_monthly';
+    monthly_hours: number | null;
+    week_offs_per_month: number | null;
+    late_grace_minutes: number | null;
+    statutory: string[];
+    leave_entitlement: { casual: number | null; sick: number | null; earned: number | null };
+  } | null;
   days: LedgerDay[];
   /** Anything the reader needs to know before trusting the numbers. */
   warnings: string[];
@@ -348,6 +373,22 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
   ]);
   const holidayNameByDate = new Map(holidayNames.map(h => [toYmd(h.holiday_date), h.name]));
 
+  // The policies that applied at any point in this period, fetched once.
+  const policyTimeline = await policyTimelineFor(employeeId, fromDate, toDate);
+
+  /**
+   * The policy in force on a date, or null.
+   *
+   * Null is the important case: it means no policy, and every line that reads
+   * this then behaves exactly as the app did before policies existed.
+   */
+  // findLast, not find: the timeline is ordered oldest first, and the most
+  // recent assignment wins. resolvePolicyFor() applies the same precedence, and
+  // when these two disagreed the same employee was on two different policies
+  // depending on which code asked.
+  const policyOn = (date: string): Policy | null =>
+    policyTimeline.findLast(t => t.from <= date && (t.to === null || t.to >= date))?.policy ?? null;
+
   const attendanceByDate = new Map(attendance.map(a => [toYmd(a.work_date), a]));
   const permissionByDate = new Map(permissions.map(p => [toYmd(p.permission_date), Number(p.minutes)]));
   const leaveByDate = new Map(leaves.map(l => [toYmd(l.leave_date), l]));
@@ -375,7 +416,7 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
   const t: LedgerTotals = {
     calendar_days: 0, working_days: 0, scheduled_working_days: 0, future_days: 0,
     week_off_days: 0, holiday_days: 0, leave_days: 0,
-    days_present: 0, days_late: 0, days_absent: 0, days_worked: 0, days_short: 0,
+    days_present: 0, days_late: 0, late_measured_days: 0, days_absent: 0, days_worked: 0, days_short: 0,
     required_minutes: 0, scheduled_minutes: 0, worked_minutes: 0, break_minutes: 0, permission_minutes: 0,
     credited_minutes: 0, shortage_minutes: 0, overtime_minutes: 0, net_minutes: 0, late_minutes: 0,
     avg_worked_minutes_per_day: null, shortest_day: null, longest_day: null,
@@ -388,12 +429,30 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
   const dates = eachDate(fromDate, toDate);
   t.calendar_days = dates.length;
 
-  for (const date of dates) {
+  // ---------------------------------------------------------------------
+  // Pass one: what KIND of day each date is, and what the roster asks of it.
+  //
+  // Separated from the arithmetic because a fixed-monthly policy cannot know
+  // what a single day requires until it knows how many working days there are
+  // to divide the month across. Doing it in one pass would mean either two
+  // different notions of "required" or a month total that does not equal the
+  // sum of its days — and the per-day shortage column is derived from exactly
+  // that sum.
+  // ---------------------------------------------------------------------
+  interface Classified {
+    date: string;
+    weekday: string;
+    shifts: DayShift[];
+    kind: DayKind;
+    kindLabel: string | null;
+    rosteredToday: number | null;
+  }
+
+  const classified: Classified[] = dates.map(date => {
     const weekday = WEEKDAYS[new Date(`${date}T00:00:00Z`).getUTCDay()];
     const shifts = shiftsOn(date);
     const row = attendanceByDate.get(date) ?? null;
     const leave = leaveByDate.get(date) ?? null;
-    const permission = permissionByDate.get(date) ?? 0;
 
     // Rostered minutes for THIS weekday — zero when the shift does not work it.
     const rosteredToday = shifts.length ? minutesOnWeekday(shifts, weekday) : null;
@@ -425,13 +484,56 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
       kind = 'working';
     }
 
+    return { date, weekday, shifts, kind, kindLabel, rosteredToday };
+  });
+
+  // ---------------------------------------------------------------------
+  // The policy, and what it does to the requirement.
+  //
+  // `policyOn` resolves by DATE, so a reassignment part-way through a period
+  // leaves the earlier days under the rules they were computed with. A null
+  // policy means every line below falls back to the roster-derived behaviour
+  // the app had before policies existed.
+  // ---------------------------------------------------------------------
+  const activePolicy = policyOn(toDate);
+
+  // Under a fixed-monthly policy the month asks for a flat figure, so it is
+  // spread evenly across the days that demand anything. Spreading rather than
+  // holding it at the month level keeps the day column and the month total in
+  // agreement — the remainder is handed to the earliest days so the parts sum
+  // back to exactly the whole, with no rounding drift.
+  const demandingDays = classified.filter(c => c.kind === 'working' || c.kind === 'future');
+  const fixedPerDay = new Map<string, number>();
+  if (activePolicy?.hours_basis === 'fixed_monthly' && activePolicy.monthly_hours && demandingDays.length > 0) {
+    const total = Math.round(activePolicy.monthly_hours! * 60);
+    const base = Math.floor(total / demandingDays.length);
+    let remainder = total - base * demandingDays.length;
+    for (const c of demandingDays) {
+      fixedPerDay.set(c.date, base + (remainder > 0 ? 1 : 0));
+      if (remainder > 0) remainder -= 1;
+    }
+  }
+
+  /** What this date asks for, after the policy has had its say. */
+  const requiredFor = (c: Classified): number | null => {
     // Only a working day that has already happened demands anything. A holiday,
     // week off, approved leave or future date asks for nothing, so none of them
     // can produce a shortage — the bug this whole exercise started from was a
     // Sunday counted as a missed holiday.
-    const required = kind === 'working'
-      ? (shifts.length ? (rosteredToday ?? 0) : null)
-      : 0;
+    if (c.kind !== 'working') return 0;
+    if (fixedPerDay.size > 0) return fixedPerDay.get(c.date) ?? 0;
+    return c.shifts.length ? (c.rosteredToday ?? 0) : null;
+  };
+
+  // ---------------------------------------------------------------------
+  // Pass two: the arithmetic.
+  // ---------------------------------------------------------------------
+  for (const c of classified) {
+    const { date, weekday, shifts, kind, kindLabel } = c;
+    const row = attendanceByDate.get(date) ?? null;
+    const permission = permissionByDate.get(date) ?? 0;
+    const rosteredToday = c.rosteredToday;
+    const required = requiredFor(c);
 
     const worked = row?.total_minutes == null ? null : Number(row.total_minutes);
     const open = Boolean(row?.clock_in_utc && !row?.clock_out_utc);
@@ -464,7 +566,10 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
       const firstIn = new Date(row.first_clock_in_utc ?? row.clock_in_utc);
       const hhmm = firstIn.toISOString().slice(11, 16);
       const matched = shiftForClockIn(shifts, hhmm) ?? shifts[0];
-      late = lateMinutes(firstIn, matched.start_time, matched.grace_minutes, matched.type);
+      // A policy may set its own grace, overriding whatever the shift carries.
+      const dayPolicy = policyOn(date);
+      const grace = dayPolicy?.late_grace_minutes ?? matched.grace_minutes;
+      late = lateMinutes(firstIn, matched.start_time, grace, matched.type);
     }
 
     days.push({
@@ -508,6 +613,7 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
     if (kind === 'leave') t.leave_days += 1;
     if (row?.status === 'present') t.days_present += 1;
     if (row?.status === 'late') t.days_late += 1;
+    if (late !== null) t.late_measured_days += 1;
     if (row?.status === 'absent' && kind === 'working') t.days_absent += 1;
     if (open) t.has_open_days = true;
 
@@ -607,6 +713,49 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
     );
   }
 
+  const statedMinutes = activePolicy?.monthly_hours
+    ? Math.round(activePolicy.monthly_hours * 60)
+    : STANDARD_MONTHLY_MINUTES;
+
+  if (activePolicy) {
+    if (activePolicy.hours_basis === 'fixed_monthly') {
+      warnings.push(
+        `"${activePolicy.name}" sets a fixed ${activePolicy.monthly_hours}h a month, so the `
+        + 'requirement is that figure spread across the working days rather than worked out '
+        + 'from the roster. A month with more working days than usual therefore asks no more.',
+      );
+    }
+    // The policy's default shift is a REFERENCE, not an instruction: the
+    // schedule decides what somebody actually works. Setting it and expecting
+    // the roster to follow is the natural reading though, and when it is wrong
+    // nothing changes and nothing says so - the figures simply stay as they
+    // were. Saying it out loud is the difference between a quiet no-op and a
+    // setting somebody can act on.
+    if (activePolicy.default_shift_id != null && endShifts.length > 0) {
+      const actual = endShifts.filter(sh => sh.shift_id !== activePolicy.default_shift_id);
+      if (actual.length === endShifts.length) {
+        warnings.push(
+          `"${activePolicy.name}" names "${activePolicy.default_shift_name ?? 'a default shift'}" `
+          + `as its default shift, but this employee is scheduled on `
+          + `${endShifts.map(sh => `"${sh.name}"`).join(', ')}. The schedule decides what is `
+          + 'worked and judged — the policy default changes nothing on its own. Change it in '
+          + 'Schedules if the policy shift is the one intended.',
+        );
+      }
+    }
+    // week_offs_per_month is a CHECK under a roster policy, never a definition —
+    // week offs are defined by the shift's working days, and two things
+    // defining them is how they start disagreeing.
+    if (activePolicy.week_offs_per_month != null
+      && t.week_off_days !== activePolicy.week_offs_per_month) {
+      warnings.push(
+        `The roster gave ${t.week_off_days} week off(s) this period; "${activePolicy.name}" `
+        + `expects ${activePolicy.week_offs_per_month}. The roster decides — this is a flag, `
+        + 'not a correction.',
+      );
+    }
+  }
+
   // Locked by the END of the period: a part-month close locks what it covers,
   // and a statement that straddles the boundary is still partly provisional.
   const closure = await lockFor(toDate);
@@ -623,14 +772,43 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
     standing_reason: standingReason,
     totals: t,
     standard: {
-      stated_minutes: STANDARD_MONTHLY_MINUTES,
+      // The employee's own policy figure when they have one, otherwise the
+      // company-wide default. This is the single reason STANDARD_MONTHLY_HOURS
+      // existed as a global: it was the only place to put a number that is
+      // really a per-contract fact.
+      stated_minutes: statedMinutes,
       // The WHOLE period's ask, not just the elapsed part — "does this month
       // work out to the 225h standard" is a question about the month, and
       // comparing a part-month against a monthly norm would always look short.
       roster_minutes: t.scheduled_minutes,
-      difference_minutes: t.scheduled_minutes - STANDARD_MONTHLY_MINUTES,
+      difference_minutes: t.scheduled_minutes - statedMinutes,
     },
     closure,
+    assigned_policy: activePolicy
+      ? {
+          id: activePolicy.id,
+          name: activePolicy.name,
+          code: activePolicy.code,
+          hours_basis: activePolicy.hours_basis,
+          monthly_hours: activePolicy.monthly_hours,
+          week_offs_per_month: activePolicy.week_offs_per_month,
+          late_grace_minutes: activePolicy.late_grace_minutes,
+          statutory: [
+            activePolicy.pf_applicable && 'PF',
+            activePolicy.esi_applicable && 'ESI',
+            activePolicy.professional_tax_applicable && 'Professional Tax',
+            activePolicy.income_tax_tds_applicable && 'TDS',
+            activePolicy.gratuity_applicable && 'Gratuity',
+            activePolicy.lwf_applicable && 'LWF',
+            activePolicy.bonus_applicable && 'Bonus',
+          ].filter(Boolean) as string[],
+          leave_entitlement: {
+            casual: activePolicy.casual_leave_days,
+            sick: activePolicy.sick_leave_days,
+            earned: activePolicy.earned_leave_days,
+          },
+        }
+      : null,
     days,
     warnings,
   };

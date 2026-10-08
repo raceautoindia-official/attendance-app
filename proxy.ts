@@ -19,6 +19,7 @@ const PROTECTED_API_PREFIXES = [
   '/api/reports',
   '/api/leaves',
   '/api/audit-log',
+  '/api/policies',
 ];
 
 const ADMIN_PAGE_PREFIXES = [
@@ -29,6 +30,13 @@ const ADMIN_PAGE_PREFIXES = [
   '/leaves',
   '/locations',
   '/reports',
+  // Added with the policy system. A page absent from this list still gets
+  // checked by its own handler, so nothing leaked - but it renders the admin
+  // shell to a stranger before the client redirects, instead of never
+  // rendering at all. Any new admin page belongs here.
+  '/policies',
+  '/performance',
+  '/documents',
 ];
 
 const EMPLOYEE_PAGE_PREFIXES = ['/dashboard'];

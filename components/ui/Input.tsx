@@ -11,6 +11,10 @@ interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
 
 const Input = forwardRef<HTMLInputElement, InputProps>(
   ({ label, error, helper, id, className, type, ...props }, ref) => {
+    // A required field says so on its label. Passing `required` alone only
+    // arms the browser check, which speaks up after a failed submit; the mark
+    // is what lets somebody fill the form correctly the first time.
+    const isRequired = Boolean(props.required);
     const inputId = id ?? label?.toLowerCase().replace(/\s+/g, '-');
     const isPassword = type === 'password';
     const [revealed, setRevealed] = useState(false);
@@ -24,6 +28,10 @@ const Input = forwardRef<HTMLInputElement, InputProps>(
             className="text-sm font-medium text-slate-700 dark:text-slate-300"
           >
             {label}
+            {isRequired && (
+              <span className="ml-1 text-red-500 dark:text-red-400" aria-hidden="true">*</span>
+            )}
+            {isRequired && <span className="sr-only"> (required)</span>}
           </label>
         )}
         <div className="relative">

@@ -323,3 +323,64 @@ FROM (
 SET @have := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'regularisation_requests');
 SET @sql := IF(@have = 1, 'SELECT ''INFO pending corrections'' AS check_name, CONCAT(COUNT(*), '' request(s)'') AS result, ''Attendance corrections waiting for a decision'' AS detail FROM regularisation_requests WHERE status = ''pending''', 'SELECT ''INFO pending corrections'' AS check_name, ''n/a'' AS result, ''table not present yet'' AS detail');
 PREPARE st FROM @sql; EXECUTE st; DEALLOCATE PREPARE st;
+
+-- ---------------------------------------------------------------------------
+-- 2026-10-07_policies
+--
+-- Three artifacts, and they can genuinely land apart: the two CREATE TABLEs
+-- are guarded by IF NOT EXISTS, while widening employee_documents.doc_type is
+-- an ALTER on a table that already holds rows. Tables present but the enum not
+-- widened is the PARTIAL state -- the Policies page works and a government-ID
+-- upload is rejected by the database.
+-- ---------------------------------------------------------------------------
+SELECT
+  '2026-10-07_policies' AS migration,
+  CASE WHEN total = 3 THEN 'APPLIED'
+       WHEN total = 0 THEN 'MISSING'
+       ELSE 'PARTIAL' END AS result,
+  CONCAT(total, '/3 artifacts (policies + employee_policies + government-ID doc types)') AS detail
+FROM (
+  SELECT
+    (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'policies')
+  + (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'employee_policies')
+  + (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'employee_documents'
+        AND COLUMN_NAME = 'doc_type' AND COLUMN_TYPE LIKE '%government_id%') AS total
+) t;
+
+SET @have := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'employee_policies');
+SET @sql := IF(@have = 1, 'SELECT ''INFO employees on a policy'' AS check_name, CONCAT(COUNT(DISTINCT employee_id), '' employee(s)'') AS result, ''Anyone not listed is computed exactly as before policies existed'' AS detail FROM employee_policies WHERE effective_to IS NULL', 'SELECT ''INFO employees on a policy'' AS check_name, ''n/a'' AS result, ''table not present yet'' AS detail');
+PREPARE st FROM @sql; EXECUTE st; DEALLOCATE PREPARE st;
+
+-- ---------------------------------------------------------------------------
+-- 2026-10-07_documents_s3
+--
+-- Four artifacts, all ALTERs on a live table, so PARTIAL is the state to watch
+-- for. The one that matters most is file_data becoming NULLable: without it an
+-- S3 upload cannot be recorded at all, because there are no bytes to store.
+-- ---------------------------------------------------------------------------
+SELECT
+  '2026-10-07_documents_s3' AS migration,
+  CASE WHEN total = 4 THEN 'APPLIED'
+       WHEN total = 0 THEN 'MISSING'
+       ELSE 'PARTIAL' END AS result,
+  CONCAT(total, '/4 artifacts (storage + s3_key + file_data NULLable + index)') AS detail
+FROM (
+  SELECT
+    (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'employee_documents' AND COLUMN_NAME = 'storage')
+  + (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'employee_documents' AND COLUMN_NAME = 's3_key')
+  + (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'employee_documents'
+        AND COLUMN_NAME = 'file_data' AND IS_NULLABLE = 'YES')
+  + (SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'employee_documents'
+        AND INDEX_NAME = 'idx_doc_storage_created' AND SEQ_IN_INDEX = 1) AS total
+) t;
+
+SET @have := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'employee_documents' AND COLUMN_NAME = 'storage');
+SET @sql := IF(@have = 1, 'SELECT ''INFO documents by storage'' AS check_name, CONCAT(COALESCE(SUM(storage = ''db''), 0), '' in the database, '', COALESCE(SUM(storage = ''s3''), 0), '' in S3'') AS result, ''An S3 row cannot be opened on a server with no bucket configured'' AS detail FROM employee_documents', 'SELECT ''INFO documents by storage'' AS check_name, ''n/a'' AS result, ''storage column not present yet'' AS detail');
+PREPARE st FROM @sql; EXECUTE st; DEALLOCATE PREPARE st;

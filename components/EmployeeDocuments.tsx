@@ -15,6 +15,10 @@ export const DOC_TYPE_LABELS: Record<DocumentType, string> = {
   relieving_letter: 'Relieving Letter',
   education_certificate: 'Education Certificate',
   offer_letter: 'Offer Letter',
+  government_id: 'Government ID',
+  passport: 'Passport',
+  driving_licence: 'Driving Licence',
+  voter_id: 'Voter ID',
   other: 'Other',
 };
 
@@ -52,12 +56,82 @@ export default function EmployeeDocuments({
   });
   const documents = data?.data?.documents ?? [];
 
+  // What this server can actually do with a file. Asked rather than assumed,
+  // so the size limit shown to the user is the real one: with a bucket the
+  // browser uploads direct and the 3 MB nginx ceiling stops applying.
+  const { data: storage } = useQuery({
+    queryKey: ['document-storage', employeeId],
+    queryFn: async () => {
+      const res = await fetch(`/api/employees/${employeeId}/documents/presign`);
+      const json = await res.json() as ApiResponse<{
+        configured: boolean; max_bytes: number; note: string;
+      }>;
+      return json.success ? json.data! : { configured: false, max_bytes: MAX_BYTES, note: '' };
+    },
+  });
+
+  const maxBytes = storage?.max_bytes ?? MAX_BYTES;
+
   const uploadMutation = useMutation({
     mutationFn: async (file: File) => {
       setError(null);
-      if (file.size > MAX_BYTES) {
-        throw new Error('File is too large — maximum 3 MB.');
+      if (file.size > maxBytes) {
+        throw new Error(`File is too large — maximum ${Math.floor(maxBytes / (1024 * 1024))} MB.`);
       }
+
+      const meta = {
+        doc_type: docType,
+        title: title.trim() || DOC_TYPE_LABELS[docType],
+        file_name: file.name,
+        mime_type: file.type || 'application/pdf',
+      };
+
+      // ---- direct to S3, when a bucket is configured --------------------
+      // The bytes never touch this server, so nginx's body limit is irrelevant.
+      if (storage?.configured) {
+        const presign = await fetch(`/api/employees/${employeeId}/documents/presign`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...meta, size_bytes: file.size }),
+        });
+        const pj = await presign.json() as ApiResponse<{ upload_url: string; key: string }>;
+        if (!pj.success) throw new Error(pj.error ?? 'Could not prepare the upload');
+
+        const put = await fetch(pj.data!.upload_url, {
+          method: 'PUT',
+          headers: { 'Content-Type': meta.mime_type },
+          body: file,
+        });
+        if (!put.ok) {
+          // The request goes browser-to-S3, so none of this reaches our logs.
+          // Name the actual candidates rather than blaming CORS for everything:
+          // a rejected key and a missing CORS rule look identical from here
+          // unless the status is read.
+          throw new Error(
+            put.status === 403
+              ? 'Storage rejected the upload (403). The access key may be invalid or lack '
+                + 's3:PutObject on this bucket.'
+              : put.status === 404
+                ? 'Storage says the bucket does not exist (404). Check S3_BUCKET and S3_REGION.'
+                : `Upload to storage failed (${put.status || 'no response'}). `
+                  + "If the status is blank the browser was blocked before sending — check the "
+                  + "bucket's CORS rules allow PUT from this site.",
+          );
+        }
+
+        // Only now is it recorded, and the server confirms the object arrived
+        // before filing it.
+        const res = await fetch(`/api/employees/${employeeId}/documents`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...meta, s3_key: pj.data!.key }),
+        });
+        const json = await res.json() as ApiResponse;
+        if (!json.success) throw new Error(json.error ?? 'Upload failed');
+        return;
+      }
+
+      // ---- database fallback, unchanged ---------------------------------
       const dataBase64 = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result).split(',')[1] ?? '');
@@ -67,13 +141,7 @@ export default function EmployeeDocuments({
       const res = await fetch(`/api/employees/${employeeId}/documents`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          doc_type: docType,
-          title: title.trim() || DOC_TYPE_LABELS[docType],
-          file_name: file.name,
-          mime_type: file.type || 'application/pdf',
-          data_base64: dataBase64,
-        }),
+        body: JSON.stringify({ ...meta, data_base64: dataBase64 }),
       });
       const json = await res.json() as ApiResponse;
       if (!json.success) throw new Error(json.error ?? 'Upload failed');
@@ -134,7 +202,10 @@ export default function EmployeeDocuments({
           Upload File
         </Button>
       </div>
-      <p className="text-xs text-slate-400">PDF, JPG, PNG or WebP — up to 3 MB.</p>
+      <p className="text-xs text-slate-400">
+        PDF, JPG, PNG or WebP — up to {Math.floor(maxBytes / (1024 * 1024))} MB.
+        {storage?.configured === false && ' Stored in the database; configure an S3 bucket to allow larger files.'}
+      </p>
 
       {error && <p className="text-sm text-red-500">{error}</p>}
 

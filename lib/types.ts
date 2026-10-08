@@ -1,3 +1,5 @@
+import { DOCUMENT_TYPES } from './employeeDetails';
+
 // ---------------------------------------------------------------------------
 // Enums / union types
 // ---------------------------------------------------------------------------
@@ -30,15 +32,16 @@ export type PermissionStatus = 'pending' | 'approved' | 'rejected' | 'cancelled'
  */
 export type PermissionRequestType = 'permission' | 'on_duty';
 
-export type DocumentType =
-  | 'pan_card'
-  | 'aadhaar_card'
-  | 'bank_proof'
-  | 'experience_certificate'
-  | 'relieving_letter'
-  | 'education_certificate'
-  | 'offer_letter'
-  | 'other';
+/**
+ * Derived from DOCUMENT_TYPES rather than written out again.
+ *
+ * These were two separate lists, and adding the government-ID types to one left
+ * the other behind: the database column and the runtime validator accepted the
+ * new values while this union still refused them. Deriving it means they cannot
+ * drift again. lib/employeeDetails.ts does not import this file, so there is no
+ * cycle.
+ */
+export type DocumentType = (typeof DOCUMENT_TYPES)[number];
 
 // ---------------------------------------------------------------------------
 // Domain models — mirror DB columns exactly

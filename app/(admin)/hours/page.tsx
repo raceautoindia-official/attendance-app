@@ -103,7 +103,7 @@ interface Ledger {
     calendar_days: number; working_days: number; scheduled_working_days: number;
     future_days: number; week_off_days: number;
     holiday_days: number; leave_days: number;
-    days_present: number; days_late: number; days_absent: number;
+    days_present: number; days_late: number; late_measured_days: number; days_absent: number;
     days_worked: number; days_short: number;
     required_minutes: number; scheduled_minutes: number; worked_minutes: number; break_minutes: number;
     permission_minutes: number; credited_minutes: number;
@@ -479,7 +479,15 @@ function Statement({ ledger }: { ledger: Ledger }) {
           <Line label="Holidays" value={String(t.holiday_days)} />
           <Line label="Leave taken" value={String(t.leave_days)} />
           <Line label="Present" value={String(t.days_present)} />
-          <Line label="Late" value={`${t.days_late} (${hm(t.late_minutes)})`} />
+          {/* 0 of 0 measured days is 'nobody checked', not 'nobody was late'.
+              On a flexible shift lateness is never measured, so printing 0
+              here reads as a clean record for the whole period. */}
+          <Line
+            label="Late"
+            value={t.late_measured_days === 0
+              ? 'not measured'
+              : `${t.days_late} (${hm(t.late_minutes)})`}
+          />
           <Line label="Absent" value={String(t.days_absent)} />
           <Line label="Permission credited" value={hm(t.permission_minutes)} />
           <Line label="Break time" value={hm(t.break_minutes)} />

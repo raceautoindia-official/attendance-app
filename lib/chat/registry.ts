@@ -43,6 +43,9 @@ import {
   REPORT_KEYS,
   EXPORT_FORMATS,
 } from './export';
+import {
+  listPoliciesTool, getEmployeePolicyTool, getPerformanceTool, getDocumentComplianceTool,
+} from './tools/policies';
 import { getHoursLedger } from './tools/hours';
 import { buildChart } from './tools/charts';
 import { CHART_TYPES, CHART_UNITS } from '@/lib/charts/types';
@@ -330,6 +333,61 @@ export const TOOLS: ToolSpec[] = [
       [...RANGE_KEYS, 'entity', 'performed_by'],
     ),
     handler: (ctx, a) => getAuditTrail(ctx, a),
+  },
+  {
+    name: 'list_policies',
+    description:
+      'Every policy (scheme) and what it sets: monthly hours, hours basis, week offs, '
+      + 'default shift, grace, and which statutory deductions apply. Also says how many '
+      + 'employees are on each, and how many are on none. Use for "what policies exist", '
+      + 'what does a given policy say, and who is on no policy.',
+    parameters: schema({}, []),
+    handler: ctx => listPoliciesTool(ctx),
+  },
+  {
+    name: 'get_employee_policy',
+    description:
+      'Which policy one employee is on, with the full history of what they were on before. '
+      + 'Also reports the shift they are ACTUALLY rostered on beside the one their policy '
+      + 'names, because those two disagreeing is the commonest confusion: the schedule '
+      + 'decides what is worked and judged, the policy default does not. Call '
+      + 'resolve_employee first to get the id.',
+    parameters: schema({ employee_id: { type: 'integer' } }, ['employee_id']),
+    handler: (ctx, a) => getEmployeePolicyTool(ctx, { employee_id: Number(a.employee_id) }),
+  },
+  {
+    name: 'get_performance_scores',
+    description:
+      'Performance scores for a period, ranked: attendance, punctuality and hours delivered, '
+      + 'weighted by the policy each employee is on. Use for best performers, who scored '
+      + 'highest, rank the team, how did X perform. '
+      + 'IMPORTANT: a null punctuality or null '
+      + 'late_days means lateness COULD NOT BE MEASURED (flexible shift) — report it as not '
+      + 'measured, never as zero and never as a clean record.',
+    parameters: schema(
+      {
+        policy_id: { type: ['integer', 'null'], description: 'Rank only people on this policy.' },
+        ...RANGE_PROPS,
+      },
+      ['policy_id', ...RANGE_KEYS],
+    ),
+    handler: (ctx, a) => getPerformanceTool(ctx, {
+      policy_id: a.policy_id === undefined ? undefined : Number(a.policy_id),
+      preset: a.preset as never,
+      from_date: a.from_date as string | undefined,
+      to_date: a.to_date as string | undefined,
+    }),
+  },  {
+    name: 'get_document_compliance',
+    description:
+      'Which employees are missing required documents (Aadhaar, PAN, government ID and so '
+      + 'on). What each person must hold is derived from the statutory flags on their policy. '
+      + 'Use for who is missing documents, document compliance, has everyone given PAN.',
+    parameters: schema(
+      { only_incomplete: { type: ['boolean', 'null'], description: 'Only people with something missing.' } },
+      ['only_incomplete'],
+    ),
+    handler: (ctx, a) => getDocumentComplianceTool(ctx, { only_incomplete: Boolean(a.only_incomplete) }),
   },
   {
     name: 'build_chart',

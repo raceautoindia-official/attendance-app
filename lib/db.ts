@@ -4,7 +4,21 @@ import './env';
 
 import mysql from 'mysql2/promise';
 
-const pool = mysql.createPool({
+/**
+ * In development Next.js re-evaluates a module on every hot reload. Calling
+ * createPool at module scope therefore builds a NEW pool of connectionLimit
+ * sockets each time and abandons the previous one, which still holds its
+ * connections open. An afternoon of editing exhausts MySQL's max_connections
+ * and the app starts failing with ER_CON_COUNT_ERROR for reasons nothing in
+ * the code suggests.
+ *
+ * Production never hits this - the module is instantiated once and there is no
+ * HMR - so the pool is cached on globalThis only outside production, leaving
+ * the production path exactly as it was.
+ */
+const globalForDb = globalThis as unknown as { __attendancePool?: mysql.Pool };
+
+const pool = globalForDb.__attendancePool ?? mysql.createPool({
   host: process.env.DB_HOST ?? 'localhost',
   port: Number(process.env.DB_PORT) || 3306,
   user: process.env.DB_USER,
@@ -18,6 +32,8 @@ const pool = mysql.createPool({
   // Always read/write as UTC — the app layer handles IST conversion
   timezone: '+00:00',
 });
+
+if (process.env.NODE_ENV !== 'production') globalForDb.__attendancePool = pool;
 
 // Verify connectivity at startup (non-fatal — the pool retries on first use).
 pool

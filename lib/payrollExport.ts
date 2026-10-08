@@ -35,6 +35,10 @@ export interface PayrollRow {
   name: string;
   department: string | null;
   shift: string;
+  /** The rule set in force, or "none" — payroll needs to know which applied. */
+  policy: string;
+  /** Which statutory deductions that policy says apply to this person. */
+  statutory: string;
   /** Minutes, so the checksum is over integers rather than formatted strings. */
   required_minutes: number;
   worked_minutes: number;
@@ -91,6 +95,11 @@ function digest(rows: PayrollRow[]): string {
       r.shortage_minutes, r.overtime_minutes, r.net_minutes,
       r.working_days, r.days_present, r.days_late, r.days_absent,
       r.leave_days, r.holiday_days, r.week_off_days, r.late_minutes,
+      // Policy name and statutory flags are deliberately NOT in the digest.
+      // The checksum answers "are these the same FIGURES", and renaming a
+      // policy or ticking a box that changes no hours must not make a filed
+      // pack look falsified. Anything that does move an hour moves a figure
+      // above, and the digest catches it there.
     ].join('|'))
     .join('\n');
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
@@ -121,6 +130,8 @@ export async function buildPayrollPack(month: string): Promise<PayrollPack> {
       name: l.employee.name,
       department: l.employee.department,
       shift: l.policy.shift_names.join(' + ') || 'none',
+      policy: l.assigned_policy ? `${l.assigned_policy.name} (${l.assigned_policy.code})` : 'none',
+      statutory: l.assigned_policy?.statutory.join(', ') || '—',
       required_minutes: t.required_minutes,
       worked_minutes: t.worked_minutes,
       permission_minutes: t.permission_minutes,
@@ -209,6 +220,8 @@ const COLUMNS: Array<[keyof PayrollRow | 'blank', string, 'text' | 'minutes' | '
   ['name', 'Name', 'text'],
   ['department', 'Department', 'text'],
   ['shift', 'Shift', 'text'],
+  ['policy', 'Policy', 'text'],
+  ['statutory', 'Statutory', 'text'],
   ['working_days', 'Working days', 'number'],
   ['required_minutes', 'Required', 'minutes'],
   ['worked_minutes', 'Worked', 'minutes'],

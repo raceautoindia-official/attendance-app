@@ -6,6 +6,8 @@ import { getWorkDateIST } from '@/lib/attendance';
 import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from '@/lib/constants';
 import { hasBankColumns, bankSelect, hasWorkModeColumns, workModeSelect } from '@/lib/employeeDetails';
 import type { ApiResponse, Employee } from '@/lib/types';
+import { getPolicy, assignPolicy } from '@/lib/policy';
+import { toYmd } from '@/lib/date';
 
 async function hasLiveTrackingColumn() {
   const row = await queryOne<{ c: number }>(
@@ -48,6 +50,7 @@ const CreateEmployeeSchema = z.object({
   work_mode: z.enum(['on_site', 'off_site']).optional().default('on_site'),
   allow_multiple_sessions: z.boolean().optional().default(false),
   schedule_effective_from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  policy_id: z.number().int().positive().nullable().optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -208,6 +211,7 @@ export async function POST(request: NextRequest) {
     emp_id, name, email, phone, department, pin, role, manager_id,
     shift_id, location_id, geofencing_enabled, live_tracking_enabled,
     work_mode, allow_multiple_sessions, schedule_effective_from,
+    policy_id,
   } = parsed.data;
   const [liveTrackingColExists, workModeColsPresent] = await Promise.all([
     hasLiveTrackingColumn(),
@@ -258,6 +262,25 @@ export async function POST(request: NextRequest) {
       );
     }
   }
+  // A policy names the shift its scheme assumes. When the admin picks a policy
+  // and no shift, that is the shift they mean - and creating the employee
+  // without one would leave somebody with a policy, no roster, and no hours
+  // requirement at all.
+  let resolvedShiftId: number | null = shift_id ?? null;
+  let policyShiftNote: string | null = null;
+  if (!resolvedShiftId && policy_id) {
+    const p = await getPolicy(policy_id);
+    if (!p) {
+      return NextResponse.json<ApiResponse>(
+        { success: false, error: 'No such policy' }, { status: 400 },
+      );
+    }
+    if (p.default_shift_id) {
+      resolvedShiftId = p.default_shift_id;
+      policyShiftNote = `Shift taken from policy "${p.name}".`;
+    }
+  }
+
   if (shift_id && !schedule_effective_from) {
     return NextResponse.json<ApiResponse>(
       { success: false, error: 'schedule_effective_from is required when assigning a shift' },
@@ -287,20 +310,40 @@ export async function POST(request: NextRequest) {
   );
   const insertId = (result as unknown as { insertId: number }).insertId;
 
-  if (shift_id && schedule_effective_from) {
+  const scheduleFrom = schedule_effective_from ?? toYmd(new Date());
+  if (resolvedShiftId) {
     await query(
       `INSERT INTO employee_schedules
        (employee_id, shift_id, location_id, geofencing_enabled, effective_from, assigned_by)
        VALUES (?, ?, ?, ?, ?, ?)`,
       [
         insertId,
-        shift_id,
+        resolvedShiftId,
         location_id ?? null,
         location_id ? (geofencing_enabled ? 1 : 0) : 0,
-        schedule_effective_from,
+        scheduleFrom,
         auth.id,
       ],
     );
+  }
+
+  // The policy goes on AFTER the schedule, so the shift it named is already in
+  // force on the date the assignment starts - otherwise the first thing the
+  // ledger sees is a policy whose default shift disagrees with a roster that
+  // does not exist yet. Non-fatal: an employee who exists without a policy is
+  // an ordinary state, one the Policies page can correct.
+  let policyWarning: string | null = null;
+  if (policy_id) {
+    try {
+      await assignPolicy({
+        employeeId: insertId, policyId: policy_id, effectiveFrom: scheduleFrom,
+        by: auth.id,
+        ip: request.headers.get('x-forwarded-for')?.split(',')[0].trim() ?? null,
+      });
+    } catch (err) {
+      policyWarning = `The employee was created, but the policy was not applied: ${(err as Error).message}`;
+      console.error('[employees] policy assignment failed:', err);
+    }
   }
 
   // Auto-grant a PIN exemption so the new employee can sign in with their PIN
@@ -333,8 +376,17 @@ export async function POST(request: NextRequest) {
     [insertId],
   );
 
-  return NextResponse.json<ApiResponse<Employee>>(
-    { success: true, data: employee! },
+  // Both notes are carried back rather than swallowed: 'which shift did this
+  // person end up on' and 'did the policy actually apply' are the two things
+  // somebody wants to know right after pressing Create.
+  return NextResponse.json<ApiResponse<Employee & { notes?: string[] }>>(
+    {
+      success: true,
+      data: {
+        ...employee!,
+        notes: [policyShiftNote, policyWarning].filter(Boolean) as string[],
+      },
+    },
     { status: 201 },
   );
 }
