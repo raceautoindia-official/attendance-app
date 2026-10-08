@@ -147,6 +147,17 @@ function weekday(ymd: string) {
  * dropped the parameters would technically work and would still have lost the
  * reader their place.
  */
+/** The columns that answer "how did everybody do over this period". */
+const CORE_COLUMNS = new Set([
+  'name',
+  'working_days',
+  'total_days_present',
+  'total_days_absent',
+  'total_days_late',
+  'total_minutes_worked',
+  'attendance_percentage',
+]);
+
 export default function ReportsPage() {
   return (
     <Suspense fallback={<Card><div className="flex justify-center py-10"><Spinner /></div></Card>}>
@@ -198,7 +209,6 @@ function ReportsPageInner() {
     return toDate === `${ym}-${String(last).padStart(2, '0')}` ? ym : '';
   }, [fromDate, toDate]);
   const [employeeId, setEmployeeId] = useState('');
-  const [empSearch, setEmpSearch] = useState('');
   const [page, setPage] = useState(1);
   const [exporting, setExporting] = useState<'csv' | 'pdf' | 'excel' | null>(null);
   const [drillDown, setDrillDown] = useState<DrillDown | null>(null);
@@ -206,6 +216,12 @@ function ReportsPageInner() {
   // Whose day-by-day detail is open. This is what replaced the separate
   // Working Hours page: the same question, answered without a second screen
   // carrying its own employee picker and its own date range to keep in step.
+  // Seventeen columns is not a report, it is a spreadsheet nobody reads. Seven
+  // answer the question this view exists for; the rest are the working behind
+  // them and are one click away in the person's own detail, in the exports, and
+  // behind this toggle. Nothing is removed, only folded away by default.
+  const [showAllColumns, setShowAllColumns] = useState(false);
+
   const [openLedger, setOpenLedger] = useState<{ id: number; name: string } | null>(() => {
     const e = Number(searchParams.get('employee'));
     // The name fills in from the table once it loads; the id is what matters.
@@ -349,37 +365,35 @@ function ReportsPageInner() {
     }
   }
 
-  const filteredEmployees = employees.filter(e =>
-    e.name.toLowerCase().includes(empSearch.toLowerCase()) || e.emp_id.includes(empSearch),
+
+  // The period applies to BOTH views and to every export, so it gets a row of
+  // its own above them. Mixed in with the view tabs and the export buttons it
+  // read as one more option among nine, which is how somebody ends up
+  // exporting a different period from the one on screen.
+  const dayCount = Math.max(
+    0,
+    Math.round((Date.parse(toDate) - Date.parse(fromDate)) / 86_400_000) + 1,
   );
+  const periodLabel = fromDate && toDate
+    ? `${format(new Date(fromDate), "d MMM yyyy")} – ${format(new Date(toDate), "d MMM yyyy")}`
+    : "";
 
   return (
     <div className="space-y-4">
-      <div className="flex gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 p-1 w-fit">
-        {([['summary', 'Summary'], ['daily', 'Day-wise']] as const).map(([k, label]) => (
-          <button
-            key={k}
-            onClick={() => setReportView(k)}
-            className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
-              reportView === k
-                ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-sm'
-                : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
-            }`}
-          >
-            {label}
-          </button>
-        ))}
+      <div>
+        <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Reports &amp; Hours</h1>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+          What everybody worked over a period, and what any one person worked day by day.
+          Pick the period once below &mdash; it drives both views and every export.
+        </p>
       </div>
 
-      {/* Filters */}
+      {/* 1. WHEN ------------------------------------------------------- */}
       <Card>
-        <div className="flex flex-wrap gap-4 items-end">
-          {/* Jump to a whole month. The From/To inputs below are unchanged and
-              still accept any range — this only sets them, so every existing
-              way of using this page keeps working. */}
+        <div className="flex flex-wrap items-end gap-3">
           <div className="flex flex-col gap-1">
-            <label className="text-sm font-medium text-slate-700 dark:text-slate-300" htmlFor="month-jump">
-              Month
+            <label className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400" htmlFor="month-jump">
+              Pick a month
             </label>
             <select
               id="month-jump"
@@ -387,104 +401,107 @@ function ReportsPageInner() {
               onChange={e => {
                 const v = e.target.value;
                 if (!v) return;
-                const [y, m] = v.split('-').map(Number);
+                const [y, m] = v.split("-").map(Number);
                 const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
                 setFromDate(`${v}-01`);
-                setToDate(`${v}-${String(last).padStart(2, '0')}`);
+                setToDate(`${v}-${String(last).padStart(2, "0")}`);
                 setPage(1);
               }}
               className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
             >
-              <option value="">Custom range…</option>
+              <option value="">Custom dates…</option>
               {monthOptions.map(m => (
                 <option key={m.value} value={m.value}>{m.label}</option>
               ))}
             </select>
           </div>
 
-          <Input label="From" type="date" value={fromDate} onChange={e => { setFromDate(e.target.value); setPage(1); }} className="w-36" />
-          <Input label="To" type="date" value={toDate} onChange={e => { setToDate(e.target.value); setPage(1); }} className="w-36" />
+          <span className="pb-2.5 text-xs text-slate-400">or</span>
 
-          <div className="flex flex-col gap-1">
-            <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Employee (optional)</label>
-            <div className="flex gap-2">
-              <Input
-                placeholder="Search…"
-                value={empSearch}
-                onChange={e => setEmpSearch(e.target.value)}
-                className="w-40"
-              />
-              <select
-                value={employeeId}
-                onChange={e => { setEmployeeId(e.target.value); setPage(1); }}
-                className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-48"
-              >
-                <option value="">All employees</option>
-                {filteredEmployees.map(e => (
-                  <option key={e.id} value={e.id}>{e.name} ({e.emp_id})</option>
-                ))}
-              </select>
-            </div>
-          </div>
+          <Input label="From" type="date" value={fromDate}
+            onChange={e => { setFromDate(e.target.value); setPage(1); }} className="w-36" />
+          <Input label="To" type="date" value={toDate}
+            onChange={e => { setToDate(e.target.value); setPage(1); }} className="w-36" />
 
-          <div className="flex gap-2 sm:ml-auto">
-            {/* Matches what's on screen in the Summary tab — one row per
-                employee, same columns (minus Leave, see summary-xlsx's own
-                note). The day-wise CSV/PDF exports below are a different
-                shape (one row per employee per day) and stay available in
-                both tabs. */}
-            {reportView === 'summary' && (
-              <Button
-                variant="secondary"
-                loading={exporting === 'excel'}
-                onClick={() => downloadFile('excel')}
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                </svg>
-                Export Excel
-              </Button>
-            )}
-            <Button
-              variant="secondary"
-              loading={exporting === 'csv'}
-              onClick={() => downloadFile('csv')}
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-              </svg>
-              Export CSV
-            </Button>
-            <Button
-              variant="secondary"
-              loading={exporting === 'pdf'}
-              onClick={() => downloadFile('pdf')}
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
-              </svg>
-              Export PDF
-            </Button>
+          {/* Says back what was chosen. The two controls above can disagree
+              with what somebody thinks they picked; this cannot. */}
+          <div className="ml-auto pb-1 text-right">
+            <p className="text-sm font-medium text-slate-800 dark:text-slate-200">{periodLabel}</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {dayCount} day{dayCount === 1 ? "" : "s"}
+            </p>
           </div>
         </div>
       </Card>
 
+      {/* 2. WHAT TO SHOW, and what to take away ------------------------ */}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
+          {([["summary", "Everyone"], ["daily", "Day by day"]] as const).map(([k, label]) => (
+            <button
+              key={k}
+              onClick={() => { setReportView(k); setOpenLedger(null); }}
+              className={`rounded-md px-4 py-1.5 text-sm font-medium transition-colors ${
+                reportView === k
+                  ? "bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100"
+                  : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {/* One control, not a search box AND a dropdown for the same job.
+            Native selects already jump as you type. */}
+        <select
+          value={employeeId}
+          onChange={e => { setEmployeeId(e.target.value); setPage(1); }}
+          className="h-9 rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+          aria-label="Limit to one person"
+        >
+          <option value="">Everyone</option>
+          {employees.map(e => (
+            <option key={e.id} value={e.id}>{e.name} ({e.emp_id})</option>
+          ))}
+        </select>
+
+        <div className="ml-auto flex items-center gap-2">
+          <span className="text-xs text-slate-400">Download</span>
+          {reportView === "summary" && (
+            <Button variant="secondary" loading={exporting === "excel"}
+              onClick={() => downloadFile("excel")}>Excel</Button>
+          )}
+          <Button variant="secondary" loading={exporting === "csv"}
+            onClick={() => downloadFile("csv")}>CSV</Button>
+          <Button variant="secondary" loading={exporting === "pdf"}
+            onClick={() => downloadFile("pdf")}>PDF</Button>
+        </div>
+      </div>
       {/* One person, day by day — the whole of what the Working Hours page used
           to be, opened from the row rather than on a screen of its own. It
           inherits the period above, so there is no second date picker that can
           disagree with the table it was opened from. */}
       {openLedger && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2.5 dark:border-blue-900/50 dark:bg-blue-950/40">
-            <p className="text-sm text-blue-900 dark:text-blue-200">
-              Showing <strong>{openLedger.name}</strong> day by day, for the period above.
-            </p>
+          {/* Reads as "you are here", not as a notification. The way back is a
+              button on the left where a back control is looked for, not a link
+              buried at the end of a sentence. */}
+          <div className="flex items-center gap-3">
             <button
               onClick={() => setOpenLedger(null)}
-              className="shrink-0 text-xs font-medium text-blue-800 underline dark:text-blue-300"
+              className="flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
             >
-              Back to everyone
+              <span aria-hidden="true">&larr;</span> Everyone
             </button>
+            <div className="min-w-0">
+              <h2 className="truncate text-lg font-semibold text-slate-900 dark:text-white">
+                {openLedger.name}
+              </h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Day by day, {periodLabel}
+              </p>
+            </div>
           </div>
           <EmployeeLedger
             employeeId={openLedger.id}
@@ -492,9 +509,7 @@ function ReportsPageInner() {
           />
         </div>
       )}
-
-      {/* Summary table */}
-      {reportView === 'daily' && (
+      {!openLedger && reportView === 'daily' && (
         dailyLoading ? (
           <div className="flex justify-center py-12"><Spinner /></div>
         ) : (
@@ -652,7 +667,7 @@ function ReportsPageInner() {
         )
       )}
 
-      {reportView === 'summary' && (isLoading ? (
+      {!openLedger && reportView === 'summary' && (isLoading ? (
         <div className="flex justify-center py-12"><Spinner /></div>
       ) : (
         <>
@@ -718,11 +733,17 @@ function ReportsPageInner() {
             </div>
           </Card>
 
-          {/* What the status columns below actually mean. */}
+          {/* Collapsed by default. It explains the one genuinely confusable
+              pair in this report — Absent is unexplained, Leave is approved —
+              but held open it was six definitions standing between the reader
+              and the data they came for. */}
           <Card>
-            <h3 className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-3">
-              How to read this report
-            </h3>
+            <details className="group">
+              <summary className="cursor-pointer list-none text-xs font-semibold uppercase tracking-wide text-slate-500 marker:content-[''] hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200">
+                <span className="inline-block transition-transform group-open:rotate-90">&rsaquo;</span>
+                {" "}What these columns mean
+              </summary>
+              <div className="mt-3">
             <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-3 text-sm">
               {([
                 ['Present', 'Clocked in on a working day and the day was completed.'],
@@ -743,9 +764,28 @@ function ReportsPageInner() {
               {' '}<span className="font-medium">Leave</span> is an approved one. Working days exclude
               weekly offs and company holidays, so neither is counted against those.
             </p>
+              </div>
+            </details>
           </Card>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Click anyone&rsquo;s name to see their days, hours and any shortfall for this period.
+            </p>
+            {/* Sits beside the table it changes, so somebody hunting for a
+                column they remember finds the way to it rather than
+                concluding it was taken away. */}
+            <button
+              onClick={() => setShowAllColumns(v => !v)}
+              className="text-xs font-medium text-blue-600 underline decoration-dotted underline-offset-2 hover:decoration-solid dark:text-blue-400"
+            >
+              {showAllColumns
+                ? "Show fewer columns"
+                : "Show all columns (calendar breakdown, permission, overtime, expected)"}
+            </button>
+          </div>
           <Table
-            columns={[
+            columns={([
               {
                 key: 'name',
                 header: 'Employee',
@@ -1005,7 +1045,7 @@ function ReportsPageInner() {
                   return <span className={`font-semibold tabular-nums ${tone}`}>{pct}%</span>;
                 },
               },
-            ]}
+            ] as Array<{ key: string; header: string; render: (r: unknown) => React.ReactNode }>).filter(c => showAllColumns || CORE_COLUMNS.has(c.key))}
             data={summary as object[]}
             emptyMessage="No data for the selected period."
           />
