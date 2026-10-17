@@ -79,7 +79,11 @@ const call = async (p, body) => {
   check('the first stretch is banked, not lost', Number(a.banked_minutes) >= 0 && a.banked_minutes != null,
     a.banked_minutes);
 
-  console.log('\n2. Single-session employee: the trap');
+  // This used to be "the trap": the fence closed a single-session day and the
+  // server refused every way back, so a false closure cost the rest of the
+  // day. A day the SYSTEM closed now re-opens from inside the fence; a day the
+  // employee closed still does not.
+  console.log('\n2. Single-session employee: a fence closure is not the end of the day');
   await setup(false);
   r = await call('/api/attendance/clock-in', INSIDE);
   check('first clock-in works', r.status === 201, r.status);
@@ -87,8 +91,14 @@ const call = async (p, body) => {
   check('leaving still clocks them out', r.status === 200, r.status);
   r = await call('/api/attendance/clock-in', { ...INSIDE, auto: true });
   console.log(`   auto clock-in on return: ${r.status} "${r.json.error ?? ''}"`);
-  check('the server refuses to reopen the day', r.status === 409, r.status);
-  check('and says why, so the phone can tell them',
+  check('returning re-opens the day the fence closed', r.status === 201, `${r.status} ${r.json.error ?? ''}`);
+  a = await row();
+  check('the first stretch is banked, not lost', a.banked_minutes != null, a.banked_minutes);
+  r = await call('/api/attendance/clock-out', INSIDE);
+  check('a manual clock-out ends it', r.status === 200, r.status);
+  r = await call('/api/attendance/clock-in', { ...INSIDE, auto: true });
+  check('and THAT closure the server refuses to reopen', r.status === 409, r.status);
+  check('saying why, so the phone can tell them',
     /completed/i.test(r.json.error ?? ''), r.json.error);
 
   console.log('\n3. The phone reports that refusal instead of hiding it');

@@ -24,7 +24,11 @@ for (const l of fs.readFileSync(path.join(ROOT, '.env.local'), 'utf8').split(/\r
 const BASE = process.env.TEST_BASE_URL || 'http://localhost:3123';
 const UA = 'okhttp/4.9.2 AttendanceApp Android';
 const DEVICE = 'journey-phone';
-const EMP = 6, EMP_ID = 'REENA001', PIN = '4321';
+const EMP = 6, PIN = '4321';
+// Read from the database, not written here: employee codes change when the
+// database is refreshed from production (6 was REENA001, then RACE001), and a
+// stale code failed the whole journey at sign-in with "Invalid credentials".
+let EMP_ID;
 
 let pass = 0, fail = 0;
 const check = (l, c, d) => c ? (pass++, console.log(`  PASS  ${l}`)) : (fail++, console.log(`  FAIL  ${l}${d !== undefined ? ` — ${d}` : ''}`));
@@ -53,7 +57,8 @@ const get = async (p) => {
   const [origSched] = await c.query(
     'SELECT id,shift_id,location_id,geofencing_enabled,effective_from,effective_to,assigned_by FROM employee_schedules WHERE employee_id=?', [EMP]);
   const [[origEmp]] = await c.query(
-    'SELECT pin_hash, work_mode, live_tracking_enabled, allow_multiple_sessions FROM employees WHERE id=?', [EMP]);
+    'SELECT emp_id, pin_hash, work_mode, live_tracking_enabled, allow_multiple_sessions FROM employees WHERE id=?', [EMP]);
+  EMP_ID = origEmp.emp_id;
   const [[site]] = await c.query('SELECT id, latitude, longitude FROM locations WHERE is_active=TRUE LIMIT 1');
   const INSIDE = { latitude: Number(site.latitude), longitude: Number(site.longitude) };
   const AWAY = { latitude: 28.6139, longitude: 77.2090 };

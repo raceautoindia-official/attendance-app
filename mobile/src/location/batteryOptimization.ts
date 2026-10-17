@@ -1,7 +1,7 @@
 import * as IntentLauncher from 'expo-intent-launcher';
 import { Platform } from 'react-native';
 
-const PACKAGE = 'com.attendance.app';
+export const PACKAGE = 'com.attendance.app';
 
 // Opens the system "ignore battery optimization" dialog (one tap "Allow").
 // This is what keeps the foreground tracking service alive when the screen is

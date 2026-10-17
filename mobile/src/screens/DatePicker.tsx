@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Modal, View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { colors } from '../theme';
 
@@ -35,6 +35,14 @@ export default function DatePicker({ visible, value, minYmd, onPick, onClose }: 
   const initM = parsed ? Number(parsed[2]) - 1 : new Date().getMonth();
   const [viewY, setViewY] = useState(initY);
   const [viewM, setViewM] = useState(initM);
+  // Open on the SELECTED date's month every time. The view was set once, when
+  // the form mounted, so after picking a date in another month — or browsing
+  // and cancelling — the calendar reopened somewhere else.
+  useEffect(() => {
+    if (!visible) return;
+    setViewY(initY);
+    setViewM(initM);
+  }, [visible, initY, initM]);
 
   const daysInMonth = new Date(viewY, viewM + 1, 0).getDate();
   const firstWeekday = new Date(viewY, viewM, 1).getDay(); // Sun = 0

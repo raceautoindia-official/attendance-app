@@ -93,6 +93,8 @@ ship.
 | `forgotpin.js` | emailed PIN reset — a real and an invented employee ID answer identically, only the token hash is stored, a link works once and expires, and the new PIN logs in |
 | `timeline.js` | one employee day as an ordered story — clock events, decisions and exceptions narrated; self and manager may read, a colleague may not; the newest events survive a busy day |
 | `permnotify.js` | an approved or rejected permission reaches the employee — the decision rides /today (which the phone already polls) and the phone announces each verdict exactly once |
+| `pushnotify.js` | notifications reach a phone with the app closed — the server pushes a decision straight to Firebase at once (right phone, app channel, high priority, string data), counts it delivered only when Firebase accepted it, drops dead addresses, never throws into the approval (no key, revoked key, no network); and the phone announces each decision exactly once. Offline: no server needed |
+| `refreshgrace.js` | a login renewal that cannot get through (no signal, a 502) keeps the session, and a renewal whose reply was lost can be repeated — the phone used to log itself out, and tracking uploaded nothing for the rest of the day. Offline: no server needed |
 | `enablerollout.js` | `enable_auto_logout.sql` is a dry run until told otherwise, and never arms a phone that is not reporting — the mistake that would have cost six people about seven hours each |
 
 ## Writing another one

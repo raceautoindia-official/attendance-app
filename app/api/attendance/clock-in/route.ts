@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
+import { zBool } from '@/lib/zodFields';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import { isWithinGeofence, haversineDistance } from '@/lib/geo';
@@ -41,10 +42,10 @@ const ClockInSchema = z.object({
   longitude: z.number({ error: 'longitude must be a number' }),
   // True when the phone's geofence auto-attendance performed this action
   // (re-entering the work site) rather than the employee tapping the button.
-  auto: z.boolean().optional(),
+  auto: zBool.optional(),
   // Android tells us when a fix came from a mock-location app — see
   // lib/locationTrust.ts. Absent on older builds, which are simply not checked.
-  is_mocked: z.boolean().optional(),
+  is_mocked: zBool.optional(),
   accuracy_m: z.number().nullable().optional(),
   // out_of_fence_reason used to live here: the phone asked why, after a refusal,
   // and the sentence got the employee in. It is gone. Outside the fence is
@@ -259,8 +260,19 @@ export async function POST(request: NextRequest) {
   // The bypass also requires the banking columns: in a half-migrated database
   // (employees ALTER ran, attendance ALTER did not) re-opening would silently
   // destroy the completed session, so refuse instead.
+  //
+  // A day the SYSTEM closed is not a day the employee finished. The fence
+  // watchdog and the phone's away-from-site rule both end sessions on their
+  // own, and both can be wrong — a phone that stops reporting looked exactly
+  // like someone who left. For a single-session account that used to be final:
+  // the auto clock-in on return got this 409, so did the employee tapping Clock
+  // In at their desk, and every hour after the false closure was simply lost.
+  // So an automatically-closed day re-opens like a multi-session one, minutes
+  // banked. Being inside the fence is still checked below, so this is a way
+  // back onto the clock from the site and nowhere else.
   const completedToday = !!(existing?.clock_in_utc && existing?.clock_out_utc);
-  if (completedToday && !(allowMultipleSessions && sessionCols)) {
+  const autoClosed = completedToday && existing ? !!(await lastFenceClosure(existing.id)) : false;
+  if (completedToday && !((allowMultipleSessions || autoClosed) && sessionCols)) {
     return NextResponse.json<ApiResponse>(
       { success: false, error: 'Attendance already completed for today' },
       { status: 409 },

@@ -119,9 +119,15 @@ const north = (lat, m) => lat + m / 111320;
 
   console.log('\n6. A wildly inaccurate fix cannot vouch from far away');
   // 25 m out with a claimed accuracy of 500 m: the allowance is capped at the
-  // fence, so this can excuse at most 10 m and still counts as outside.
+  // fence, so this can excuse at most 10 m — it does NOT count as presence.
+  //
+  // Nor is it evidence of leaving: a fix that could be anywhere within 500 m
+  // proves nothing about where they went, and ending days on readings like it
+  // is what clocked people out at their desks. So the day is left open and
+  // REPORTED. (This case expected a clock-out, which it had not produced since
+  // the watchdog stopped ending days on silence alone; it now pins both halves.)
   await wipe();
-  await c.query(
+  const [fuzzyRow] = await c.query(
     `INSERT INTO attendance (employee_id, work_date, clock_in_utc, status, banked_minutes, session_count)
      VALUES (?, ?, ?, 'present', 0, 1)`, [EMP, wd.d, ago(120)]);
   const [sess3] = await c.query(
@@ -134,8 +140,18 @@ const north = (lat, m) => lat + m / 111320;
     { method: 'POST', headers: { 'x-cron-secret': process.env.CRON_SECRET || 'test-cron-secret-local-only' } });
   const [[fuzzy]] = await c.query(
     'SELECT clock_out_utc FROM attendance WHERE employee_id=? AND work_date=?', [EMP, wd.d]);
-  check('a 500 m accuracy claim does not excuse being 25 m out',
-    fuzzy?.clock_out_utc != null, fuzzy?.clock_out_utc);
+  // Had the fix vouched for them, the sweep would have seen presence a minute
+  // ago and moved on without a word. The report proves it did not.
+  const [[report]] = await c.query(
+    `SELECT COUNT(*) AS n FROM audit_log
+      WHERE action = 'geofence_presence_unverifiable' AND entity = 'attendance' AND entity_id = ?`,
+    [fuzzyRow.insertId]);
+  check('a 500 m accuracy claim does not vouch for being inside',
+    Number(report?.n) > 0, `${report?.n} unverifiable reports`);
+  check('nor does one vague fix end the day', fuzzy?.clock_out_utc == null, fuzzy?.clock_out_utc);
+  await c.query(
+    `DELETE FROM audit_log WHERE action = 'geofence_presence_unverifiable' AND entity = 'attendance' AND entity_id = ?`,
+    [fuzzyRow.insertId]);
 
   // Restore
   await wipe();

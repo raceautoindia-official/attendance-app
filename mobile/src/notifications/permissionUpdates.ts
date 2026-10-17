@@ -30,6 +30,40 @@ export interface PermissionUpdate {
   end_time: string;
   status: string;          // approved | rejected
   review_notes: string | null;
+  /** Already delivered to this phone by push (see notifications/push.ts). */
+  pushed?: boolean;
+}
+
+/** Decision ids carried by pushes this phone has received. A push and this
+ *  module's own announcement say the same thing; whichever came first, the
+ *  other must not repeat it. */
+function decisionId(data: unknown): number | null {
+  const d = data as { kind?: unknown; id?: unknown } | null | undefined;
+  if (d?.kind !== 'permission_decision') return null;
+  // Firebase carries every data value as a string.
+  const id = typeof d.id === 'number' ? d.id : Number(d.id);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+/** Record a decision as announced — e.g. a push that arrived while the app was open. */
+export async function markDecisionAnnounced(data: unknown): Promise<void> {
+  const id = decisionId(data);
+  if (id == null) return;
+  const seen = await announced();
+  if (seen.includes(id)) return;
+  seen.push(id);
+  await setState(ANNOUNCED_KEY, JSON.stringify(seen.slice(-MAX_REMEMBERED)));
+}
+
+/** Decisions sitting in the notification tray right now, put there by push. */
+async function decisionsInTray(): Promise<Set<number>> {
+  const shown = await Notifications.getPresentedNotificationsAsync().catch(() => []);
+  const ids = new Set<number>();
+  for (const n of shown) {
+    const id = decisionId(n.request.content.data);
+    if (id != null) ids.add(id);
+  }
+  return ids;
 }
 
 function dmy(ymd: string): string {
@@ -57,7 +91,15 @@ export async function notifyPermissionUpdates(updates: PermissionUpdate[] | unde
   const fresh = updates.filter(u => (u.status === 'approved' || u.status === 'rejected') && !seen.includes(u.id));
   if (!fresh.length) return;
 
+  // Already told by push: confirmed delivered by the server, or in the tray
+  // now. Recorded, not repeated.
+  const inTray = await decisionsInTray();
+
   for (const u of fresh) {
+    if (u.pushed || inTray.has(u.id)) {
+      seen.push(u.id);
+      continue;
+    }
     const kind = u.request_type === 'on_duty' ? 'On-duty request' : 'Permission request';
     const window = `${dmy(u.permission_date)}, ${hhmm(u.start_time)}–${hhmm(u.end_time)}`;
     try {

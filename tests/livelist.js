@@ -35,7 +35,7 @@ const check = (l, c, d) => c
     database: env.DB_NAME, timezone: '+00:00' });
 
   const [[admin]] = await c.query(
-    "SELECT id, emp_id FROM employees WHERE role IN ('super_admin','manager') AND is_active = TRUE ORDER BY FIELD(role,'super_admin','manager'), id LIMIT 1");
+    "SELECT id, emp_id, token_version FROM employees WHERE role IN ('super_admin','manager') AND is_active = TRUE ORDER BY FIELD(role,'super_admin','manager'), id LIMIT 1");
   if (!admin) throw new Error('need an active admin to read the live page as');
   const [staff] = await c.query(
     "SELECT id, emp_id, name FROM employees WHERE is_active = TRUE AND role = 'employee' ORDER BY id LIMIT 2");
@@ -45,7 +45,7 @@ const check = (l, c, d) => c
   console.log(`  quiet phone     : ${QUIET.emp_id} ${QUIET.name}`);
   console.log(`  reporting phone : ${REPORTING.emp_id} ${REPORTING.name}`);
 
-  const adminTok = jwt.sign({ id: admin.id, emp_id: admin.emp_id, role: 'super_admin', tv: 0 },
+  const adminTok = jwt.sign({ id: admin.id, emp_id: admin.emp_id, role: 'super_admin', tv: Number(admin.token_version ?? 0) },
     env.JWT_ACCESS_SECRET, { expiresIn: '30m' });
   const hdrs = { 'Content-Type': 'application/json', Authorization: `Bearer ${adminTok}` };
 

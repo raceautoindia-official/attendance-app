@@ -43,6 +43,7 @@ const jiti = createJiti(__filename, {
     '@/lib/attendance': path.join(ROOT, 'lib', 'attendance.ts'),
     '@/lib/constants': path.join(ROOT, 'lib', 'constants.ts'),
     '@/lib/permissions': path.join(ROOT, 'lib', 'permissions.ts'),
+    '@/lib/push': path.join(ROOT, 'lib', 'push.ts'),
   },
 });
 
@@ -109,12 +110,44 @@ const candidate = () => ({
   check('below the floor, so still not closed', !closedTheDay(), JSON.stringify(db.attendanceUpdates()));
 
   // -------------------------------------------------------------------
-  console.log('\nA real departure: tracked on site for an hour, then gone');
+  console.log('\nTracked on site for an hour, then the phone went quiet');
   // -------------------------------------------------------------------
+  // The standing complaint: "clocked out inside the geofence". A phone whose
+  // tracking is killed mid-shift (battery saver, an OEM task killer) used to
+  // be clocked out 30 minutes later, from the desk it never left.
   db.reset();
   const c4 = candidate();
   db.setCandidate(c4);
   db.setLastInsideFix(new Date(c4.clock_in_utc.getTime() + 60 * 60_000));
+  db.setOutsideFixes(0);
+
+  r = await runLiveTrackingMonitor();
+  check('NOT closed — silence is not leaving, however long it was tracked first',
+    !closedTheDay(), JSON.stringify(db.attendanceUpdates()));
+  check('and reported instead', auditActions().includes('geofence_presence_unverifiable'),
+    JSON.stringify(auditActions()));
+
+  // -------------------------------------------------------------------
+  console.log('\nOne stray fix outside, then quiet');
+  // -------------------------------------------------------------------
+  db.reset();
+  const c5 = candidate();
+  db.setCandidate(c5);
+  db.setLastInsideFix(new Date(c5.clock_in_utc.getTime() + 60 * 60_000));
+  db.setOutsideFixes(1);
+
+  r = await runLiveTrackingMonitor();
+  check('still not closed — one fix is a glitch, not a departure',
+    !closedTheDay(), JSON.stringify(db.attendanceUpdates()));
+
+  // -------------------------------------------------------------------
+  console.log('\nA real departure: tracked on site for an hour, then reporting from outside');
+  // -------------------------------------------------------------------
+  db.reset();
+  const c6 = candidate();
+  db.setCandidate(c6);
+  db.setLastInsideFix(new Date(c6.clock_in_utc.getTime() + 60 * 60_000));
+  db.setOutsideFixes(40);
 
   r = await runLiveTrackingMonitor();
   check('IS closed — the rule still does its job', closedTheDay(), 'no clock-out written');

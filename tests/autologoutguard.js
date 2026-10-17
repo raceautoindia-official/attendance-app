@@ -44,6 +44,7 @@ const jiti = createJiti(__filename, {
     '@/lib/locationTrust': path.join(__dirname, 'stubs', 'permissive.js'),
     '@/lib/mailer': path.join(__dirname, 'stubs', 'permissive.js'),
     '@/lib/employeeDetails': path.join(ROOT, 'lib', 'employeeDetails.ts'),
+    '@/lib/zodFields': path.join(ROOT, 'lib', 'zodFields.ts'),
     '@/lib/attendance': path.join(ROOT, 'lib', 'attendance.ts'),
     '@/lib/constants': path.join(ROOT, 'lib', 'constants.ts'),
     '@/lib/types': path.join(ROOT, 'lib', 'types.ts'),

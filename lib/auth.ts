@@ -2,7 +2,8 @@ import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { NextRequest, NextResponse } from 'next/server';
-import { queryOne } from './db';
+import { query, queryOne } from './db';
+import { forgetPushTokens } from './push';
 import type { ApiResponse, JWTPayload, Role } from './types';
 import {
   ACCESS_TOKEN_COOKIE,
@@ -351,6 +352,21 @@ export async function requireEnrolmentAuth(
 
 /** Invalidate every access token already issued to this employee. */
 export async function revokeTokens(employeeId: number): Promise<void> {
+  // Every session, everywhere — so the REFRESH tokens go too. Bumping the
+  // version alone killed only the access tokens: the next refresh signs a new
+  // one at the current version, so a PIN reset (the one thing someone does
+  // after losing a phone) left the lost phone signed in indefinitely.
+  await query('DELETE FROM refresh_tokens WHERE employee_id = ?', [employeeId]);
+  // And no more pushes to those phones: a lost one should not keep showing
+  // this person's approvals on its lock screen.
+  await forgetPushTokens(employeeId).catch(() => {});
+  if (!(await hasTokenVersionColumn())) return;
+  await queryOne('UPDATE employees SET token_version = token_version + 1 WHERE id = ?', [employeeId]);
+}
+
+/** Expire every ACCESS token at once without ending the sessions behind them:
+ *  each device renews with its own refresh token. See the logout route. */
+export async function expireAccessTokens(employeeId: number): Promise<void> {
   if (!(await hasTokenVersionColumn())) return;
   await queryOne('UPDATE employees SET token_version = token_version + 1 WHERE id = ?', [employeeId]);
 }

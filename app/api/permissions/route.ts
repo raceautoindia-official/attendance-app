@@ -96,7 +96,13 @@ export async function GET(request: NextRequest) {
   const conditions: string[] = [];
   const params: unknown[] = [];
 
-  if (auth.role === 'employee') {
+  // mine=1: the caller's OWN requests, whatever their role — what the phone
+  // shows under "My permissions". By role, a manager's phone listed the team's
+  // requests too, each with a Withdraw button that the server honoured, so a
+  // manager could cancel a subordinate's request believing it was their own.
+  const mine = searchParams.get('mine') === '1';
+
+  if (auth.role === 'employee' || mine) {
     conditions.push('pr.employee_id = ?');
     params.push(auth.id);
   } else if (auth.role === 'manager') {

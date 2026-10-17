@@ -2,9 +2,13 @@ import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import { PermissionsAndroid, Platform } from 'react-native';
 import { apiFetch, ApiError } from '../api/client';
+import { getState, setState } from '../storage/state';
 import { LOCATION_INTERVAL_MS, LOCATION_DISTANCE_M, LOCATION_MAX_QUEUE } from '../config';
 
 export const LOCATION_TASK = 'attendance-background-location';
+/** Owned by geofenceAuto, declared here so this module can ask whether the
+ *  fence is armed without importing it (geofenceAuto imports this one). */
+export const GEOFENCE_TASK = 'attendance-geofence-auto';
 
 interface TrackedPoint {
   latitude: number;
@@ -19,6 +23,80 @@ interface TrackedPoint {
 // service keeps this JS runtime alive, which is exactly the window we track in.
 let pending: TrackedPoint[] = [];
 
+// ---------------------------------------------------------------------------
+// Is tracking ALIVE, not merely registered?
+//
+// isTrackingRunning() asks whether the task is registered, and a registration
+// survives the OS killing the service — battery savers and OEM task killers
+// do exactly that, often. So a phone could report "running" for hours while no
+// fix arrived, nothing restarted it, and the only sign was a gap on the
+// admin's map (and, at the day's end, hours settled at the last fix). The time
+// of the last fix that actually reached this task is the honest signal.
+// ---------------------------------------------------------------------------
+const LAST_FIX_KEY = 'tracking_last_fix_ms';
+/** No fix for this long while tracking should be on means it has died. Six
+ *  missed fixes at the 30-second interval. */
+export const TRACKING_STALE_MS = 3 * 60_000;
+
+/** Milliseconds since the last fix arrived (or since tracking was last
+ *  started), or null when there is no record. */
+export async function lastFixAgeMs(): Promise<number | null> {
+  const at = Number(await getState(LAST_FIX_KEY));
+  return at > 0 ? Date.now() - at : null;
+}
+
+// ---------------------------------------------------------------------------
+// Paused uploads: the shift is closed, but the phone is still watching.
+//
+// After an automatic clock-out the server refuses every upload ("no open
+// shift"), and that refusal used to stop this service on the spot. But the
+// phone is meant to keep watching for the employee's return — doAutoClockOut
+// deliberately leaves the service running for exactly that — and Android 12+
+// will not let a background task start it again. So the clock-in on return
+// found no service, nothing noticed them come back, and tracking was dead for
+// the rest of the shift even when the day did re-open.
+//
+// Now, while the geofence is still armed, that refusal PAUSES uploads instead:
+// fixes keep flowing to the fence listener (which is what notices they are
+// back), one upload is retried every few minutes in case the shift re-opened
+// some other way, and the service stops as soon as the geofence is disarmed.
+// ---------------------------------------------------------------------------
+const PAUSED_PROBE_MS = 5 * 60_000;
+// Watching is GPS, and someone who has genuinely gone home would keep it on
+// until tomorrow. A false closure at the desk is noticed within minutes and a
+// break or errand is over well inside this; after it the OS geofence, which
+// costs nothing, is left to report a return on its own.
+const PAUSED_MAX_WATCH_MS = 2 * 60 * 60_000;
+/** When uploads were paused; 0 while uploading normally. */
+let uploadsPausedAt = 0;
+let lastProbeMs = 0;
+
+/** True while the shift is closed and the service is only watching for a return. */
+export function trackingUploadsPaused(): boolean {
+  return uploadsPausedAt > 0;
+}
+
+async function geofenceArmed(): Promise<boolean> {
+  return Location.hasStartedGeofencingAsync(GEOFENCE_TASK).catch(() => false);
+}
+
+/** The server's "your shift is closed" — as opposed to "tracking is disabled
+ *  for you". The message is matched too, for a server older than the code. */
+function isShiftClosed(err: ApiError): boolean {
+  return err.code === 'no_open_shift' || /not clocked in/i.test(err.message);
+}
+
+/** A 403 on upload: pause if the phone is still watching for a return,
+ *  otherwise there is nothing left to track — stop. */
+async function onUploadRefused(err: ApiError): Promise<void> {
+  if (isShiftClosed(err) && (await geofenceArmed())) {
+    if (!uploadsPausedAt) uploadsPausedAt = Date.now();
+    lastProbeMs = Date.now();
+    return; // these points are dropped: the server would refuse them
+  }
+  await stopBackgroundTracking();
+}
+
 async function pingBatch(points: TrackedPoint[]): Promise<void> {
   await apiFetch('/api/live-tracking/ping', {
     method: 'POST',
@@ -27,6 +105,7 @@ async function pingBatch(points: TrackedPoint[]): Promise<void> {
     // shows all its tracking times shifted on the admin map.
     body: { points, device_now_utc: new Date().toISOString() },
   });
+  uploadsPausedAt = 0; // accepted, so the shift is open — upload normally
 }
 
 // Transient failures (no network, DNS, timeout, server 5xx) are worth
@@ -35,18 +114,33 @@ function shouldRetry(err: unknown): boolean {
   return !(err instanceof ApiError) || err.status >= 500;
 }
 
+// The server takes at most 500 points per upload, and refuses an accuracy
+// figure over 10 km — refusing the WHOLE batch either way, with a 400 that
+// counts as "do not retry". The queue holds 2000, so four hours offline (the
+// outage the queue exists for) ended with the entire saved trail thrown away.
+// Uploads now go oldest-first in pieces the server accepts; what is left waits
+// for the next fix.
+const MAX_POINTS_PER_UPLOAD = 500;
+const MAX_ACCURACY_M = 10_000;
+
 async function sendPoints(fresh: TrackedPoint[]): Promise<void> {
   // Oldest first; drop from the front when over cap so the newest survive.
-  const batch = [...pending, ...fresh].slice(-LOCATION_MAX_QUEUE);
-  pending = [];
+  const queued = [...pending, ...fresh].slice(-LOCATION_MAX_QUEUE).map(p => (
+    p.accuracy_meters != null && p.accuracy_meters > MAX_ACCURACY_M
+      ? { ...p, accuracy_meters: MAX_ACCURACY_M }
+      : p
+  ));
+  const batch = queued.slice(0, MAX_POINTS_PER_UPLOAD);
+  // The rest stays queued, in order, behind this piece.
+  pending = queued.slice(MAX_POINTS_PER_UPLOAD);
   try {
     await pingBatch(batch);
   } catch (err) {
-    // 403 = the shift is over (clocked out / auto-closed at midnight) or the
-    // admin disabled tracking. Kill the service so the phone doesn't keep
-    // reporting location on days the employee never logged in.
+    // 403 = the shift is over (clocked out / auto-closed) or the admin
+    // disabled tracking. See onUploadRefused. Nothing queued will be taken.
     if (err instanceof ApiError && err.status === 403) {
-      await stopBackgroundTracking();
+      pending = [];
+      await onUploadRefused(err);
       return;
     }
     if (err instanceof ApiError && err.status === 404) {
@@ -66,17 +160,23 @@ async function sendPoints(fresh: TrackedPoint[]): Promise<void> {
         await pingBatch(batch);
       } catch (err2) {
         if (err2 instanceof ApiError && err2.status === 403) {
-          await stopBackgroundTracking();
+          pending = [];
+          await onUploadRefused(err2);
           return;
         }
-        if (shouldRetry(err2)) pending = batch;
+        if (shouldRetry(err2)) requeue(batch);
       }
       return;
     }
     // 403 = admin disabled tracking, 401 = session revoked: drop the points.
     // Offline/DNS/timeout and server 5xx are retried with the next fix.
-    if (shouldRetry(err)) pending = batch;
+    if (shouldRetry(err)) requeue(batch);
   }
+}
+
+/** Put a failed piece back at the FRONT, ahead of what was still waiting. */
+function requeue(batch: TrackedPoint[]): void {
+  pending = [...batch, ...pending].slice(-LOCATION_MAX_QUEUE);
 }
 
 // Every fresh fix is also offered to one listener, registered by geofenceAuto
@@ -85,7 +185,7 @@ async function sendPoints(fresh: TrackedPoint[]): Promise<void> {
 // every 30 seconds in the background (the foreground service keeps it alive),
 // and it cannot import geofenceAuto itself — geofenceAuto already imports this
 // module, and completing that circle would make module init order a coin toss.
-type FixListener = (coords: { latitude: number; longitude: number }) => void;
+type FixListener = (fix: { latitude: number; longitude: number; accuracy_meters: number | null }) => void;
 let fixListener: FixListener | null = null;
 export function setFixListener(fn: FixListener): void {
   fixListener = fn;
@@ -105,12 +205,23 @@ TaskManager.defineTask(LOCATION_TASK, async ({ data, error }) => {
     accuracy_meters: loc.coords.accuracy ?? null,
     tracked_at_utc: new Date(loc.timestamp).toISOString(),
   }));
+  void setState(LAST_FIX_KEY, String(Date.now()));
   // The newest fix drives fence-exit enforcement; a listener failure must
   // never cost the batch its upload.
   try {
     fixListener?.(points[points.length - 1]);
   } catch {
     // enforcement is retried on the next fix
+  }
+  if (uploadsPausedAt) {
+    // Watching for a return only while the fence is armed; once it is
+    // disarmed (day genuinely over, logout) nothing is left to watch for.
+    if (!(await geofenceArmed()) || Date.now() - uploadsPausedAt > PAUSED_MAX_WATCH_MS) {
+      await stopBackgroundTracking();
+      return;
+    }
+    if (Date.now() - lastProbeMs < PAUSED_PROBE_MS) return;
+    lastProbeMs = Date.now();
   }
   await sendPoints(points);
 });
@@ -131,6 +242,12 @@ async function ensureNotificationPermission(): Promise<void> {
 }
 
 export async function startBackgroundTracking(): Promise<void> {
+  // Every start follows a clock-in, so the shift is open: upload again. Set
+  // before anything that can throw — from a background task the restart below
+  // may be refused, while the service it would restart is still running.
+  uploadsPausedAt = 0;
+  // The staleness clock starts now: the first fix is up to an interval away.
+  await setState(LAST_FIX_KEY, String(Date.now()));
   const fg = await Location.requestForegroundPermissionsAsync();
   if (fg.status !== 'granted') {
     throw new Error('Location permission is required to track attendance.');
@@ -172,6 +289,7 @@ export async function stopBackgroundTracking(): Promise<void> {
   // running after logout. Calling stop when it isn't running just throws, which
   // we swallow, so this reliably kills tracking immediately.
   pending = [];
+  uploadsPausedAt = 0;
   try {
     await Location.stopLocationUpdatesAsync(LOCATION_TASK);
   } catch {

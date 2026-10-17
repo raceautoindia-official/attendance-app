@@ -10,7 +10,7 @@ for (const l of fs.readFileSync(path.join(ROOT, '.env.local'), 'utf8').split(/\r
   const m = l.match(/^([A-Z_]+)=(.*)$/); if (m) env[m[1]] = m[2];
 }
 const BASE = process.env.TEST_BASE_URL || 'http://localhost:3123';
-const EMP = 6; // REENA001
+const EMP = 6; // its emp_id is read from the database — codes change on refresh
 
 let pass = 0, fail = 0;
 const check = (l, c, d) => c ? (pass++, console.log(`  PASS  ${l}`)) : (fail++, console.log(`  FAIL  ${l}${d !== undefined ? ` — ${d}` : ''}`));
@@ -25,7 +25,7 @@ const SQL = fs.readFileSync(path.join(ROOT, 'database', 'why_no_auto_logout.sql'
   const [origSched] = await c.query(
     'SELECT id,shift_id,location_id,geofencing_enabled,effective_from,effective_to,assigned_by FROM employee_schedules WHERE employee_id=?', [EMP]);
   const [[origEmp]] = await c.query(
-    'SELECT work_mode, live_tracking_enabled FROM employees WHERE id=?', [EMP]);
+    'SELECT emp_id, work_mode, live_tracking_enabled FROM employees WHERE id=?', [EMP]);
   const [[site]] = await c.query('SELECT id FROM locations WHERE is_active=TRUE LIMIT 1');
   const [[wd]] = await c.query(
     "SELECT DATE_FORMAT(DATE(DATE_SUB(CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','+05:30'), INTERVAL 7 HOUR)),'%Y-%m-%d') AS d");
@@ -49,8 +49,22 @@ const SQL = fs.readFileSync(path.join(ROOT, 'database', 'why_no_auto_logout.sql'
   const verdict = async () => {
     const res = await c.query(SQL);
     const rows = res[0].filter(r => Array.isArray(r))[0] || [];
-    const mine = rows.find(r => r.emp_id === 'REENA001');
+    const mine = rows.find(r => r.emp_id === origEmp.emp_id);
     return mine ? mine.verdict : '(not listed)';
+  };
+  // The phone keeps reporting — from 2 km away. Positive evidence of leaving,
+  // which the watchdog now requires; silence alone never ends a day.
+  const walkAway = async () => {
+    const [s] = await c.query(
+      'INSERT INTO live_tracking_sessions (employee_id, started_at_utc, is_active) VALUES (?, DATE_SUB(UTC_TIMESTAMP(), INTERVAL 90 MINUTE), TRUE)', [EMP]);
+    const [[loc]] = await c.query(
+      'SELECT l.latitude, l.longitude FROM locations l JOIN employee_schedules es ON es.location_id = l.id WHERE es.employee_id=? LIMIT 1', [EMP]);
+    const base = loc ?? (await c.query('SELECT latitude, longitude FROM locations WHERE id=?', [site.id]))[0][0];
+    for (const m of [20, 15, 10, 5, 1]) {
+      await c.query(
+        'INSERT INTO live_tracking_points (session_id, employee_id, latitude, longitude, accuracy_meters, tracked_at_utc) VALUES (?,?,?,?,10, DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? MINUTE))',
+        [s.insertId, EMP, Number(base.latitude) + 2000 / 111320, base.longitude, m]);
+    }
   };
   const sweep = async () => {
     await fetch(`${BASE}/api/cron/live-tracking-monitor`,
@@ -60,8 +74,9 @@ const SQL = fs.readFileSync(path.join(ROOT, 'database', 'why_no_auto_logout.sql'
     return r?.clock_out_utc != null;
   };
 
-  console.log('\n0. Everything correct — the watchdog SHOULD act');
+  console.log('\n0. Everything correct and reporting from 2 km away — the watchdog SHOULD act');
   await setup();
+  await walkAway();
   let v = await verdict();
   console.log(`   verdict: ${v}`);
   check('report says it would be clocked out', /WOULD BE CLOCKED OUT/.test(v), v);
@@ -78,6 +93,9 @@ const SQL = fs.readFileSync(path.join(ROOT, 'database', 'why_no_auto_logout.sql'
   for (const [label, sql, expect] of cases) {
     console.log(`\n${n++}. Break one thing: ${label}`);
     await setup();
+    // With the evidence of leaving in place, the broken gate is the ONLY
+    // reason left for the watchdog to hold back.
+    await walkAway();
     await c.query(sql, [EMP]);
     v = await verdict();
     console.log(`   verdict: ${v}`);
@@ -106,6 +124,20 @@ const SQL = fs.readFileSync(path.join(ROOT, 'database', 'why_no_auto_logout.sql'
   console.log(`   verdict: ${v}`);
   check('report says presence was confirmed recently', /seen inside the fence recently/.test(v), v);
   check('and the watchdog correctly leaves them clocked in', !(await sweep()));
+
+  console.log('\n7. Seen inside an hour ago, then the phone went quiet');
+  // "Clocked out inside the geofence": tracking killed by the phone mid-shift.
+  await setup();
+  const [sq] = await c.query(
+    'INSERT INTO live_tracking_sessions (employee_id, started_at_utc, is_active) VALUES (?, DATE_SUB(UTC_TIMESTAMP(), INTERVAL 90 MINUTE), TRUE)', [EMP]);
+  const [[home]] = await c.query('SELECT latitude, longitude FROM locations WHERE id=?', [site.id]);
+  await c.query(
+    'INSERT INTO live_tracking_points (session_id, employee_id, latitude, longitude, accuracy_meters, tracked_at_utc) VALUES (?,?,?,?,10, DATE_SUB(UTC_TIMESTAMP(), INTERVAL 60 MINUTE))',
+    [sq.insertId, EMP, home.latitude, home.longitude]);
+  v = await verdict();
+  console.log(`   verdict: ${v}`);
+  check('report says the phone went quiet, not that they left', /phone quiet/.test(v), v);
+  check('and the watchdog leaves them clocked in', !(await sweep()));
 
   // Restore
   await c.query('DELETE FROM attendance WHERE employee_id=?', [EMP]);

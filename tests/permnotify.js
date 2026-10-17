@@ -39,8 +39,8 @@ const empHdrs = { 'Content-Type': 'application/json', 'user-agent': UA, Authoriz
     database: env.DB_NAME, timezone: '+00:00' });
 
   const [[admin]] = await c.query(
-    "SELECT id, emp_id FROM employees WHERE role = 'super_admin' AND is_active = TRUE ORDER BY id LIMIT 1");
-  const adminTok = jwt.sign({ id: admin.id, emp_id: admin.emp_id, role: 'super_admin', tv: 0 },
+    "SELECT id, emp_id, token_version FROM employees WHERE role = 'super_admin' AND is_active = TRUE ORDER BY id LIMIT 1");
+  const adminTok = jwt.sign({ id: admin.id, emp_id: admin.emp_id, role: 'super_admin', tv: Number(admin.token_version ?? 0) },
     env.JWT_ACCESS_SECRET, { expiresIn: '30m' });
   const adminHdrs = { 'Content-Type': 'application/json', Authorization: `Bearer ${adminTok}` };
 
@@ -128,15 +128,25 @@ const empHdrs = { 'Content-Type': 'application/json', 'user-agent': UA, Authoriz
     check('a dedicated background task polls the inbox',
       poller.includes('defineTask(INBOX_TASK') && poller.includes('notifyPermissionUpdates'));
     check('registered when the dashboard loads', dash.includes('void startInboxPoller();'));
-    const logoutStart = dash.indexOf('const handleLogout');
-    // Search for the end FROM the start — an earlier onLogout() call (the
-    // session-expiry path) otherwise yields an empty slice and a false FAIL.
-    const logoutFn = dash.slice(logoutStart, dash.indexOf('onLogout();', logoutStart));
-    check('stopped at logout', logoutFn.includes('stopInboxPoller'));
+    // Stopped by the ONE sign-out cleanup (mobile/src/auth/session.ts), which
+    // App runs whenever the session ends — Sign out on the dashboard, Sign out
+    // on the unlock screen, or a session the server ended. It used to be in the
+    // dashboard's handler only, so a forced logout left it polling.
+    const session = fs.readFileSync(path.join(ROOT, 'mobile/src/auth/session.ts'), 'utf8');
+    const app = fs.readFileSync(path.join(ROOT, 'mobile/App.tsx'), 'utf8');
+    check('stopped at logout', session.includes('stopInboxPoller()')
+      && /authed === false\)[\s\S]{0,300}endLocalSession\(\)/.test(app));
     check('clock-out does NOT stop it — off-shift staff still get verdicts',
-      (dash.match(/stopInboxPoller/g) || []).length === 2 /* import + logout only */);
-    check('it asks for notification permission itself, not only tracking',
-      poller.includes('POST_NOTIFICATIONS'));
+      !dash.includes('stopInboxPoller'));
+    // Asked ONCE, at launch, for everyone — not by the poller as well, which put
+    // a second prompt behind the first — and a phone that refused is told so.
+    const setup = fs.readFileSync(path.join(ROOT, 'mobile/src/notifications/setup.ts'), 'utf8');
+    check('notification permission is asked at launch, not only for tracking',
+      app.includes('initNotifications()') && /initNotifications[\s\S]{0,300}ensureNotificationPermission\(true\)/.test(setup));
+    check('and the dashboard says so when it was refused',
+      dash.includes('checkNotificationHealth') && /notifProblem &&/.test(dash));
+    check('the poller is registered whatever the shift, not inside the tracking effect',
+      /if \(loading\) return;\s*void startInboxPoller\(\);/.test(dash));
 
   } finally {
     await wipe();

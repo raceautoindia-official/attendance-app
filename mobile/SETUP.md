@@ -108,6 +108,50 @@ The app is built to feel instant:
 If you still see slowness on a specific device, it's almost always the network
 round-trip to the API. Keep the backend close (same region) and on HTTPS/HTTP2.
 
+## Push notifications (Firebase) — one-time setup
+
+Without this, the app still shows every notification, but anything that comes
+from the server (a permission approved or rejected, an automatic clock-out)
+reaches a phone only when its owner opens the app. With it, the server pushes
+those the moment they happen, app open or not. Reminders and away-from-site
+warnings are made on the phone and do not depend on it.
+
+The server sends straight to Firebase Cloud Messaging with the project's key —
+no Expo account involved.
+
+**Done already (2026-10-16):** Firebase project `attendance-27e7f`, Android app
+`com.attendance.app`, and its `google-services.json` in `mobile/`, in
+`mobile/android/app/` of the build folder, and named in `app.json`
+(`googleServicesFile`). The Gradle files apply Firebase whenever that file is
+present.
+
+**On the server, once:**
+
+1. Copy the service-account key (Firebase → *Project settings → Service
+   accounts → Generate new private key*, a file like
+   `attendance-27e7f-firebase-adminsdk-….json`) to the server, outside the app
+   folder, readable only by the app's user:
+   ```bash
+   mkdir -p ~/secrets && chmod 700 ~/secrets
+   # upload the file to ~/secrets/, then:
+   chmod 600 ~/secrets/attendance-27e7f-firebase-adminsdk-*.json
+   ```
+   It is a secret: whoever holds it can send notifications as this app. Never
+   commit it, never put it in the app.
+2. Add to the server's `.env`:
+   ```
+   FIREBASE_SERVICE_ACCOUNT_FILE=/home/<user>/secrets/attendance-27e7f-firebase-adminsdk-….json
+   ```
+3. Check it: `node scripts/check-push.js` — signs in to Google with the key and
+   has Firebase validate (not deliver) a test message.
+4. Run `database/migrations/2026-10-16_push_tokens.sql` (check
+   `check-status.sql` first, as always), restart the app, and build the phone
+   app from the build folder.
+
+To confirm: sign in on a phone with the new build, close the app, and approve a
+permission for that employee on the web. The phone should show it within
+seconds. If not, the server log says why (`[push] not delivered: …`).
+
 ## Notes / limits
 
 - This is the **employee** app. Admin stays on the web.

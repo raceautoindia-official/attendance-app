@@ -41,9 +41,9 @@ const north = (lat, m) => lat + m / 111320;
     database: env.DB_NAME, timezone: '+00:00' });
 
   const [[admin]] = await c.query(
-    "SELECT id, emp_id FROM employees WHERE role = 'super_admin' AND is_active = TRUE ORDER BY id LIMIT 1");
+    "SELECT id, emp_id, token_version FROM employees WHERE role = 'super_admin' AND is_active = TRUE ORDER BY id LIMIT 1");
   if (!admin) throw new Error('need an active super_admin');
-  const adminTok = jwt.sign({ id: admin.id, emp_id: admin.emp_id, role: 'super_admin', tv: 0 },
+  const adminTok = jwt.sign({ id: admin.id, emp_id: admin.emp_id, role: 'super_admin', tv: Number(admin.token_version ?? 0) },
     env.JWT_ACCESS_SECRET, { expiresIn: '30m' });
   const adminHdrs = { 'Content-Type': 'application/json', Authorization: `Bearer ${adminTok}` };
 

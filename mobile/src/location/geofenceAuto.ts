@@ -2,7 +2,12 @@ import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import { getState, setState, removeState } from '../storage/state';
 import { apiFetch, ApiError } from '../api/client';
-import { startBackgroundTracking, stopBackgroundTracking, setFixListener } from './tracking';
+import {
+  startBackgroundTracking,
+  setFixListener,
+  trackingUploadsPaused,
+  GEOFENCE_TASK,
+} from './tracking';
 import { scheduleShiftEndReminders, cancelShiftEndReminders } from '../notifications/shiftReminder';
 import { decideFenceExitAction, EXIT_MAX_WARNINGS } from './fenceExitPolicy';
 
@@ -26,7 +31,7 @@ import { decideFenceExitAction, EXIT_MAX_WARNINGS } from './fenceExitPolicy';
 // EXIT circle 150 m larger; the gap is hysteresis so boundary GPS jitter
 // cannot flap attendance.
 
-export const GEOFENCE_TASK = 'attendance-geofence-auto';
+export { GEOFENCE_TASK };
 
 const INNER_ID = 'fence-inner';
 const OUTER_ID = 'fence-outer';
@@ -88,6 +93,37 @@ function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number)
   return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+// ---------------------------------------------------------------------------
+// Inside or outside — judged with the fix's own accuracy, not its bare
+// distance.
+//
+// A position is an estimate: indoors it is routinely 20-80 m out, and the
+// "Balanced" fixes these checks used to take come from Wi-Fi and cell towers
+// and can be off by hundreds. Judging the bare distance against a small fence
+// placed people at their desks outside it — a stray fix started the warnings,
+// the person never measured as "inside" again from indoors so the count never
+// reset, and a few more stray fixes over the day clocked them out. The two
+// tests below lean in opposite directions on purpose: forgiving when deciding
+// someone is still here, demanding when deciding they have gone.
+// ---------------------------------------------------------------------------
+
+/** Inside, giving the fix the benefit of its accuracy — capped at the radius,
+ *  the same allowance the server uses to accept a fix as presence. */
+function confidentlyInside(dist: number, accuracy: number | null, radius: number): boolean {
+  return dist <= radius + Math.min(accuracy ?? 0, radius);
+}
+
+/** Beyond the outer ring even if the fix is off by its whole accuracy. */
+function confidentlyOutside(dist: number, accuracy: number | null, radius: number): boolean {
+  return dist - (accuracy ?? 0) > radius + EXIT_MARGIN_M;
+}
+
+interface Fix {
+  latitude: number;
+  longitude: number;
+  accuracy: number | null;
+}
+
 // Sent through the shared helper: it owns the channel, the foreground handler
 // and the permission check. This module used to create its channel on every
 // single warning — a native round-trip on a path that runs from a background
@@ -112,14 +148,34 @@ async function autoOutPending(): Promise<boolean> {
 }
 
 /** Auto clock-out (site exit). Returns true when the day state changed. */
-async function doAutoClockOut(coords: { latitude: number; longitude: number }): Promise<boolean> {
+async function doAutoClockOut(coords: { latitude: number; longitude: number; accuracy?: number | null }): Promise<boolean> {
   try {
     await apiFetch('/api/attendance/clock-out', {
       method: 'POST',
-      body: { ...coords, auto: true, reason: 'geofence_exit' },
+      body: {
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+        accuracy_m: coords.accuracy ?? null,
+        auto: true,
+        reason: 'geofence_exit',
+      },
     });
     await setState(AUTO_OUT_KEY, '1');
-    await stopBackgroundTracking();
+    // Deliberately NOT stopping the tracking foreground service here. Android
+    // 12+ refuses to start a NEW foreground service from a background
+    // execution context — which is exactly what this callback is — so if
+    // tracking is torn down now, doAutoClockIn()'s restart on re-entry can
+    // silently fail with no user in front of the phone to notice or reopen
+    // the app. Confirmed in production: a real auto clock-in fired correctly,
+    // then live_tracking_points went silent for 3.5+ hours because the
+    // restart never landed.
+    //
+    // Leaving the service running through the "might come back" window avoids
+    // the restart entirely — re-entry just keeps using what is already alive.
+    // The cost is continued GPS use if they do not come back; that is bounded
+    // by the day's own end (midnight settlement / manual logout), and cheaper
+    // than an attendance system that silently stops watching someone the
+    // moment it auto-clocks them back in.
     await cancelShiftEndReminders();
     await notify(
       'Auto clocked out',
@@ -128,17 +184,31 @@ async function doAutoClockOut(coords: { latitude: number; longitude: number }): 
     return true;
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) return true; // already closed elsewhere
+    // 409 = the server declined: geofencing is no longer on for this employee.
+    // Final, not a retry — this used to return false, leave the warning count
+    // at four, and fire another refused clock-out on every 30-second fix until
+    // the employee walked back inside. The fence it was enforcing is gone, so
+    // stop watching it.
+    if (err instanceof ApiError && err.status === 409) {
+      await stopGeofenceAutoMode();
+      return true;
+    }
     if (err instanceof ApiError && err.status === 401) await stopGeofenceAutoMode();
     return false; // network — reconciliation retries
   }
 }
 
 /** Auto clock-in (site re-entry after our own auto clock-out). */
-async function doAutoClockIn(coords: { latitude: number; longitude: number }): Promise<boolean> {
+async function doAutoClockIn(coords: { latitude: number; longitude: number; accuracy?: number | null }): Promise<boolean> {
   try {
     await apiFetch('/api/attendance/clock-in', {
       method: 'POST',
-      body: { ...coords, auto: true },
+      body: {
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+        accuracy_m: coords.accuracy ?? null,
+        auto: true,
+      },
     });
     await removeState(AUTO_OUT_KEY);
     // A new session starts with a clean slate — no warning count carried over
@@ -168,8 +238,15 @@ async function doAutoClockIn(coords: { latitude: number; longitude: number }): P
         await stopGeofenceAutoMode();
         return true;
       }
-      // Otherwise: already clocked in. Nothing to do.
-      await removeState(AUTO_OUT_KEY);
+      if (/already clocked in/i.test(err.message)) {
+        await removeState(AUTO_OUT_KEY);
+        return true;
+      }
+      // Any other 409 (e.g. "your work location has not been set up") is the
+      // server refusing for a reason this phone cannot fix. It used to be read
+      // as "already clocked in" and the pending re-entry quietly dropped;
+      // standing down says the same thing honestly and stops the retries.
+      await stopGeofenceAutoMode();
       return true;
     }
     if (err instanceof ApiError && err.status === 401) await stopGeofenceAutoMode();
@@ -264,21 +341,56 @@ async function progressFenceExit(coords: { latitude: number; longitude: number }
  * permissions, and warning someone who is away with an admin's blessing is
  * exactly the mistake the on-duty feature exists to prevent.
  */
-async function onTrackedFix(coords: { latitude: number; longitude: number }): Promise<void> {
+async function onTrackedFix(fix: Fix): Promise<void> {
   const fence = await storedFence();
   if (!fence) return;
-  const dist = haversineMeters(coords.latitude, coords.longitude, fence.latitude, fence.longitude);
-  if (dist <= fence.radius) {
+  const dist = haversineMeters(fix.latitude, fix.longitude, fence.latitude, fence.longitude);
+
+  // Shift closed, service only watching: this fix is how a return is noticed.
+  if (trackingUploadsPaused()) {
+    await watchForReturn(confidentlyInside(dist, fix.accuracy, fence.radius));
+    return;
+  }
+
+  if (confidentlyInside(dist, fix.accuracy, fence.radius)) {
     await resetFenceExitStrikes(true);
     return;
   }
-  // Inside the hysteresis band: not home, not gone — leave the count alone.
-  if (dist <= fence.radius + EXIT_MARGIN_M) return;
+  // Not clearly gone: leave the count alone. Only a fix that is outside even
+  // allowing for its error may move anyone closer to a clock-out.
+  if (!confidentlyOutside(dist, fix.accuracy, fence.radius)) return;
   const { warnings } = await exitStrikes();
-  if (warnings > 0) await progressFenceExit(coords);
+  if (warnings > 0) await progressFenceExit(fix);
 }
 
-setFixListener(coords => { void onTrackedFix(coords); });
+// How often a watching phone asks the server whether to clock back in. Every
+// fix arrives here (30 s); the question costs a request and a fresh GPS fix,
+// so it is asked often only while the employee looks to be back inside.
+const RETURN_CHECK_INSIDE_MS = 2 * 60_000;
+const RETURN_CHECK_IDLE_MS = 10 * 60_000;
+let lastReturnCheckMs = 0;
+
+/**
+ * Re-entry, noticed from the tracking fixes rather than only from the OS.
+ *
+ * The OS geofence reports a TRANSITION. Someone clocked out while still at
+ * their desk — the false closures this whole module has been fighting — never
+ * leaves the inner circle, so it never reports them entering it, and the auto
+ * clock-in never came. Reconciliation decides (it knows whether the day was
+ * closed for leaving and does the strict distance check); this only decides
+ * when to ask. The idle checks are also what notices the day is genuinely
+ * over, disarms the fence and so lets the paused service stop.
+ */
+async function watchForReturn(looksInside: boolean): Promise<void> {
+  const gap = looksInside ? RETURN_CHECK_INSIDE_MS : RETURN_CHECK_IDLE_MS;
+  if (Date.now() - lastReturnCheckMs < gap) return;
+  lastReturnCheckMs = Date.now();
+  await reconcileGeofenceAttendance().catch(() => {});
+}
+
+setFixListener(fix => {
+  void onTrackedFix({ latitude: fix.latitude, longitude: fix.longitude, accuracy: fix.accuracy_meters });
+});
 
 async function fetchToday(): Promise<TodayResponse | null> {
   try {
@@ -290,10 +402,17 @@ async function fetchToday(): Promise<TodayResponse | null> {
   }
 }
 
-async function currentCoords(): Promise<{ latitude: number; longitude: number } | null> {
+/** A fresh fix for a decision. High accuracy: these are the readings that
+ *  end or re-open somebody's day, and Balanced (Wi-Fi/cell) fixes indoors can
+ *  be hundreds of metres out. They are taken rarely, so GPS costs little here. */
+async function currentCoords(): Promise<Fix | null> {
   try {
-    const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-    return { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+    const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+    return {
+      latitude: pos.coords.latitude,
+      longitude: pos.coords.longitude,
+      accuracy: pos.coords.accuracy ?? null,
+    };
   } catch {
     return null;
   }
@@ -340,15 +459,18 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }) => {
       );
       return;
     }
+    // The OS's own exit verdict comes from whatever location it had, often a
+    // coarse one. Starting the warnings needs a precise fix that puts them
+    // clearly outside — no fix, no warning; reconciliation and the tracking
+    // fixes pick it up if they really have gone.
     const coords = await currentCoords();
-    if (coords) {
-      const dist = haversineMeters(coords.latitude, coords.longitude, center.latitude, center.longitude);
-      if (dist <= inner) return; // jitter — still at the site
-    }
+    if (!coords) return;
+    const dist = haversineMeters(coords.latitude, coords.longitude, center.latitude, center.longitude);
+    if (!confidentlyOutside(dist, coords.accuracy, inner)) return; // jitter — not clearly gone
     // Not an instant clock-out any more: this starts the warning escalation
     // (warning 1 of 4 fires here, at the boundary), and the tracking fixes
     // carry it forward from there.
-    await progressFenceExit(coords ?? { latitude: center.latitude, longitude: center.longitude });
+    await progressFenceExit(coords);
     return;
   }
 
@@ -410,14 +532,29 @@ export async function reconcileGeofenceAttendance(): Promise<void> {
     return;
   }
 
+  const onShift = !today.attendance.clock_out_utc;
+  // Closed for leaving the site — by this phone, or by the server (which now
+  // also recognises this phone's own away-from-site clock-outs, so a flag lost
+  // from this phone's storage no longer decides it).
+  const closedForLeaving =
+    !onShift && ((await autoOutPending()) || today.attendance.auto_clocked_out === true);
+
+  // Closed by hand, by an admin or by the end-of-day settlement: the day is
+  // over and nothing here may re-open it. Stand monitoring down, as the live
+  // Enter handler does — this is also what lets a phone that was only
+  // watching for a return stop its location service.
+  if (!onShift && !closedForLeaving) {
+    await stopGeofenceAutoMode();
+    return;
+  }
+
   const coords = await currentCoords();
   if (!coords) return;
   const dist = haversineMeters(coords.latitude, coords.longitude, fence.latitude, fence.longitude);
-  const onShift = !today.attendance.clock_out_utc;
 
   // Approved on-duty suppresses the repair path too, otherwise reconciliation
   // would clock out the very employee the geofence handler just spared.
-  if (onShift && dist > fence.radius + EXIT_MARGIN_M) {
+  if (onShift && confidentlyOutside(dist, coords.accuracy, fence.radius)) {
     if (today.on_duty_now) {
       await resetFenceExitStrikes();
       return;
@@ -426,17 +563,18 @@ export async function reconcileGeofenceAttendance(): Promise<void> {
     // during the transition), or advances one already running — either way the
     // employee gets the warnings, not a clock-out from nowhere.
     await progressFenceExit(coords);
-  } else if (onShift && dist <= fence.radius) {
+  } else if (onShift && confidentlyInside(dist, coords.accuracy, fence.radius)) {
     // Back inside with the day still open: the escalation (if any) is over and
     // the day simply never closed.
     await resetFenceExitStrikes(true);
   } else if (
-    !onShift &&
-    // Closed for leaving the site — by this phone, or by the server's watchdog.
+    closedForLeaving &&
     // Accepting only our own closure made this repair path useless in exactly
     // the case it exists for: the OS geofence missing the re-entry after the
     // WATCHDOG ended the day, which is how nearly every one of these days ends.
-    ((await autoOutPending()) || today.attendance.auto_clocked_out === true) &&
+    //
+    // The bare distance, not the forgiving test: the server's clock-in accepts
+    // nothing wider, so attempting from further out only collects refusals.
     dist <= fence.radius
   ) {
     // Same as the live handler: no multi_session pre-check, so a refusal is
