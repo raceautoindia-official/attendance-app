@@ -12,20 +12,27 @@ const path = require('path');
 const ROOT = path.resolve(__dirname, '..');
 const jwt = require(path.join(ROOT, 'node_modules', 'jsonwebtoken'));
 
+// Both files, the way Next.js reads them for the running app: .env first,
+// then .env.local over it. Reading only whichever existed first would report
+// "no key" on a server that has .env.local while the line sits in .env — where
+// the app itself would find it perfectly well.
 function fromEnvFile() {
-  const envFile = ['.env.local', '.env'].map(f => path.join(ROOT, f)).find(f => fs.existsSync(f));
-  if (!envFile) return null;
   const env = {};
-  for (const line of fs.readFileSync(envFile, 'utf8').split(/\r?\n/)) {
-    const m = line.match(/^([A-Z_]+)=(.*)$/);
-    if (m) env[m[1]] = m[2].trim().replace(/^["']|["']$/g, '');
+  const from = {};
+  for (const name of ['.env', '.env.local']) {
+    const file = path.join(ROOT, name);
+    if (!fs.existsSync(file)) continue;
+    for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+      const m = line.match(/^([A-Z_]+)=(.*)$/);
+      if (m) { env[m[1]] = m[2].trim().replace(/^["']|["']$/g, ''); from[m[1]] = name; }
+    }
   }
   if (env.FIREBASE_SERVICE_ACCOUNT_FILE) {
-    console.log(`Key file from ${path.basename(envFile)}: ${env.FIREBASE_SERVICE_ACCOUNT_FILE}`);
+    console.log(`Key file from ${from.FIREBASE_SERVICE_ACCOUNT_FILE}: ${env.FIREBASE_SERVICE_ACCOUNT_FILE}`);
     return fs.readFileSync(env.FIREBASE_SERVICE_ACCOUNT_FILE, 'utf8');
   }
   if (env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-    console.log(`Key from FIREBASE_SERVICE_ACCOUNT_JSON in ${path.basename(envFile)}`);
+    console.log(`Key from FIREBASE_SERVICE_ACCOUNT_JSON in ${from.FIREBASE_SERVICE_ACCOUNT_JSON}`);
     const v = env.FIREBASE_SERVICE_ACCOUNT_JSON;
     return v.startsWith('{') ? v : Buffer.from(v, 'base64').toString('utf8');
   }
