@@ -20,6 +20,7 @@
     "bcryptjs": "^3.0.3",
     "date-fns": "^4.1.0",
     "date-fns-tz": "^3.2.0",
+    "date-holidays": "^3.37.0",
     "jsonwebtoken": "^9.0.3",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.7",

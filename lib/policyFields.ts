@@ -27,6 +27,10 @@ export const POLICY_FIELD_LABELS: Record<string, string> = {
   week_offs_per_month: 'Week offs per month',
   default_shift_id: 'Default shift',
   late_grace_minutes: 'Late grace (minutes)',
+  late_alert_days_per_month: 'Alert after late days',
+  leave_alert_days_per_month: 'Alert after leave days',
+  missing_clockin_alert_minutes: 'Alert when nobody clocks in (minutes)',
+  low_hours_alert_ratio: 'Alert below this share of required hours',
   overtime_after_minutes: 'Overtime after (minutes)',
   overtime_multiplier: 'Overtime multiplier',
   casual_leave_days: 'Casual leave',
@@ -65,6 +69,15 @@ export const POLICY_FIELD_HELP: Record<string, string> = {
 
   late_grace_minutes:
     'Minutes after the start time before an arrival counts as late, replacing the shift grace for these employees. Leave empty to keep the shift own grace. Has no effect on a flexible shift, where lateness cannot be measured at all.',
+
+  late_alert_days_per_month:
+    'Raise an alert once somebody on this policy has been late this many days in a month, e.g. 3. Empty means no alert. It counts the same late days the reports count, and never fires where lateness cannot be measured.',
+  leave_alert_days_per_month:
+    'Raise an alert once leave reaches this many days in a month, e.g. 4. Empty means no alert. Company holidays are not counted.',
+  missing_clockin_alert_minutes:
+    'Raise an alert this many minutes after the shift start and its grace have passed with nothing clocked, e.g. 30. Empty means no alert. Skips flexible shifts, week offs, holidays, leave and approved permissions.',
+  low_hours_alert_ratio:
+    'Raise an alert when credited hours fall below this share of required hours, as a decimal, e.g. 0.75. Empty means no alert. Needs at least five worked days before it says anything.',
   overtime_after_minutes:
     'Recorded only. Minutes beyond the day requirement before overtime would begin. Nothing in the app pays or flags overtime yet.',
   overtime_multiplier:
@@ -100,6 +113,13 @@ export const POLICY_FIELD_HELP: Record<string, string> = {
 /** Which fields change a calculation today. Everything else is recorded only. */
 export const POLICY_FIELDS_THAT_CHANGE_FIGURES = [
   'hours_basis',
+  // Not a figure, but not 'recorded only' either: these four decide whether
+  // somebody is told. Listing them with the inert fields would be a lie in
+  // the direction that matters most.
+  'late_alert_days_per_month',
+  'leave_alert_days_per_month',
+  'missing_clockin_alert_minutes',
+  'low_hours_alert_ratio',
   'monthly_hours',
   'week_offs_per_month',
   'late_grace_minutes',

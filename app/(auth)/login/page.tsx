@@ -42,12 +42,44 @@ type LoginData = {
 export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [webAuthnPending, setWebAuthnPending] = useState(false);
+
+  // Resetting a forgotten PIN by email. The route, the single-use token, the
+  // mail template and /reset-password were all built and working; this page
+  // never linked to them, so on the web a forgotten PIN meant telephoning an
+  // administrator. (/reset-password even told people to use the phone app.)
+  const [forgotOpen, setForgotOpen] = useState(false);
+  const [forgotId, setForgotId] = useState('');
+  const [forgotBusy, setForgotBusy] = useState(false);
+  const [forgotSaid, setForgotSaid] = useState<string | null>(null);
+  const [forgotFailed, setForgotFailed] = useState<string | null>(null);
+
+  async function sendResetLink() {
+    const empId = forgotId.trim();
+    if (!empId) { setForgotFailed('Enter your employee ID.'); return; }
+    setForgotBusy(true); setForgotFailed(null); setForgotSaid(null);
+    try {
+      const res = await fetch('/api/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ emp_id: empId }),
+      });
+      const json: ApiResponse = await res.json();
+      // The route answers the same way whether or not the ID exists, on
+      // purpose - so its words are shown as they are, not interpreted.
+      if (json.success) setForgotSaid(json.message ?? 'If that employee ID exists and has an email on file, a reset link is on its way.');
+      else setForgotFailed(json.error ?? 'Could not send a reset link.');
+    } catch {
+      setForgotFailed('Could not reach the server. Check your connection and try again.');
+    } finally {
+      setForgotBusy(false);
+    }
+  }
   const [photoProofEnabled, setPhotoProofEnabled] = useState(false);
   // The brand asset may not be in place yet — see public/brand/README.md.
   const [logoBroken, setLogoBroken] = useState(false);
   const [photoProof, setPhotoProof] = useState<string | null>(null);
 
-  const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm<FormValues>({
+  const { register, handleSubmit, getValues, formState: { errors, isSubmitting } } = useForm<FormValues>({
     resolver: zodResolver(schema),
   });
 
@@ -255,6 +287,62 @@ export default function LoginPage() {
             {webAuthnPending ? 'Waiting for passkey...' : 'Sign in'}
           </Button>
         </form>
+
+        <div className="mt-4 border-t border-slate-200 pt-3 dark:border-slate-700">
+          {!forgotOpen ? (
+            <button
+              type="button"
+              onClick={() => {
+                setForgotOpen(true);
+                setForgotId(getValues('emp_id') ?? '');
+              }}
+              className="text-xs font-medium text-blue-600 underline decoration-dotted hover:decoration-solid dark:text-blue-400"
+            >
+              Forgot your PIN?
+            </button>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                We email a single-use link to the address on your employee record.
+                It expires shortly after it is sent.
+              </p>
+              <Input
+                label="Employee ID"
+                placeholder="e.g. EMP001"
+                value={forgotId}
+                onChange={e => setForgotId(e.target.value)}
+              />
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  loading={forgotBusy}
+                  onClick={sendResetLink}
+                >
+                  Email me a link
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => {
+                    setForgotOpen(false); setForgotSaid(null); setForgotFailed(null);
+                  }}
+                >
+                  Back to sign in
+                </Button>
+              </div>
+              {forgotSaid && (
+                <p className="rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200">
+                  {forgotSaid}
+                </p>
+              )}
+              {forgotFailed && (
+                <p className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-900/20 dark:text-red-300">
+                  {forgotFailed}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
       </Card>
 
       <p className="text-center text-xs text-slate-400">

@@ -166,6 +166,8 @@ export const BankDetailsSchema = z.object({
 
 export type BankDetails = z.infer<typeof BankDetailsSchema>;
 
+
+
 /** Normalizes case (IFSC/PAN uppercase) and returns only the fields present. */
 export function normalizeBankDetails(details: BankDetails): Partial<Record<(typeof BANK_COLUMNS)[number], string | null>> {
   const out: Partial<Record<(typeof BANK_COLUMNS)[number], string | null>> = {};

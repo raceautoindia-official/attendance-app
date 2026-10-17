@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import Table from '@/components/ui/Table';
 import Card from '@/components/ui/Card';
@@ -398,18 +398,6 @@ else if(ll.length===1){map.setView(ll[0],17);}
 </script></body></html>`;
   }, [routePointsJson, minuteMarksJson]);
 
-  useEffect(() => {
-    if (!filteredLiveSessions.length) {
-      setSelectedEmployeeId(null);
-      return;
-    }
-    if (
-      selectedEmployeeId == null ||
-      !filteredLiveSessions.some(s => s.employee_id === selectedEmployeeId)
-    ) {
-      setSelectedEmployeeId(filteredLiveSessions[0].employee_id);
-    }
-  }, [filteredLiveSessions, selectedEmployeeId]);
 
   const reporting = filteredLiveSessions.filter(s => s.session_id != null && s.last_ping_utc).length;
 
@@ -582,8 +570,11 @@ else if(ll.length===1){map.setView(ll[0],17);}
           data={filteredLiveSessions as object[]}
           emptyMessage="Nobody is clocked in right now."
           onRowClick={row => setSelectedEmployeeId((row as LiveTrackingLiveRow).employee_id)}
+          // Compared against the RESOLVED session, not the clicked id: when
+          // somebody clocks out, the map falls back to the first row and the
+          // highlight has to follow it rather than point at a vanished row.
           rowClassName={row =>
-            (row as LiveTrackingLiveRow).employee_id === selectedEmployeeId
+            (row as LiveTrackingLiveRow).employee_id === selectedLiveSession?.employee_id
               ? 'bg-blue-50 dark:bg-blue-900/20'
               : ''
           }

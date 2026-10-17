@@ -10,6 +10,10 @@ import type { ApiResponse, Location } from '@/lib/types';
 
 const CreateLocationSchema = z.object({
   name: z.string().min(1).max(100),
+  // Which company this site belongs to. Nullable: six sites exist and no
+  // company does, and attendance reads these rows on every clock-in - so
+  // nothing here may become mandatory.
+  company_id: z.number().int().positive().nullable().optional(),
   address: z.string().max(500).nullable().optional(),
   latitude: z.number().min(-90).max(90),
   longitude: z.number().min(-180).max(180),
@@ -25,10 +29,15 @@ export async function GET(request: NextRequest) {
   if (auth instanceof NextResponse) return auth;
 
   const locations = await query<Location>(
-    `SELECT id, name, address, latitude, longitude, radius_meters, is_active, created_at
-     FROM locations
-     WHERE is_active = TRUE
-     ORDER BY name ASC`,
+    `SELECT l.id, l.name, l.company_id, c.legal_name AS company_name,
+            l.address, l.latitude, l.longitude, l.radius_meters, l.is_active, l.created_at
+     FROM locations l
+     -- The company's name, so a site can be offered as "Plant A - Acme Ltd"
+     -- wherever one is chosen. LEFT, because a site with no company still
+     -- works: attendance reads these rows on every clock-in.
+     LEFT JOIN companies c ON c.id = l.company_id
+     WHERE l.is_active = TRUE
+     ORDER BY l.name ASC`,
   );
 
   return NextResponse.json<ApiResponse<{ locations: Location[] }>>({ success: true, data: { locations } });
@@ -54,12 +63,12 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const { name, address, latitude, longitude, radius_meters } = parsed.data;
+  const { name, address, latitude, longitude, radius_meters, company_id } = parsed.data;
 
   const result = await query(
-    `INSERT INTO locations (name, address, latitude, longitude, radius_meters)
-     VALUES (?, ?, ?, ?, ?)`,
-    [name, address ?? null, latitude, longitude, radius_meters],
+    `INSERT INTO locations (name, company_id, address, latitude, longitude, radius_meters)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [name, company_id ?? null, address ?? null, latitude, longitude, radius_meters],
   );
   const insertId = (result as unknown as { insertId: number }).insertId;
 

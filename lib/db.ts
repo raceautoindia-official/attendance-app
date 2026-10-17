@@ -44,6 +44,46 @@ pool
   });
 
 /**
+ * WHICH DATABASE A QUERY RUNS AGAINST.
+ *
+ * This is the whole tenant boundary. Every one of the application's ~130 SQL
+ * call sites already funnels through query()/queryOne(), so placing the
+ * boundary here means a forgotten filter can only ever show a tenant its own
+ * data - the other tenants' rows are not reachable from this connection.
+ *
+ * Two modes, chosen by deployment and never per request:
+ *
+ *   MULTI_TENANT unset or '0' - LEGACY. One database, the pool above, exactly
+ *     as before. This is what production runs today and what the 823 existing
+ *     checks run against. It is not a fallback; it is a single-tenant
+ *     deployment, which is a true description of the current server.
+ *
+ *   MULTI_TENANT='1' - the tenant comes from async context and there is NO
+ *     default. Work that reaches here without one throws. A fallback would be
+ *     the bug this entire design exists to prevent: some path loses its
+ *     context, quietly reads whichever tenant is first, and nobody notices
+ *     until a customer sees a name they do not employ.
+ *
+ * The flag flips once every route establishes context. Until then the two
+ * modes let the boundary be built and tested without a flag day.
+ */
+const MULTI_TENANT = process.env.MULTI_TENANT === '1';
+
+async function activePool(): Promise<mysql.Pool> {
+  if (!MULTI_TENANT) return pool;
+  // Imported lazily so a single-tenant deployment never loads the tenancy
+  // layer at all, and so this module stays importable by scripts that have no
+  // registry to talk to.
+  const { tenantPool } = await import('@/lib/tenancy/pools');
+  return tenantPool();
+}
+
+/** The pool for the current tenant, for the few places that need a transaction. */
+export async function connectionPool(): Promise<mysql.Pool> {
+  return activePool();
+}
+
+/**
  * Run a parameterised query and return all matching rows typed as T[].
  * Prefer this over raw pool.execute for routine SELECT / INSERT / UPDATE.
  */
@@ -52,7 +92,7 @@ export async function query<T>(sql: string, params?: unknown[]): Promise<T[]> {
   // LIMIT/OFFSET integers correctly. pool.execute() (prepared statements) rejects
   // numeric LIMIT/OFFSET params with ER_WRONG_ARGUMENTS in mysql2.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [rows] = await pool.query(sql, params as any[]);
+  const [rows] = await (await activePool()).query(sql, params as any[]);
   return rows as T[];
 }
 

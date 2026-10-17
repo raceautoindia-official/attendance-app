@@ -7,7 +7,7 @@ import Badge from '@/components/ui/Badge';
 import Button from '@/components/ui/Button';
 import Card from '@/components/ui/Card';
 import Input from '@/components/ui/Input';
-import Modal from '@/components/ui/Modal';
+import Drawer from '@/components/ui/Drawer';
 import Pagination from '@/components/ui/Pagination';
 import Spinner from '@/components/ui/Spinner';
 import Table from '@/components/ui/Table';
@@ -162,6 +162,28 @@ export default function PermissionsPage() {
       setRejectTarget(null);
       setRejectNote('');
     },
+  });
+
+  /**
+   * Removing a request rather than deciding it.
+   *
+   * A duplicate, or one recorded against the wrong person, is neither
+   * approved nor rejected - and rejecting it leaves a refusal on somebody's
+   * record for something they never asked for. The API has always allowed
+   * this (an employee may withdraw their own pending request, an
+   * administrator may remove any) and no screen sent it.
+   */
+  const removeMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`/api/permissions/${id}`, { method: 'DELETE' });
+      const json = await res.json() as ApiResponse;
+      if (!json.success) throw new Error(json.error ?? 'Could not remove the request');
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['permissions'] });
+      qc.invalidateQueries({ queryKey: ['attendance'] });
+    },
+    onError: (err: Error) => alert(err.message),
   });
 
   const createMutation = useMutation({
@@ -427,6 +449,20 @@ export default function PermissionsPage() {
                         >
                           Reject
                         </Button>
+                        <button
+                          type="button"
+                          disabled={removeMutation.isPending}
+                          onClick={() => {
+                            if (confirm('Remove this request entirely?'
+                              + String.fromCharCode(10, 10)
+                              + 'Use this for a duplicate or one recorded against the wrong person. It is not a rejection, so nothing is left on their record.')) {
+                              removeMutation.mutate(row.id);
+                            }
+                          }}
+                          className="text-xs font-medium text-slate-500 underline decoration-dotted hover:text-slate-700 disabled:opacity-50 dark:text-slate-400 dark:hover:text-slate-200"
+                        >
+                          Remove
+                        </button>
                       </div>
                     );
                   }
@@ -483,7 +519,7 @@ export default function PermissionsPage() {
       )}
 
       {/* Reject modal */}
-      <Modal open={!!rejectTarget} onClose={() => setRejectTarget(null)} title="Reject Permission Request">
+      <Drawer open={!!rejectTarget} onClose={() => setRejectTarget(null)} title="Reject Permission Request">
         {rejectTarget && (
           <div className="space-y-4">
             <div className="text-sm text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-700/50 rounded-lg px-3 py-2">
@@ -522,10 +558,10 @@ export default function PermissionsPage() {
             </div>
           </div>
         )}
-      </Modal>
+      </Drawer>
 
       {/* Record on behalf modal */}
-      <Modal open={addOpen} onClose={() => setAddOpen(false)} title="Record Permission Hours">
+      <Drawer open={addOpen} onClose={() => setAddOpen(false)} title="Record Permission Hours">
         <div className="space-y-4">
           <p className="text-xs text-slate-500 dark:text-slate-400">
             Filed on an employee&apos;s behalf — recorded as already approved.
@@ -571,7 +607,7 @@ export default function PermissionsPage() {
             </Button>
           </div>
         </div>
-      </Modal>
+      </Drawer>
     </div>
   );
 }

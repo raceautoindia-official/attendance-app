@@ -1,210 +1,85 @@
 'use client';
 
+/**
+ * The navigation rail — six sections, not eighteen pages.
+ *
+ * WHAT CHANGED AND WHY
+ * --------------------
+ * This listed all eighteen admin pages, in five collapsible groups. The count
+ * was not really the problem: FIVE of the entries meant "somebody is waiting on
+ * a decision from me" (Notifications, Permissions, Regularisations, Review, and
+ * the exception strip on Attendance) and THREE meant "what did people work",
+ * with nothing on screen to say which to open. Two pages - Review and
+ * Regularisations - had no entry at all, so two finished features could only be
+ * reached by typing a URL.
+ *
+ * Now each entry is a SECTION, and the pages inside it are tabs rendered by
+ * SectionTabs at the top of the content. Every page kept its own route, so
+ * every bookmark and in-app link still works; the tab strip is a second level
+ * of navigation, not a rewrite.
+ *
+ * The group-collapse state and its localStorage are gone with it. Six entries
+ * do not need folding away, and the search box has become the command palette,
+ * which can also reach a person by name.
+ *
+ * Visibility is asked of the permission system now, rather than a hard-coded
+ * `superAdminOnly` flag. See `canSee` in lib/nav.ts for why the legacy role is
+ * still consulted: nobody holds a role yet, and a navigation change must not be
+ * the thing that quietly removes somebody's access.
+ */
+
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
+import { useQuery } from '@tanstack/react-query';
 import { cn } from '@/lib/cn';
 import { useCurrentUser } from '@/lib/useCurrentUser';
+import { useNavAccess } from '@/lib/useNavAccess';
 import { clearStoredUser } from '@/lib/user';
-import { useQuery } from '@tanstack/react-query';
+import {
+  visibleSections, sectionForPath, sectionHref, type NavSection,
+} from '@/lib/nav';
+import { NavIcon } from './navIcons';
+import CommandPalette from './CommandPalette';
 import type { ApiResponse } from '@/lib/types';
-
-const NAV = [
-  {
-    label: 'Overview',
-    href: '/overview',
-    icon: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-          d="M4 5a1 1 0 011-1h4a1 1 0 011 1v5a1 1 0 01-1 1H5a1 1 0 01-1-1V5zm10 0a1 1 0 011-1h4a1 1 0 011 1v3a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zm10-2a1 1 0 011-1h4a1 1 0 011 1v6a1 1 0 01-1 1h-4a1 1 0 01-1-1v-6z"
-        />
-      </svg>
-    ),
-  },
-  {
-    label: 'Employees',
-    href: '/employees',
-    icon: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-          d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"
-        />
-      </svg>
-    ),
-  },
-  {
-    label: 'Checkin Records',
-    href: '/attendance',
-    icon: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-          d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"
-        />
-      </svg>
-    ),
-  },
-  {
-    label: 'Notifications',
-    href: '/notifications',
-    // How many things are waiting on a decision: off-site clock-ins nobody has
-    // looked at, plus pending permission requests. Permissions has no badge of
-    // its own, so a request sat there unseen until somebody opened the page.
-    badge: true,
-    icon: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-          d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
-        />
-      </svg>
-    ),
-  },
-  {
-    label: 'Live Tracking',
-    href: '/live-tracking',
-    icon: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-          d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"
-        />
-      </svg>
-    ),
-  },
-  {
-    label: 'Documents',
-    href: '/documents',
-    icon: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-          d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"
-        />
-      </svg>
-    ),
-  },
-  {
-    label: 'Policies',
-    href: '/policies',
-    superAdminOnly: true,
-    icon: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-          d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-        />
-      </svg>
-    ),
-  },
-  {
-    label: 'Schedules',
-    href: '/schedules',
-    icon: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-          d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"
-        />
-      </svg>
-    ),
-  },
-  {
-    label: 'Leaves',
-    href: '/leaves',
-    icon: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-          d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"
-        />
-      </svg>
-    ),
-  },
-  {
-    label: 'Permissions',
-    href: '/permissions',
-    icon: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-          d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
-        />
-      </svg>
-    ),
-  },
-  {
-    label: 'Holiday Calendar',
-    href: '/holidays',
-    superAdminOnly: true,
-    icon: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-          d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"
-        />
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 16l2 2 4-4" />
-      </svg>
-    ),
-  },
-  {
-    label: 'Locations',
-    href: '/locations',
-    superAdminOnly: true,
-    icon: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-          d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"
-        />
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-      </svg>
-    ),
-  },
-  {
-    label: 'Performance',
-    href: '/performance',
-    icon: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-          d="M16 8v8m-4-5v5m-4-2v2m-2 4h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
-        />
-      </svg>
-    ),
-  },
-  {
-    label: 'Reports & Hours',
-    href: '/reports',
-    icon: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-          d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-        />
-      </svg>
-    ),
-  },
-  {
-    label: 'Audit Log',
-    href: '/audit-log',
-    superAdminOnly: true,
-    icon: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-          d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"
-        />
-      </svg>
-    ),
-  },
-];
 
 export default function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const user = useCurrentUser();
-  const isSuperAdmin = user?.role === 'super_admin';
+  const access = useNavAccess();
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
-  // How many off-site clock-ins nobody has looked at. Polled rather than pushed:
-  // the count only needs to be roughly current, and a socket for one integer is
-  // not worth the failure modes. The endpoint answers 0 before its migration has
-  // run, so this is safe on a server that has not been updated yet.
-  const { data: notifData } = useQuery({
-    queryKey: ['notifications', 'pending-count'],
+  // Ctrl/Cmd-K from anywhere. On the window rather than on the palette,
+  // because the palette is not mounted until it opens - and because the
+  // whole point of the shortcut is that it works without the rail being in
+  // reach, on a page scrolled a long way down.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOpen(true);
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const sections = visibleSections(access);
+  const active = sectionForPath(pathname, sections);
+
+  // How many decisions are waiting. Polled rather than pushed: it only needs to
+  // be roughly current, and a socket for one integer is not worth its failure
+  // modes. `count=1` skips the exception scan, which is the expensive half.
+  const { data: inboxData } = useQuery({
+    queryKey: ['inbox', 'count'],
     queryFn: async () => {
-      const res = await fetch('/api/notifications?status=pending&limit=1');
-      return res.json() as Promise<ApiResponse<{ pending_count: number }>>;
+      const res = await fetch('/api/inbox?count=1');
+      return res.json() as Promise<ApiResponse<{ counts: { decisions: number } }>>;
     },
     refetchInterval: 60_000,
   });
-  const pendingCount = notifData?.data?.pending_count ?? 0;
+  const pendingCount = inboxData?.data?.counts?.decisions ?? 0;
 
   async function handleLogout() {
     await fetch('/api/auth/logout', { method: 'POST' });
@@ -212,24 +87,27 @@ export default function Sidebar() {
     router.push('/login');
   }
 
-  const visibleNav = NAV.filter(item => !item.superAdminOnly || isSuperAdmin);
+  // Five across a phone's width is already tight; the sixth would make every
+  // target too narrow to hit. Settings is the one left out, because it is
+  // touched once a quarter and never from a phone.
+  const mobileSections = sections.slice(0, 5);
 
   return (
     <>
-      {/* Desktop sidebar */}
-      <aside className="hidden md:flex md:flex-col w-60 min-h-screen bg-slate-900 dark:bg-slate-950 border-r border-slate-800 flex-shrink-0">
+      {paletteOpen && <CommandPalette onOpenChange={setPaletteOpen} />}
+
+      <aside className="hidden md:flex md:flex-col w-56 min-h-screen bg-slate-900 dark:bg-slate-950 border-r border-slate-800 flex-shrink-0">
         <div className="flex items-center gap-3 px-5 py-5 border-b border-slate-800">
-          {/* The square mark only — the sidebar is 32px of space and the
-              wordmark is unreadable at that size. The name sits beside it as
-              text, which also keeps it legible when the rail is collapsed. */}
+          {/* The square mark only — the rail is 32px of space and the wordmark
+              is unreadable at that size. */}
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src="/brand/worklens-mark.png"
             alt=""
             className="w-8 h-8 rounded-lg flex-shrink-0 object-contain"
-            onError={e => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+            onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
           />
-          <div>
+          <div className="min-w-0">
             <span className="text-white font-semibold text-sm block">WorkLens</span>
             {user && (
               <span className="text-slate-400 text-xs capitalize">
@@ -239,30 +117,33 @@ export default function Sidebar() {
           </div>
         </div>
 
-        <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
-          {visibleNav.map(item => {
-            const active = pathname === item.href || pathname.startsWith(item.href + '/');
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={cn(
-                  'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors',
-                  active
-                    ? 'bg-blue-600 text-white'
-                    : 'text-slate-400 hover:text-white hover:bg-slate-800',
-                )}
-              >
-                {item.icon}
-                <span className="flex-1">{item.label}</span>
-                {item.badge && pendingCount > 0 && (
-                  <span className="rounded-full bg-red-500 px-2 py-0.5 text-xs font-semibold text-white">
-                    {pendingCount > 99 ? '99+' : pendingCount}
-                  </span>
-                )}
-              </Link>
-            );
-          })}
+        {/* The search box became a button. One keystroke reaches everything -
+            pages and people - and a second search field in the rail would just
+            be a worse version of the same thing. */}
+        <div className="px-3 pt-3">
+          <button
+            type="button"
+            onClick={() => setPaletteOpen(true)}
+            className="flex h-8 w-full items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 text-left text-sm text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-300"
+          >
+            <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            <span className="flex-1">Search</span>
+            <kbd className="rounded border border-slate-600 px-1 text-[10px] text-slate-500">Ctrl K</kbd>
+          </button>
+        </div>
+
+        <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-3">
+          {sections.map(section => (
+            <RailEntry
+              key={section.key}
+              section={section}
+              active={active?.key === section.key}
+              pendingCount={pendingCount}
+            />
+          ))}
         </nav>
 
         {user && (
@@ -275,8 +156,7 @@ export default function Sidebar() {
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                  d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"
-                />
+                  d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
               </svg>
               Sign out
             </button>
@@ -284,32 +164,55 @@ export default function Sidebar() {
         )}
       </aside>
 
-      {/* Mobile bottom nav */}
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-slate-900 dark:bg-slate-950 border-t border-slate-800 flex">
-        {visibleNav.map(item => {
-          const active = pathname === item.href || pathname.startsWith(item.href + '/');
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={cn(
-                'flex flex-1 flex-col items-center justify-center gap-1 py-2 text-xs font-medium transition-colors',
-                active ? 'text-blue-400' : 'text-slate-500 hover:text-slate-300',
+        {mobileSections.map(section => (
+          <Link
+            key={section.key}
+            href={sectionHref(section)}
+            className={cn(
+              'flex flex-1 flex-col items-center justify-center gap-1 py-2 text-xs font-medium transition-colors',
+              active?.key === section.key ? 'text-blue-400' : 'text-slate-500 hover:text-slate-300',
+            )}
+          >
+            {/* A dot, not a number: the bar has no room for one, and "there is
+                something waiting" is all it needs to say. */}
+            <span className="relative">
+              <NavIcon name={section.icon} />
+              {section.badge && pendingCount > 0 && (
+                <span className="absolute -right-1 -top-0.5 h-2 w-2 rounded-full bg-red-500" />
               )}
-            >
-              {/* A dot, not a number: the bottom bar has no room for one, and
-                  "there is something waiting" is all it needs to say. */}
-              <span className="relative">
-                {item.icon}
-                {item.badge && pendingCount > 0 && (
-                  <span className="absolute -right-1 -top-0.5 h-2 w-2 rounded-full bg-red-500" />
-                )}
-              </span>
-              <span className="hidden xs:block">{item.label}</span>
-            </Link>
-          );
-        })}
+            </span>
+            <span>{section.label}</span>
+          </Link>
+        ))}
       </nav>
     </>
+  );
+}
+
+function RailEntry({ section, active, pendingCount }: {
+  section: NavSection; active: boolean; pendingCount: number;
+}) {
+  return (
+    <Link
+      href={sectionHref(section)}
+      aria-current={active ? 'page' : undefined}
+      // Every rail entry is a place the tour can point at. Derived from the
+      // section key rather than listed somewhere else, so a new section is
+      // anchored the moment it appears.
+      data-tour={`nav-${section.key}`}
+      className={cn(
+        'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
+        active ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800 hover:text-white',
+      )}
+    >
+      <NavIcon name={section.icon} />
+      <span className="flex-1">{section.label}</span>
+      {section.badge && pendingCount > 0 && (
+        <span className="rounded-full bg-red-500 px-2 py-0.5 text-xs font-semibold text-white">
+          {pendingCount > 99 ? '99+' : pendingCount}
+        </span>
+      )}
+    </Link>
   );
 }

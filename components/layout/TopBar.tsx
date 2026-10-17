@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useMutation } from '@tanstack/react-query';
 import Avatar from '@/components/ui/Avatar';
 import ThemeToggle from '@/components/ui/ThemeToggle';
+import SetupGuide from '@/components/setup/SetupGuide';
 import { clearStoredUser } from '@/lib/user';
 import { useCurrentUser } from '@/lib/useCurrentUser';
 import { cn } from '@/lib/cn';
@@ -38,6 +39,10 @@ export default function TopBar({ title }: TopBarProps) {
       <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-100">{title}</h1>
 
       <div className="flex items-center gap-2">
+        {/* Where to start, for a workspace that has not been set up. It shows
+            what is left as a count, and renders nothing at all for somebody
+            with no permission to set any of it up. */}
+        <SetupGuide />
         <ThemeToggle />
 
         {isClient && user && (

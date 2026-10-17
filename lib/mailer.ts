@@ -58,7 +58,7 @@ async function send(
   to: string,
   subject: string,
   html: string,
-): Promise<void> {
+): Promise<boolean> {
   // NOTHING IS CONFIGURED. Worth its own message: without it the failure
   // surfaced as whatever nodemailer says about an undefined host ("getaddrinfo
   // ENOTFOUND undefined"), which reads like a network fault rather than a
@@ -77,7 +77,7 @@ async function send(
       );
     }
     console.error(`[mailer] dropped (no transport): "${subject}" -> ${to}`);
-    return;
+    return false;
   }
 
   try {
@@ -95,12 +95,14 @@ async function send(
     } else {
       await transporter.sendMail({ from: FROM, to, subject, html });
     }
+    return true;
   } catch (err) {
     console.error('[mailer] Failed to send email:', {
       to,
       subject,
       error: (err as Error).message,
     });
+    return false;
   }
 }
 
@@ -556,6 +558,87 @@ export async function sendMonthEndSummary(
         for the same figures.
       </p>
       <p style="color:#6b7280;font-size:12px;">Automated message from the Attendance System.</p>
+    `,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Alert digest
+// ---------------------------------------------------------------------------
+
+export interface AlertDigestRow {
+  severity: 'critical' | 'warning' | 'info';
+  who: string | null;
+  title: string;
+  body: string;
+}
+
+export interface AlertDigestData {
+  recipientName: string;
+  rows: AlertDigestRow[];
+  inboxUrl: string;
+}
+
+/**
+ * One email a day listing what is open, grouped by how much it matters.
+ *
+ * Returns whether it was handed to a transport, because the caller writes a
+ * delivery row and must not claim to have sent mail that was dropped.
+ *
+ * No per-alert emails anywhere in this app, deliberately: a message per event
+ * is how a mail rule gets written, and after that nobody reads any of them.
+ */
+export async function sendAlertDigestEmail(
+  to: string,
+  payload: AlertDigestData,
+): Promise<boolean> {
+  const TONE: Record<AlertDigestRow['severity'], { label: string; colour: string }> = {
+    critical: { label: 'Needs fixing', colour: '#dc2626' },
+    warning: { label: 'Worth checking', colour: '#d97706' },
+    info: { label: 'For information', colour: '#64748b' },
+  };
+
+  const group = (severity: AlertDigestRow['severity']) => {
+    const items = payload.rows.filter(r => r.severity === severity);
+    if (items.length === 0) return '';
+    const tone = TONE[severity];
+    return `
+      <p style="margin:18px 0 6px;font-size:13px;font-weight:600;color:${tone.colour}">
+        ${tone.label} (${items.length})
+      </p>
+      <table style="width:100%;border-collapse:collapse">
+        ${items.map(r => `
+          <tr>
+            <td style="padding:8px 0;border-top:1px solid #e2e8f0;font-size:14px;color:#0f172a">
+              <strong>${r.who ? `${r.who}: ` : ''}${r.title}</strong><br/>
+              <span style="font-size:13px;color:#475569">${r.body}</span>
+            </td>
+          </tr>`).join('')}
+      </table>`;
+  };
+
+  const count = payload.rows.length;
+  return send(
+    to,
+    `${count} thing${count === 1 ? '' : 's'} need attention`,
+    `
+      <p>Hi ${payload.recipientName.split(' ')[0]},</p>
+      <p>${count} thing${count === 1 ? '' : 's'} need attention this morning.</p>
+      ${group('critical')}
+      ${group('warning')}
+      ${group('info')}
+      <p style="margin:22px 0">
+        <a href="${payload.inboxUrl}"
+           style="background:#2563eb;color:#fff;padding:12px 20px;border-radius:8px;
+                  text-decoration:none;font-weight:600;display:inline-block">
+          Open the queue
+        </a>
+      </p>
+      <p style="font-size:13px;color:#475569">
+        Each one can be acknowledged with a note, or snoozed. Alerts clear
+        themselves when the fact behind them changes, so there is nothing to
+        tidy up after a correction.
+      </p>
     `,
   );
 }

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
+import { zBool } from '@/lib/zodFields';
 import { queryOne, insertAuditLog, pool } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import { overlappingShiftNames, type DayShift } from '@/lib/shifts';
@@ -36,7 +37,7 @@ const AssignSchema = z.object({
   employee_id: z.number().int().positive(),
   shift_id: z.number().int().positive(),
   location_id: z.number().int().positive().nullable().optional(),
-  geofencing_enabled: z.boolean().default(false),
+  geofencing_enabled: zBool.default(false),
   effective_from: z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/, 'effective_from must be YYYY-MM-DD'),
@@ -45,7 +46,7 @@ const AssignSchema = z.object({
    * instead of replacing it. Off by default, so an ordinary reassignment keeps
    * behaving exactly as before — only the employees the admin opts in get two.
    */
-  additional: z.boolean().default(false),
+  additional: zBool.default(false),
 });
 
 // ---------------------------------------------------------------------------

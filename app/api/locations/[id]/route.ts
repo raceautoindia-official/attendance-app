@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
+import { zBool } from '@/lib/zodFields';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import type { ApiResponse, Location } from '@/lib/types';
@@ -9,10 +10,12 @@ type Params = { params: Promise<{ id: string }> };
 const UpdateLocationSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   address: z.string().max(500).nullable().optional(),
+  // Null detaches the site from its company; omitted leaves it alone.
+  company_id: z.number().int().positive().nullable().optional(),
   latitude: z.number().min(-90).max(90).optional(),
   longitude: z.number().min(-180).max(180).optional(),
   radius_meters: z.number().int().min(10).max(10000).optional(),
-  is_active: z.boolean().optional(),
+  is_active: zBool.optional(),
 });
 
 // GET /api/locations/[id]
@@ -72,6 +75,7 @@ export async function PUT(request: NextRequest, context: Params) {
   const d = parsed.data;
   if (d.name !== undefined) apply('name', d.name);
   if (d.address !== undefined) apply('address', d.address);
+  if (d.company_id !== undefined) apply('company_id', d.company_id);
   if (d.latitude !== undefined) apply('latitude', d.latitude);
   if (d.longitude !== undefined) apply('longitude', d.longitude);
   if (d.radius_meters !== undefined) apply('radius_meters', d.radius_meters);

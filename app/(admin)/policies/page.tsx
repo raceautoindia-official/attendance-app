@@ -6,10 +6,12 @@ import Card from '@/components/ui/Card';
 import Badge from '@/components/ui/Badge';
 import Button from '@/components/ui/Button';
 import Input from '@/components/ui/Input';
-import Modal from '@/components/ui/Modal';
+import Drawer from '@/components/ui/Drawer';
 import Spinner from '@/components/ui/Spinner';
 import type { ApiResponse, Employee, Shift } from '@/lib/types';
-import { POLICY_FIELD_HELP } from '@/lib/policyFields';
+import { POLICY_FIELD_HELP, POLICY_FIELD_LABELS } from '@/lib/policyFields';
+import { codeFromName } from '@/lib/suggest';
+import Suggest from '@/components/ui/Suggest';
 
 /**
  * Policies — the rule sets employees are held to.
@@ -38,6 +40,10 @@ interface Policy {
   min_hours_full_day: number | null;
   min_hours_half_day: number | null;
   late_grace_minutes: number | null;
+  late_alert_days_per_month: number | null;
+  leave_alert_days_per_month: number | null;
+  missing_clockin_alert_minutes: number | null;
+  low_hours_alert_ratio: number | null;
   overtime_after_minutes: number | null;
   overtime_multiplier: number | null;
   casual_leave_days: number | null;
@@ -124,6 +130,149 @@ interface ShiftMove {
 
 /** Required text: empty must stay an empty string, never become null. */
 const REQUIRED_TEXT = new Set(['name', 'code']);
+
+/**
+ * People whose shift disagrees with the policy they are on.
+ *
+ * Assigning a policy offers to move everybody onto its default shift, but
+ * assigning a policy somebody already holds is refused - so the ordinary case,
+ * where the disagreement is noticed days later on the hours ledger, had a
+ * working repair endpoint and no way to reach it. The panel is that way.
+ *
+ * It stays quiet when there is nothing to say: no mismatch, no card.
+ */
+function ShiftMismatchPanel({ assignments, onError }: {
+  assignments: Assignment[];
+  onError: (m: string) => void;
+}) {
+  const qc = useQueryClient();
+  const [from, setFrom] = useState(today());
+  const [done, setDone] = useState<number | null>(null);
+
+  const ids = useMemo(
+    () => assignments.map(a => a.employee_id).sort((x, y) => x - y),
+    [assignments],
+  );
+
+  const { data: mismatches, isFetching } = useQuery<ShiftMove[]>({
+    queryKey: ['policy-shift-mismatches', from, ids.join(',')],
+    enabled: ids.length > 0,
+    queryFn: async () => {
+      const qs = new URLSearchParams({
+        employee_ids: ids.join(','), effective_from: from,
+      });
+      const res = await fetch(`/api/policies/sync-shift?${qs}`);
+      const json: ApiResponse<{ mismatches: ShiftMove[] }> = await res.json();
+      if (!json.success) throw new Error(json.error ?? 'Could not check shifts');
+      return json.data?.mismatches ?? [];
+    },
+  });
+
+  const fix = useMutation({
+    mutationFn: async (employeeIds: number[]) => {
+      const res = await fetch('/api/policies/sync-shift', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ employee_ids: employeeIds, effective_from: from }),
+      });
+      const json: ApiResponse<{ moved: number }> = await res.json();
+      if (!json.success) throw new Error(json.error ?? 'Could not move them');
+      return json.data?.moved ?? 0;
+    },
+    onSuccess: moved => {
+      setDone(moved);
+      onError('');
+      qc.invalidateQueries({ queryKey: ['policy-shift-mismatches'] });
+      qc.invalidateQueries({ queryKey: ['policy-assignments'] });
+    },
+    onError: (e: Error) => { setDone(null); onError(e.message); },
+  });
+
+  if (ids.length === 0) return null;
+  const rows = mismatches ?? [];
+  // Nothing wrong, and nothing just fixed: say nothing at all.
+  if (rows.length === 0 && done === null) return null;
+
+  const movable = rows.filter(m => !m.blocked).map(m => m.employee_id);
+
+  return (
+    <Card className="border-l-4 border-l-amber-500">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+            Shift does not match the policy
+          </h2>
+          <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+            {rows.length === 0
+              ? 'Everybody is on the shift their policy names.'
+              : `${rows.length} ${rows.length === 1 ? 'person is' : 'people are'} on a different shift from the one their policy names. Moving them writes a real schedule entry from the date below, so the phone and the website agree.`}
+          </p>
+        </div>
+        <div className="flex shrink-0 items-end gap-2">
+          <Input label="Move from" type="date" value={from}
+            onChange={e => { setFrom(e.target.value); setDone(null); }} />
+          {movable.length > 0 && (
+            <Button
+              loading={fix.isPending}
+              onClick={() => {
+                if (confirm(`Move ${movable.length} onto the shift their policy names, from ${from}?`)) {
+                  fix.mutate(movable);
+                }
+              }}
+            >
+              Move {movable.length === rows.length ? 'all' : movable.length}
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {done !== null && (
+        <p className="mt-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200">
+          Moved {done} {done === 1 ? 'person' : 'people'} from {from}. Days already
+          worked this month keep the shift they were worked under.
+        </p>
+      )}
+
+      {rows.length > 0 && (
+        <ul className="mt-3 space-y-1.5">
+          {rows.map(m => (
+            <li key={m.employee_id} className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-1.5 text-xs last:border-0 dark:border-slate-800">
+              <span className="text-slate-700 dark:text-slate-200">
+                <span className="font-medium">{m.employee_name}</span>
+                {' '}
+                <span className="text-slate-500 dark:text-slate-400">
+                  {m.from_shift_name ?? 'no shift'} &rarr; {m.to_shift_name}
+                </span>
+                {m.earlier_days_this_month > 0 && (
+                  <span className="ml-2 text-slate-400">
+                    {m.earlier_days_this_month} day
+                    {m.earlier_days_this_month === 1 ? '' : 's'} already worked this month
+                  </span>
+                )}
+              </span>
+              {m.blocked ? (
+                <span className="text-amber-700 dark:text-amber-400">{m.blocked}</span>
+              ) : (
+                <button
+                  type="button"
+                  disabled={fix.isPending}
+                  onClick={() => fix.mutate([m.employee_id])}
+                  className="font-medium text-blue-600 underline decoration-dotted hover:decoration-solid disabled:opacity-50 dark:text-blue-400"
+                >
+                  Move this one
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {isFetching && rows.length === 0 && (
+        <p className="mt-2 text-xs text-slate-400">Checking&hellip;</p>
+      )}
+    </Card>
+  );
+}
 export default function PoliciesPage() {
   const qc = useQueryClient();
   const [editing, setEditing] = useState<Policy | null>(null);
@@ -136,6 +285,10 @@ export default function PoliciesPage() {
   // Default ON: a policy that names a shift almost always means it. The list
   // below says exactly who moves, so this is visible rather than implicit.
   const [applyShift, setApplyShift] = useState(true);
+  // Narrows the picker only. Anybody already ticked stays selected even
+  // when filtered out of view - otherwise typing a name would silently
+  // drop the people chosen a moment earlier.
+  const [assignSearch, setAssignSearch] = useState('');
   const [result, setResult] = useState<string | null>(null);
 
   const { data: policies, isLoading } = useQuery({
@@ -318,7 +471,7 @@ export default function PoliciesPage() {
             many employees. An employee with no policy keeps the app&apos;s default behaviour.
           </p>
         </div>
-        <Button onClick={() => { setDraft(blank()); setCreating(true); setEditing(null); setError(null); }}>
+        <Button data-tour="policy-new" onClick={() => { setDraft(blank()); setCreating(true); setEditing(null); setError(null); }}>
           New Policy
         </Button>
       </div>
@@ -393,7 +546,7 @@ export default function PoliciesPage() {
               </div>
               <div className="flex shrink-0 flex-col gap-1">
                 <Button size="sm" variant="ghost" onClick={() => openEdit(p)}>Edit</Button>
-                <Button size="sm" variant="secondary"
+                <Button size="sm" variant="secondary" data-tour="policy-assign"
                   onClick={() => { setAssignTarget(p); setSelected(new Set()); setResult(null); setError(null); }}>
                   Assign
                 </Button>
@@ -408,6 +561,12 @@ export default function PoliciesPage() {
           </Card>
         ))}
       </div>
+
+      {/* The repair, next to the thing it repairs. */}
+      <ShiftMismatchPanel
+        assignments={assignments ?? []}
+        onError={m => setError(m || null)}
+      />
 
       {/* Who is on what */}
       {assignments && assignments.length > 0 && (
@@ -443,7 +602,7 @@ export default function PoliciesPage() {
       )}
 
       {/* ---- Create / edit ---------------------------------------------- */}
-      <Modal
+      <Drawer
         open={creating || !!editing}
         onClose={() => { setCreating(false); setEditing(null); setError(null); }}
         title={editing ? `Edit ${editing.name}` : 'New Policy'}
@@ -459,8 +618,13 @@ export default function PoliciesPage() {
           <Section title="Identity">
             <Input label="Name" required value={String(draft.name ?? '')}
               onChange={e => set('name', e.target.value)} helper={POLICY_FIELD_HELP.name} />
-            <Input label="Code" required value={String(draft.code ?? '')}
-              onChange={e => set('code', e.target.value)} helper={POLICY_FIELD_HELP.code} />
+            <div className="flex flex-col gap-1">
+              <Input label="Code" required value={String(draft.code ?? '')}
+                onChange={e => set('code', e.target.value)} helper={POLICY_FIELD_HELP.code} />
+              <Suggest suggestion={codeFromName(String(draft.name ?? ''))}
+                current={String(draft.code ?? '')}
+                onUse={v => set('code', v)} />
+            </div>
             <Input label="Description" value={String(draft.description ?? '')}
               onChange={e => set('description', e.target.value)} className="sm:col-span-2"
               helper={POLICY_FIELD_HELP.description} />
@@ -584,6 +748,32 @@ export default function PoliciesPage() {
               helper={POLICY_FIELD_HELP.overtime_multiplier} />
           </Section>
 
+          <Section title="Alerts - empty means silence">
+            <p className="sm:col-span-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200">
+              These four decide when somebody is <strong>told</strong> about a pattern,
+              and every one is off until you put a number in it. They apply to the
+              people on this policy only, so a plant and an office can hold different
+              views of what counts as late. Alerts appear in the Inbox, clear
+              themselves when the fact changes, and can be acknowledged with a note.
+            </p>
+            <Input label={POLICY_FIELD_LABELS.late_alert_days_per_month} type="number" min={1} max={31}
+              value={String(draft.late_alert_days_per_month ?? '')}
+              onChange={e => set('late_alert_days_per_month', e.target.value)}
+              helper={POLICY_FIELD_HELP.late_alert_days_per_month} />
+            <Input label={POLICY_FIELD_LABELS.leave_alert_days_per_month} type="number" min={1} max={31}
+              value={String(draft.leave_alert_days_per_month ?? '')}
+              onChange={e => set('leave_alert_days_per_month', e.target.value)}
+              helper={POLICY_FIELD_HELP.leave_alert_days_per_month} />
+            <Input label={POLICY_FIELD_LABELS.missing_clockin_alert_minutes} type="number" min={1} max={480}
+              value={String(draft.missing_clockin_alert_minutes ?? '')}
+              onChange={e => set('missing_clockin_alert_minutes', e.target.value)}
+              helper={POLICY_FIELD_HELP.missing_clockin_alert_minutes} />
+            <Input label={POLICY_FIELD_LABELS.low_hours_alert_ratio} type="number" step="0.05" min={0.1} max={0.99}
+              value={String(draft.low_hours_alert_ratio ?? '')}
+              onChange={e => set('low_hours_alert_ratio', e.target.value)}
+              helper={POLICY_FIELD_HELP.low_hours_alert_ratio} />
+          </Section>
+
           <Section title="Leave and permission — recorded, not applied">
             <p className="sm:col-span-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200">
               Nothing here changes a balance. Every leave figure in the app is read from
@@ -667,10 +857,10 @@ export default function PoliciesPage() {
             </Button>
           </div>
         </div>
-      </Modal>
+      </Drawer>
 
       {/* ---- Assign ------------------------------------------------------ */}
-      <Modal
+      <Drawer
         open={!!assignTarget}
         onClose={() => setAssignTarget(null)}
         title={assignTarget ? `Assign "${assignTarget.name}"` : ''}
@@ -685,8 +875,28 @@ export default function PoliciesPage() {
             were computed under.
           </p>
 
+          <label className="block">
+            <span className="sr-only">Search employees</span>
+            <input
+              type="search"
+              value={assignSearch}
+              onChange={e => setAssignSearch(e.target.value)}
+              placeholder="Search by name or employee ID…"
+              className="h-9 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-900 placeholder-slate-400 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+            />
+          </label>
+
           <div className="max-h-72 space-y-0.5 overflow-y-auto rounded-lg border border-slate-200 p-2 dark:border-slate-700">
-            {(employees ?? []).map(e => {
+            {(employees ?? [])
+              .filter(e => {
+                const q = assignSearch.trim().toLowerCase();
+                if (!q) return true;
+                // Keep anybody already chosen visible, so a search cannot
+                // hide a selection that is about to be submitted.
+                if (selected.has(e.id)) return true;
+                return e.name.toLowerCase().includes(q) || e.emp_id.toLowerCase().includes(q);
+              })
+              .map(e => {
               const current = byEmployee.get(e.id);
               return (
                 <label key={e.id} className="flex items-center gap-2.5 rounded px-2 py-1 hover:bg-slate-50 dark:hover:bg-slate-800">
@@ -783,7 +993,7 @@ export default function PoliciesPage() {
             </div>
           </div>
         </div>
-      </Modal>
+      </Drawer>
     </div>
   );
 }

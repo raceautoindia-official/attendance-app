@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
+import { zBool } from '@/lib/zodFields';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import type { ApiResponse } from '@/lib/types';
@@ -23,7 +24,7 @@ type Params = { params: Promise<{ id: string }> };
 // ---------------------------------------------------------------------------
 
 const PatchSchema = z.object({
-  geofencing_enabled: z.boolean(),
+  geofencing_enabled: zBool,
 });
 
 export async function PATCH(request: NextRequest, context: Params) {

@@ -7,7 +7,7 @@ import Badge from '@/components/ui/Badge';
 import Button from '@/components/ui/Button';
 import Card from '@/components/ui/Card';
 import Input from '@/components/ui/Input';
-import Modal from '@/components/ui/Modal';
+import Drawer from '@/components/ui/Drawer';
 import Spinner from '@/components/ui/Spinner';
 import { TIMEZONE } from '@/lib/constants';
 import { formatDateOnly } from '@/lib/date';
@@ -250,7 +250,7 @@ export default function PermissionHoursCard() {
         </div>
       )}
 
-      <Modal open={open} onClose={() => setOpen(false)} title="Apply for Time Off or On-Duty">
+      <Drawer open={open} onClose={() => setOpen(false)} title="Apply for Time Off or On-Duty">
         <div className="space-y-4">
           {/* The two are handled very differently, so make the choice explicit. */}
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -335,7 +335,7 @@ export default function PermissionHoursCard() {
             </Button>
           </div>
         </div>
-      </Modal>
+      </Drawer>
     </Card>
   );
 }

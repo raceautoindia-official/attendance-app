@@ -1,6 +1,22 @@
 'use client';
 
+/**
+ * DEPRECATED - use `Drawer` instead. Nothing imports this any more.
+ *
+ * Every centred modal in this app was replaced with a side drawer on
+ * 2026-10-10. The reason was visibility: a modal covers the middle of the
+ * screen, which is where the list you were working in lives, so editing a row
+ * meant losing sight of the rows around it.
+ *
+ * Kept here rather than deleted because `Drawer` was written API-compatible
+ * with it - same open/onClose/title/size/children - so this file documents
+ * the shape that was migrated FROM, and a half-finished revert would still
+ * compile. If you find yourself reaching for it, you probably want
+ * components/ui/Drawer.tsx.
+ */
+
 import { useEffect } from 'react';
+import { markDialogOpen } from '@/lib/dialogOpen';
 import { cn } from '@/lib/cn';
 
 interface ModalProps {
@@ -21,8 +37,11 @@ const SIZE: Record<NonNullable<ModalProps['size']>, string> = {
 
 export default function Modal({ open, onClose, title, children, className, size = 'md' }: ModalProps) {
   useEffect(() => {
-    if (open) document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = ''; };
+    if (!open) return;
+    document.body.style.overflow = 'hidden';
+    // See lib/dialogOpen: the setup guide steps aside while this is up.
+    const releaseDialog = markDialogOpen();
+    return () => { document.body.style.overflow = ''; releaseDialog(); };
   }, [open]);
 
   if (!open) return null;

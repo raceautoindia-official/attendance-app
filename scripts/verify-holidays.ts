@@ -17,6 +17,8 @@ import {
   listHolidays,
   setObservance,
   addManualHoliday,
+  editHoliday,
+  removeHoliday,
   HolidayError,
 } from '../lib/holidays';
 import { query, queryOne, pool } from '../lib/db';
@@ -203,6 +205,87 @@ async function main() {
     await query('DELETE FROM holiday_calendar WHERE id = ?', [id]);
     const left = await countLeaveHolidays('2026-12-11', headOffice.id);
     if (left === 0) { ok('test holiday cleaned up'); } else { bad('cleanup', `${left} leave rows left behind`); }
+  }
+
+  // -----------------------------------------------------------------------
+  // Correcting and removing. The calendar used to be append-only: a date
+  // typed wrong stayed for good. These are the guards that make editing
+  // safe rather than a way to rewrite a month that has already been paid.
+  // -----------------------------------------------------------------------
+  console.log('\n- correcting and removing -');
+  {
+    const id = await addManualHoliday({
+      date: '2026-12-14', name: 'Typo Holidy', type: 'company', actorId: ACTOR,
+    });
+
+    await editHoliday({ id, name: 'Typo Holiday Fixed', actorId: ACTOR });
+    const renamed = await queryOne<{ name: string; source: string }>(
+      'SELECT name, source FROM holiday_calendar WHERE id = ?', [id]);
+    if (renamed?.name === 'Typo Holiday Fixed') ok('a name can be corrected');
+    else bad('rename', `name is ${renamed?.name}`);
+    if (renamed?.source === 'manual') ok('an edited row is marked manual', 'the importer leaves it alone');
+    else bad('source after edit', `source is ${renamed?.source}`);
+
+    await editHoliday({ id, date: '2026-12-15', actorId: ACTOR });
+    const moved = await queryOne<{ d: string; year: number }>(
+      "SELECT DATE_FORMAT(holiday_date, '%Y-%m-%d') d, year FROM holiday_calendar WHERE id = ?", [id]);
+    if (moved?.d === '2026-12-15') ok('an unobserved date can be moved');
+    else bad('move date', `date is ${moved?.d}`);
+    if (Number(moved?.year) === 2026) ok('the year follows the date');
+    else bad('year after move', `year is ${moved?.year}`);
+
+    // Now make it real, and the date must stop being movable.
+    await setObservance({ holidayId: id, locationId: null, isObserved: true, actorId: ACTOR });
+    try {
+      await editHoliday({ id, date: '2026-12-16', actorId: ACTOR });
+      bad('observed date is frozen', 'the move was allowed');
+    } catch (e) {
+      if (e instanceof HolidayError) ok('an observed date cannot be moved', e.message.slice(0, 48));
+      else bad('observed date is frozen', `wrong error: ${String(e)}`);
+    }
+
+    // A label is still a label, even once it closes a day.
+    await editHoliday({ id, name: 'Observed And Renamed', actorId: ACTOR });
+    const stillRenamable = await queryOne<{ name: string }>(
+      'SELECT name FROM holiday_calendar WHERE id = ?', [id]);
+    if (stillRenamable?.name === 'Observed And Renamed') ok('an observed holiday can still be renamed');
+    else bad('rename while observed', `name is ${stillRenamable?.name}`);
+
+    try {
+      await removeHoliday({ id, actorId: ACTOR });
+      bad('an observed holiday is not deletable', 'it was deleted');
+    } catch (e) {
+      if (e instanceof HolidayError) ok('an observed holiday cannot be removed', e.message.slice(0, 48));
+      else bad('observed delete guard', `wrong error: ${String(e)}`);
+    }
+
+    // Reverse it properly, and then it may go.
+    await setObservance({ holidayId: id, locationId: null, isObserved: false, actorId: ACTOR });
+    const gone = await removeHoliday({ id, actorId: ACTOR });
+    if (gone.name === 'Observed And Renamed') ok('an unobserved holiday can be removed', gone.date);
+    else bad('remove', `returned ${gone.name}`);
+
+    const row = await queryOne<{ n: number }>(
+      'SELECT COUNT(*) n FROM holiday_calendar WHERE id = ?', [id]);
+    if (Number(row?.n) === 0) ok('the row is actually gone');
+    else bad('remove', 'the row is still there');
+
+    const obs = await queryOne<{ n: number }>(
+      'SELECT COUNT(*) n FROM holiday_observances WHERE holiday_id = ?', [id]);
+    if (Number(obs?.n) === 0) ok('its observance decisions went with it');
+    else bad('remove', `${obs?.n} observance rows left behind`);
+
+    const leftover = await countLeaveHolidays('2026-12-15', null);
+    if (leftover === 0) ok('no closure left behind', 'un-observing reversed it before the delete');
+    else bad('remove', `${leftover} leave rows left for 2026-12-15`);
+
+    try {
+      await removeHoliday({ id, actorId: ACTOR });
+      bad('removing a missing holiday is refused', 'it succeeded');
+    } catch (e) {
+      if (e instanceof HolidayError && e.status === 404) ok('removing a missing holiday is a 404');
+      else bad('missing holiday', `wrong error: ${String(e)}`);
+    }
   }
 
   console.log(`\n${pass} passed, ${fail} failed\n`);

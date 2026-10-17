@@ -1,12 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
+import { zBool } from '@/lib/zodFields';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth, hashPin } from '@/lib/auth';
+import { narrowToVisible } from '@/lib/accessFilter';
 import { getWorkDateIST } from '@/lib/attendance';
 import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from '@/lib/constants';
 import { hasBankColumns, bankSelect, hasWorkModeColumns, workModeSelect } from '@/lib/employeeDetails';
 import type { ApiResponse, Employee } from '@/lib/types';
 import { getPolicy, assignPolicy } from '@/lib/policy';
+import { assignToOrg } from '@/lib/org';
 import { toYmd } from '@/lib/date';
 
 async function hasLiveTrackingColumn() {
@@ -36,19 +39,24 @@ const CreateEmployeeSchema = z.object({
   name: z.string().min(1).max(100),
   email: z.preprocess(blankToNull, z.string().email().nullable().optional()),
   phone: z.preprocess(blankToNull, z.string().max(20).nullable().optional()),
+  // Still accepted, because the mobile app and older clients send it and
+  // the column it writes to is one they read. New callers send
+  // department_id instead and the name is derived from it - which is how
+  // this column came to hold an employee id and a phone number.
   department: z.preprocess(blankToNull, z.string().max(100).nullable().optional()),
+  department_id: z.number().int().positive().nullable().optional(),
   pin: z.string().regex(/^\d{4,6}$/, 'PIN must be 4–6 digits'),
   role: z.enum(['employee', 'manager', 'super_admin']).default('employee'),
   manager_id: z.number().int().positive().nullable().optional(),
   shift_id: z.number().int().positive().nullable().optional(),
   location_id: z.number().int().positive().nullable().optional(),
-  geofencing_enabled: z.boolean().optional().default(false),
-  live_tracking_enabled: z.boolean().optional().default(true),
+  geofencing_enabled: zBool.optional().default(false),
+  live_tracking_enabled: zBool.optional().default(true),
   // Settable when the employee is created. It could only be changed by editing
   // afterwards, so every new field employee started life fenced as on-site and
   // had to be corrected in a second step.
   work_mode: z.enum(['on_site', 'off_site']).optional().default('on_site'),
-  allow_multiple_sessions: z.boolean().optional().default(false),
+  allow_multiple_sessions: zBool.optional().default(false),
   schedule_effective_from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
   policy_id: z.number().int().positive().nullable().optional(),
 });
@@ -76,8 +84,27 @@ export async function GET(request: NextRequest) {
   const conditions: string[] = [];
   const params: unknown[] = [];
 
-  // Managers only see their direct reports
-  if (auth.role === 'manager') {
+  // WHO THIS CALLER MAY SEE.
+  //
+  // Two rules, and which applies depends on whether somebody has been given
+  // an explicit role:
+  //
+  //   No explicit role (everybody, today) - the legacy rule stands: a manager
+  //     sees their direct reports. Nothing changed when access control
+  //     shipped, which is the point of it shipping inert.
+  //
+  //   An explicit role - the granted SCOPE applies instead, and it is richer:
+  //     a department scope reaches the whole subtree, not just direct
+  //     reports, which is what 'their team' actually means to the person
+  //     granting it.
+  //
+  // The narrowing is spliced in unconditionally and is '1 = 1' when nothing
+  // is restricted, so this cannot be accidentally omitted.
+  const scope = await narrowToVisible(auth.id, 'employee.view', 'e.id');
+  if (scope.applied) {
+    conditions.push(scope.sql);
+    params.push(...scope.params);
+  } else if (auth.role === 'manager') {
     conditions.push('e.manager_id = ?');
     params.push(auth.id);
   }
@@ -208,7 +235,7 @@ export async function POST(request: NextRequest) {
   }
 
   const {
-    emp_id, name, email, phone, department, pin, role, manager_id,
+    emp_id, name, email, phone, department, department_id, pin, role, manager_id,
     shift_id, location_id, geofencing_enabled, live_tracking_enabled,
     work_mode, allow_multiple_sessions, schedule_effective_from,
     policy_id,
@@ -250,9 +277,11 @@ export async function POST(request: NextRequest) {
       );
     }
   }
+  let siteCompanyId: number | null = null;
+  let siteName: string | null = null;
   if (location_id) {
-    const location = await queryOne<{ id: number }>(
-      'SELECT id FROM locations WHERE id = ? AND is_active = TRUE',
+    const location = await queryOne<{ id: number; name: string; company_id: number | null }>(
+      'SELECT id, name, company_id FROM locations WHERE id = ? AND is_active = TRUE',
       [location_id],
     );
     if (!location) {
@@ -261,7 +290,43 @@ export async function POST(request: NextRequest) {
         { status: 404 },
       );
     }
+    siteCompanyId = location.company_id;
+    siteName = location.name;
   }
+  // A DEPARTMENT CHOSEN FROM THE LIST, not typed.
+  //
+  // The free-text column stays and is still written, because the mobile
+  // app reads it - but its value now comes from a real department rather
+  // than from whatever somebody typed. That column currently holds an
+  // employee id and a phone number across five people, which is what
+  // free text does when nobody is watching.
+  //
+  // Choosing one also PLACES them in the organisation, so a new starter
+  // never joins the unplaced queue that sixteen people are already in.
+  let chainWarning: string | null = null;
+  let departmentName: string | null = department ?? null;
+  if (department_id) {
+    const dept = await queryOne<{ name: string; company_id: number | null }>(
+      'SELECT name, company_id FROM departments WHERE id = ? AND is_active = TRUE',
+      [department_id]);
+    if (!dept) {
+      return NextResponse.json<ApiResponse>(
+        { success: false, error: 'No such department' }, { status: 400 });
+    }
+    departmentName = dept.name;
+
+    // THE CHAIN, CHECKED. A work site belongs to a company and so does a
+    // department, and somebody rostered at one company's site while placed in
+    // another company's department is a disagreement nothing else would ever
+    // show. Reported rather than refused: both halves are deliberate acts, and
+    // a group company moving somebody between the two is a real arrangement.
+    if (siteCompanyId !== null && dept.company_id !== null
+        && siteCompanyId !== dept.company_id) {
+      chainWarning = `${siteName} belongs to a different company from the `
+        + `${dept.name} department. Check which company this person works for.`;
+    }
+  }
+
   // A policy names the shift its scheme assumes. When the admin picks a policy
   // and no shift, that is the shift they mean - and creating the employee
   // without one would leave somebody with a policy, no roster, and no hours
@@ -294,7 +359,7 @@ export async function POST(request: NextRequest) {
   // that have to agree with each other.
   const cols = ['emp_id', 'name', 'email', 'phone', 'department', 'pin_hash', 'role', 'manager_id'];
   const vals: unknown[] = [
-    emp_id, name, email ?? null, phone ?? null, department ?? null, pinHash, role, manager_id ?? null,
+    emp_id, name, email ?? null, phone ?? null, departmentName, pinHash, role, manager_id ?? null,
   ];
   if (liveTrackingColExists) {
     cols.push('live_tracking_enabled');
@@ -325,6 +390,25 @@ export async function POST(request: NextRequest) {
         auth.id,
       ],
     );
+  }
+
+  // Place them in the organisation, so the department they were given is
+  // the one department-scoped access actually reads. Non-fatal: an
+  // employee who exists but is unplaced is an ordinary state the
+  // Organisation page already reports and can correct.
+  if (department_id) {
+    try {
+      await assignToOrg({
+        employeeId: insertId,
+        departmentId: department_id,
+        reportsTo: manager_id ?? null,
+        effectiveFrom: scheduleFrom,
+        by: auth.id,
+        ip: request.headers.get('x-forwarded-for')?.split(',')[0].trim() ?? null,
+      });
+    } catch (err) {
+      console.error('[employees] org placement failed:', err);
+    }
   }
 
   // The policy goes on AFTER the schedule, so the shift it named is already in
@@ -384,7 +468,7 @@ export async function POST(request: NextRequest) {
       success: true,
       data: {
         ...employee!,
-        notes: [policyShiftNote, policyWarning].filter(Boolean) as string[],
+        notes: [policyShiftNote, policyWarning, chainWarning].filter(Boolean) as string[],
       },
     },
     { status: 201 },

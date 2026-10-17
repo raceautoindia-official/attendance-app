@@ -79,8 +79,6 @@ function monthBounds(month: string): { start: string; end: string } {
   return { start, end };
 }
 
-/** Rounds to one decimal so a chart axis does not carry false precision. */
-const hrs = (minutes: number) => Math.round((minutes / 60) * 10) / 10;
 
 export async function buildDashboard(params: { month?: string } = {}): Promise<Dashboard> {
   const now = new Date();

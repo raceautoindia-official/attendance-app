@@ -69,7 +69,6 @@ interface LedgerDay {
   notes: string | null;
 }
 
-type Closure = NonNullable<Ledger['closure']>;
 
 interface Trend {
   current: { label: string; worked_minutes: number; net_minutes: number };

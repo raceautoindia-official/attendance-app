@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
+import { zBool } from '@/lib/zodFields';
 import { requireAuth } from '@/lib/auth';
 import {
   assignPolicy, endAssignment, listAssignments, previewPolicyShiftMoves,
@@ -29,7 +30,7 @@ const AssignSchema = z.object({
   effective_from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'effective_from must be YYYY-MM-DD'),
   notes: z.string().max(500).nullable().optional(),
   /** Also move these employees onto the policy's default shift. */
-  apply_default_shift: z.boolean().optional(),
+  apply_default_shift: zBool.optional(),
 });
 
 const EndSchema = z.object({

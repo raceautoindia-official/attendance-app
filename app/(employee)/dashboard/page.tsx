@@ -10,6 +10,8 @@ import Spinner from '@/components/ui/Spinner';
 import Table from '@/components/ui/Table';
 import Pagination from '@/components/ui/Pagination';
 import LeaveBalanceCard from '@/components/LeaveBalanceCard';
+import MyAlertsCard from '@/components/MyAlertsCard';
+import MyChecklistCard from '@/components/MyChecklistCard';
 import MyDetailsCard from '@/components/MyDetailsCard';
 import PermissionHoursCard from '@/components/PermissionHoursCard';
 import { useCurrentUser } from '@/lib/useCurrentUser';
@@ -813,6 +815,16 @@ export default function DashboardPage() {
       </Card>
 
       {/* Leave balance for the current year */}
+      {/* Above the balances: when somebody has just joined, the things they
+          still have to do matter more than their leave entitlement. It
+          renders nothing at all once the checklist is finished. */}
+      <MyChecklistCard />
+
+      {/* Their own patterns, in the second person, before anybody has to raise
+          them. Renders nothing in a month with nothing to say. */}
+      <MyAlertsCard />
+
+
       <LeaveBalanceCard />
 
       {/* Permission hours — apply and track approval */}

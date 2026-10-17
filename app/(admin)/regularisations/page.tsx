@@ -68,7 +68,14 @@ export default function RegularisationsPage() {
   });
 
   const decide = useMutation({
-    mutationFn: async ({ id, action }: { id: number; action: 'approve' | 'reject' }) => {
+    mutationFn: async (
+      // 'cancel' is withdrawing a request rather than deciding it. The API has
+      // always allowed a reviewer to withdraw one on somebody's behalf - a
+      // duplicate, or a correction raised against the wrong day - and no screen
+      // sent it, so the only way out of a mistaken request was to reject it and
+      // leave a rejection on somebody's record.
+      { id, action }: { id: number; action: 'approve' | 'reject' | 'cancel' },
+    ) => {
       const res = await fetch(`/api/regularisations/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -219,6 +226,18 @@ export default function RegularisationsPage() {
                       Reject
                     </Button>
                   </div>
+                  <button
+                    type="button"
+                    disabled={decide.isPending}
+                    onClick={() => {
+                      if (confirm('Withdraw this request? It is taken off the list without being a rejection on anybody\u2019s record.')) {
+                        decide.mutate({ id: r.id, action: 'cancel' });
+                      }
+                    }}
+                    className="self-start text-xs font-medium text-slate-500 underline decoration-dotted hover:text-slate-700 disabled:opacity-50 dark:text-slate-400 dark:hover:text-slate-200"
+                  >
+                    Withdraw instead
+                  </button>
                 </div>
               )}
             </div>

@@ -1,8 +1,13 @@
+import { formatInTimeZone } from 'date-fns-tz';
+import { query } from '@/lib/db';
+import { TIMEZONE } from '@/lib/constants';
 import { closeOpenSessions } from '@/lib/closeSessions';
 import { markAbsentees } from '@/lib/markAbsent';
 import { markSundayHolidays } from '@/lib/markSundayHolidays';
 import { runLiveTrackingMonitor } from '@/lib/liveTrackingMonitor';
 import { getWorkDateIST, previousWorkDate } from '@/lib/attendance';
+import { runAlerts } from '@/lib/alerts';
+import { sendAlertDigest } from '@/lib/alertDigest';
 
 // ---------------------------------------------------------------------------
 // In-app end-of-day scheduler. On a self-healing 15-minute sweep (plus a
@@ -142,6 +147,69 @@ async function runEndOfDay(label: string): Promise<void> {
   }
 }
 
+/**
+ * Alerts.
+ *
+ * TWO CADENCES, because the rules answer two different questions.
+ *
+ * The LIVE rule - nobody has clocked in - is about this morning, so it runs
+ * on every sweep. Fifteen minutes of lag on a fact that already waited for a
+ * grace period plus a policy allowance is immaterial.
+ *
+ * The PATTERN and LIFECYCLE rules are about a month or a date, so they run
+ * ONCE A DAY, after 08:00 IST. Running them every sweep would cost ninety-six
+ * full ledger builds per employee per day to answer a question whose answer
+ * changes once. The guard is a row in the database rather than a variable, so
+ * a restart does not re-run them and two processes cannot both do it.
+ */
+async function runDailyAlerts(label: string): Promise<void> {
+  const today = getWorkDateIST();
+
+  // Live rules, every sweep.
+  try {
+    const live = await runAlerts({ family: 'live' });
+    if (live.opened > 0 || live.resolved > 0) {
+      console.log(
+        `[alerts] ${label}: ${live.opened} opened, ${live.updated} updated, `
+        + `${live.resolved} resolved (live)`,
+      );
+    }
+  } catch (err) {
+    console.error(`[alerts] ${label}: live rules failed (will retry next sweep) - ${describeError(err)}`);
+  }
+
+  // The rest, once a day. 08:00 IST is after the shifts that start at seven
+  // have had their grace period, so a pattern computed now includes today.
+  // formatInTimeZone, not toLocaleString: en-GB with hour12 false returns
+  // '24' for midnight in some runtimes, which would read as 24 >= 8 and run
+  // the daily rules at the one hour they must not.
+  const hourIst = Number(formatInTimeZone(new Date(), TIMEZONE, 'HH'));
+  if (!Number.isFinite(hourIst) || hourIst < 8) return;
+
+  try {
+    // One row per day in alert_deliveries doubles as the 'already done
+    // today' marker: the unique key makes the insert the lock, so two
+    // processes racing produce one run rather than two.
+    const claim = await query(
+      `INSERT IGNORE INTO alert_deliveries (channel, recipient, period_key, alert_count)
+       VALUES ('email', '[daily-rules]', ?, 0)`,
+      [today],
+    ) as unknown as { affectedRows?: number };
+    if (!claim?.affectedRows) return;  // somebody already ran them today
+
+    const pattern = await runAlerts({ family: 'pattern' });
+    const lifecycle = await runAlerts({ family: 'lifecycle' });
+    console.log(
+      `[alerts] ${label}: daily rules ran - `
+      + `${pattern.opened + lifecycle.opened} opened, `
+      + `${pattern.resolved + lifecycle.resolved} resolved`,
+    );
+
+    await sendAlertDigest(today);
+  } catch (err) {
+    console.error(`[alerts] ${label}: daily rules failed (will retry next sweep) - ${describeError(err)}`);
+  }
+}
 export function startAutoClockOutScheduler(): void {
   if (started) return; // guard against double-registration in one process
   started = true;
@@ -159,9 +227,11 @@ export function startAutoClockOutScheduler(): void {
   // Catch-up shortly after startup (covers a server that was down at midnight).
   setTimeout(() => { void runEndOfDay('startup catch-up'); }, STARTUP_DELAY_MS);
   setTimeout(() => { void runMonitor('startup'); }, STARTUP_DELAY_MS);
+  setTimeout(() => { void runDailyAlerts('startup catch-up'); }, STARTUP_DELAY_MS);
 
   // Self-healing periodic sweeps. Two timers, because the two jobs answer very
   // different questions: "has a day finished?" and "is someone still on site?"
   setInterval(() => { void runEndOfDay('sweep'); }, SWEEP_INTERVAL_MS);
   setInterval(() => { void runMonitor('sweep'); }, MONITOR_INTERVAL_MS);
+  setInterval(() => { void runDailyAlerts('sweep'); }, SWEEP_INTERVAL_MS);
 }

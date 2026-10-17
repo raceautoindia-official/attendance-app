@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
 import Card from '@/components/ui/Card';
+import FilterBar from '@/components/ui/FilterBar';
 import Badge from '@/components/ui/Badge';
 import Spinner from '@/components/ui/Spinner';
 import type { ApiResponse } from '@/lib/types';
@@ -78,6 +79,10 @@ export default function PerformancePage() {
   const [month, setMonth] = useState(months[1]?.value ?? months[0].value);
   const [policyId, setPolicyId] = useState<string>('');
   const [expanded, setExpanded] = useState<number | null>(null);
+  // The whole ranking is already loaded, so this narrows what is shown
+  // without refetching. Rank numbers stay as they were: filtering changes
+  // which rows you can see, not where somebody actually placed.
+  const [search, setSearch] = useState('');
 
   const { data: policies } = useQuery({
     queryKey: ['policies', 'for-performance'],
@@ -171,8 +176,28 @@ export default function PerformancePage() {
             </p>
           )}
 
+          {(() => {
+            const q = search.trim().toLowerCase();
+            const shown = q
+              ? data.ranked.filter(r => r.employee.name.toLowerCase().includes(q)
+                  || r.employee.emp_id.toLowerCase().includes(q))
+              : data.ranked;
+            return (
+          <>
+          <FilterBar
+            search={search}
+            onSearchChange={setSearch}
+            searchPlaceholder="Name or employee ID…"
+            onClear={() => setSearch('')}
+            showing={{ shown: shown.length, total: data.ranked.length, noun: 'people scored' }}
+          />
           <div className="space-y-2">
-            {data.ranked.map((s, i) => (
+            {shown.map((s) => {
+              // The rank is the position in the FULL ranking, not in the
+              // filtered view - searching for one person must not report
+              // them as first.
+              const i = data.ranked.findIndex(r => r.employee.id === s.employee.id);
+              return (
               <Card key={s.employee.id}>
                 <button
                   type="button"
@@ -262,8 +287,20 @@ export default function PerformancePage() {
                   </div>
                 )}
               </Card>
-            ))}
+              );
+            })}
+            {shown.length === 0 && search.trim() && (
+              <Card>
+                <p className="py-6 text-center text-sm text-slate-500 dark:text-slate-400">
+                  Nobody matches &ldquo;{search.trim()}&rdquo;. {data.ranked.length} people are
+                  scored for this period.
+                </p>
+              </Card>
+            )}
           </div>
+          </>
+            );
+          })()}
 
           {data.ranked.length === 0 && (
             <Card>

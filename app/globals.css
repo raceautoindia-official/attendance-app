@@ -240,3 +240,11 @@ body {
   --viz-seq-5: #6da7ec;
   --viz-seq-6: #9ec5f4;
 }
+
+/* Drawer entrance. Lives here rather than in the component so the keyframe is
+   defined once, not re-injected on every open. Guarded by motion-safe at the
+   call site, so it does nothing for anyone who asked for reduced motion. */
+@keyframes drawer-in {
+  from { transform: translateX(16px); opacity: 0.6; }
+  to   { transform: translateX(0);    opacity: 1; }
+}

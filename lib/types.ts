@@ -135,6 +135,9 @@ export interface RefreshToken {
 }
 
 export interface Location {
+  /** Which company this site belongs to, and its name for a label. */
+  company_id?: number | null;
+  company_name?: string | null;
   id: number;
   name: string;
   address: string | null;

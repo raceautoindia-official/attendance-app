@@ -19,7 +19,7 @@
  */
 
 import { buildHoursLedger } from '../lib/hoursLedger';
-import { query, queryOne, pool } from '../lib/db';
+import { query, pool } from '../lib/db';
 
 let passed = 0;
 let failed = 0;

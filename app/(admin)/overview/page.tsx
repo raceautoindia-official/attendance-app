@@ -15,6 +15,7 @@ import type {
 } from '@/lib/types';
 import { formatDateOnly } from '@/lib/date';
 import DashboardPanel from '@/components/dashboard/DashboardPanel';
+import AlertStrip from '@/components/AlertStrip';
 
 type DayRow = DayAttendanceRow;
 
@@ -208,6 +209,10 @@ export default function OverviewPage() {
 
   return (
     <div className="space-y-6">
+      {/* Above even the dashboard, because it is the only thing on this page
+          that is waiting for somebody. It renders nothing when nothing is. */}
+      <AlertStrip />
+
       {/* The dashboard goes FIRST: the figures that decide what to do today,
           above the tables that answer a question somebody already has. The
           existing widgets below are untouched. */}

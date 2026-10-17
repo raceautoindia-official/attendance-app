@@ -22,13 +22,33 @@ interface QuotaRow {
 }
 
 type Totals = { casual_total: number; sick_total: number; earned_total: number };
+/**
+ * The same three fields while they are being typed.
+ *
+ * Text, not numbers: parsing on every keystroke meant an empty field became 0
+ * and could not be cleared. Converted back with clampDays when a row is saved.
+ */
+type TotalsText = { casual_total: string; sick_total: string; earned_total: string };
 
 const numInputClass = 'w-16 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 px-2 py-1.5 text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500';
 
-function clampDays(raw: string): number {
-  const n = parseInt(raw, 10);
+/**
+ * Days, held as TEXT while somebody is typing.
+ *
+ * The previous version parsed on every keystroke and returned 0 for anything
+ * unparseable, so clearing a field snapped it back to "0" and could not be
+ * emptied - the same family of bug as the rate fields on the statutory screen.
+ * The text is the state; the number is taken from it when the row is saved.
+ */
+function clampDays(raw: string | number): number {
+  const n = parseInt(String(raw), 10);
   if (isNaN(n)) return 0;
   return Math.min(365, Math.max(0, n));
+}
+
+/** Only digits, and never more than three of them - 365 is the ceiling. */
+function daysText(raw: string): string {
+  return raw.replace(/[^0-9]/g, '').slice(0, 3);
 }
 
 /** Yearly leave entitlement editor — lists every employee with their quota
@@ -40,8 +60,8 @@ export default function LeaveQuotasPanel({ canEdit }: { canEdit: boolean }) {
   const years = [currentYear - 2, currentYear - 1, currentYear, currentYear + 1];
 
   // Per-row unsaved edits, keyed by employee id.
-  const [edits, setEdits] = useState<Record<number, Totals>>({});
-  const [bulk, setBulk] = useState<Totals>({ casual_total: 12, sick_total: 6, earned_total: 12 });
+  const [edits, setEdits] = useState<Record<number, TotalsText>>({});
+  const [bulk, setBulk] = useState<TotalsText>({ casual_total: '12', sick_total: '6', earned_total: '12' });
   const [error, setError] = useState<string | null>(null);
   const [importSummary, setImportSummary] = useState<{ message: string; skipped: string[] } | null>(null);
   const importFileRef = useRef<HTMLInputElement>(null);
@@ -112,21 +132,29 @@ export default function LeaveQuotasPanel({ canEdit }: { canEdit: boolean }) {
     },
   });
 
-  const rowValues = (row: QuotaRow): Totals =>
+  const rowValues = (row: QuotaRow): TotalsText =>
     edits[row.employee_id] ?? {
-      casual_total: row.casual_total,
-      sick_total: row.sick_total,
-      earned_total: row.earned_total,
+      casual_total: String(row.casual_total),
+      sick_total: String(row.sick_total),
+      earned_total: String(row.earned_total),
     };
 
   const setRowValue = (employeeId: number, row: QuotaRow, key: keyof Totals, raw: string) => {
     setEdits(prev => ({
       ...prev,
-      [employeeId]: { ...(prev[employeeId] ?? rowValues(row)), [key]: clampDays(raw) },
+      [employeeId]: { ...(prev[employeeId] ?? rowValues(row)), [key]: daysText(raw) },
     }));
   };
 
-  const remaining = (total: number, used: number) => Math.max(0, total - used);
+  /** Text in, numbers out. The one place the conversion happens. */
+  const asTotals = (t: TotalsText): Totals => ({
+    casual_total: clampDays(t.casual_total),
+    sick_total: clampDays(t.sick_total),
+    earned_total: clampDays(t.earned_total),
+  });
+
+  const remaining = (total: string | number, used: number) =>
+    Math.max(0, clampDays(total) - used);
 
   return (
     <div className="space-y-4">
@@ -189,7 +217,7 @@ export default function LeaveQuotasPanel({ canEdit }: { canEdit: boolean }) {
                   min={0}
                   max={365}
                   value={bulk[key]}
-                  onChange={e => setBulk(prev => ({ ...prev, [key]: clampDays(e.target.value) }))}
+                  onChange={e => setBulk(prev => ({ ...prev, [key]: daysText(e.target.value) }))}
                   className={numInputClass}
                 />
               </div>
@@ -200,7 +228,7 @@ export default function LeaveQuotasPanel({ canEdit }: { canEdit: boolean }) {
               loading={saveMutation.isPending}
               onClick={() => {
                 if (confirm(`Set the ${year} quota to Casual ${bulk.casual_total} / Sick ${bulk.sick_total} / Earned ${bulk.earned_total} for ALL active employees? This overwrites existing quotas for ${year}.`)) {
-                  saveMutation.mutate({ apply_to_all: true, year, ...bulk });
+                  saveMutation.mutate({ apply_to_all: true, year, ...asTotals(bulk) });
                 }
               }}
             >
@@ -296,7 +324,7 @@ export default function LeaveQuotasPanel({ canEdit }: { canEdit: boolean }) {
                           size="sm"
                           disabled={!dirty}
                           loading={saveMutation.isPending && dirty}
-                          onClick={() => saveMutation.mutate({ employee_id: row.employee_id, year, ...values })}
+                          onClick={() => saveMutation.mutate({ employee_id: row.employee_id, year, ...asTotals(values) })}
                         >
                           Save
                         </Button>

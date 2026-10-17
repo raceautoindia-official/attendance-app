@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
+import { zBool } from '@/lib/zodFields';
 import { requireAuth } from '@/lib/auth';
 import { createPolicy, listPolicies, type Policy } from '@/lib/policy';
 import type { ApiResponse } from '@/lib/types';
@@ -51,7 +52,7 @@ export const PolicySchema = z.object({
     'The code must be 2–40 characters: letters, numbers, dot, dash or underscore.',
   )),
   description: z.string().max(500).nullable().optional(),
-  is_active: z.boolean().optional(),
+  is_active: zBool.optional(),
 
   hours_basis: z.enum(['roster', 'fixed_monthly']).optional(),
   monthly_hours: optNum(0, 744),          // 31 days x 24h is the absolute ceiling
@@ -63,6 +64,18 @@ export const PolicySchema = z.object({
   // The columns exist in the schema, dormant, so introducing one later needs
   // no migration.
   late_grace_minutes: optNum(0, 240),
+
+  // Alert thresholds. NULL is off, which is why every one of these is
+  // optional and nullable rather than defaulted: a policy saved before this
+  // existed must stay silent.
+  late_alert_days_per_month: optNum(1, 31),
+  leave_alert_days_per_month: optNum(1, 31),
+  // Up to eight hours past the grace period. Beyond that the working day is
+  // over and the absence job has already recorded it.
+  missing_clockin_alert_minutes: optNum(1, 480),
+  // A share, not a percentage. 1 would alert on anybody not exactly on
+  // target, which is everybody.
+  low_hours_alert_ratio: optNum(0.1, 0.99),
   overtime_after_minutes: optNum(0, 1440),
   overtime_multiplier: optNum(0, 10),
 
@@ -72,13 +85,13 @@ export const PolicySchema = z.object({
   carry_forward_days: optNum(0, 365),
   permission_hours_per_month: optNum(0, 100),
 
-  pf_applicable: z.boolean().optional(),
-  esi_applicable: z.boolean().optional(),
-  professional_tax_applicable: z.boolean().optional(),
-  income_tax_tds_applicable: z.boolean().optional(),
-  gratuity_applicable: z.boolean().optional(),
-  lwf_applicable: z.boolean().optional(),
-  bonus_applicable: z.boolean().optional(),
+  pf_applicable: zBool.optional(),
+  esi_applicable: zBool.optional(),
+  professional_tax_applicable: zBool.optional(),
+  income_tax_tds_applicable: zBool.optional(),
+  gratuity_applicable: zBool.optional(),
+  lwf_applicable: zBool.optional(),
+  bonus_applicable: zBool.optional(),
 
   probation_months: optNum(0, 60),
   notice_period_days: optNum(0, 365),

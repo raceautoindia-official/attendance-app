@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
+import { zBool } from '@/lib/zodFields';
 import { requireAuth } from '@/lib/auth';
 import { setObservance, HolidayError, type ObservanceChange } from '@/lib/holidays';
 import type { ApiResponse } from '@/lib/types';
@@ -7,7 +8,7 @@ import type { ApiResponse } from '@/lib/types';
 const ObservanceSchema = z.object({
   /** null = all locations, including employees with no location assigned. */
   location_id: z.number().int().positive().nullable(),
-  is_observed: z.boolean(),
+  is_observed: zBool,
   /**
    * Required to observe a holiday flagged `needs_verification`: the bundled date
    * for a lunar festival is only a placeholder.

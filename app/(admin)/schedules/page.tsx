@@ -8,11 +8,14 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Table from '@/components/ui/Table';
 import Button from '@/components/ui/Button';
 import Input from '@/components/ui/Input';
-import Modal from '@/components/ui/Modal';
+import Drawer from '@/components/ui/Drawer';
 import Badge from '@/components/ui/Badge';
 import Spinner from '@/components/ui/Spinner';
+import FilterBar from '@/components/ui/FilterBar';
 import type { Shift, Employee, Location, ApiResponse } from '@/lib/types';
 import { useCurrentUser } from '@/lib/useCurrentUser';
+import { suggestShiftName } from '@/lib/suggest';
+import Suggest from '@/components/ui/Suggest';
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
@@ -154,6 +157,17 @@ export default function SchedulesPage() {
   const assignments = assignData?.data?.assignments ?? [];
 
   const shifts = shiftsData?.data?.shifts ?? [];
+
+  // The whole list is loaded, so this narrows in the browser. The counts in
+  // FilterBar report against the full total, so a filtered table cannot be
+  // mistaken for an empty one.
+  const [shiftSearch, setShiftSearch] = useState('');
+  const visibleShifts = shiftSearch.trim()
+    ? shifts.filter(sh => {
+        const q = shiftSearch.trim().toLowerCase();
+        return sh.name.toLowerCase().includes(q) || String(sh.type).toLowerCase().includes(q);
+      })
+    : shifts;
   const employees = empData?.data?.employees ?? [];
   const locations = locData?.data?.locations ?? [];
 
@@ -163,6 +177,10 @@ export default function SchedulesPage() {
     defaultValues: { type: 'fixed', grace_minutes: 10, unpaid_break_minutes: null, working_days: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'] },
   });
   const shiftType = useWatch({ control: shiftForm.control, name: 'type' });
+  const shiftStart = useWatch({ control: shiftForm.control, name: 'start_time' });
+  const shiftEnd = useWatch({ control: shiftForm.control, name: 'end_time' });
+  const shiftName = useWatch({ control: shiftForm.control, name: 'name' });
+  const suggestedName = suggestShiftName(shiftType, shiftStart, shiftEnd);
   const workingDays = useWatch({ control: shiftForm.control, name: 'working_days' }) ?? [];
 
   const createShiftMutation = useMutation({
@@ -193,6 +211,12 @@ export default function SchedulesPage() {
     defaultValues: { type: 'fixed', grace_minutes: 10, unpaid_break_minutes: null, working_days: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'] },
   });
   const editShiftType = useWatch({ control: editShiftForm.control, name: 'type' });
+  const editShiftStart = useWatch({ control: editShiftForm.control, name: 'start_time' });
+  const editShiftEnd = useWatch({ control: editShiftForm.control, name: 'end_time' });
+  const editShiftName = useWatch({ control: editShiftForm.control, name: 'name' });
+  // Offered on edit too: the shift whose name says nothing is the one that
+  // already exists, so the fix has to be reachable from where it is read.
+  const editSuggestedName = suggestShiftName(editShiftType, editShiftStart, editShiftEnd);
   const editWorkingDays = useWatch({ control: editShiftForm.control, name: 'working_days' }) ?? [];
 
   function openEditShift(shift: Shift) {
@@ -246,8 +270,10 @@ export default function SchedulesPage() {
 
   // What the employee picked in the modal already has, so the admin can see
   // what a second shift would sit next to.
-  const selectedEmployeeId = Number(assignForm.watch('employee_id')) || null;
-  const addAsSecond = assignForm.watch('additional');
+  const assignEmployeeId = useWatch({ control: assignForm.control, name: 'employee_id' });
+  const selectedEmployeeId = Number(assignEmployeeId) || null;
+  const addAsSecond = useWatch({ control: assignForm.control, name: 'additional' });
+  const assignLocationId = useWatch({ control: assignForm.control, name: 'location_id' });
   const selectedAssignment = selectedEmployeeId
     ? assignments.find(a => a.employee_id === selectedEmployeeId)
     : undefined;
@@ -340,7 +366,7 @@ export default function SchedulesPage() {
       <div className="flex gap-3 justify-end">
         <Button variant="secondary" onClick={() => setAssignOpen(true)}>Assign Schedule</Button>
         {isSuperAdmin && (
-          <Button onClick={() => setAddOpen(true)}>
+          <Button data-tour="shift-new" onClick={() => setAddOpen(true)}>
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
             </svg>
@@ -430,6 +456,16 @@ export default function SchedulesPage() {
         )}
       </div>
 
+      {(shifts ?? []).length > 0 && (
+        <FilterBar
+          search={shiftSearch}
+          onSearchChange={setShiftSearch}
+          searchPlaceholder="Shift name or type…"
+          onClear={() => setShiftSearch('')}
+          showing={{ shown: visibleShifts.length, total: (shifts ?? []).length, noun: 'shifts' }}
+        />
+      )}
+
       {shiftsLoading ? (
         <div className="flex justify-center py-12"><Spinner /></div>
       ) : (
@@ -485,16 +521,22 @@ export default function SchedulesPage() {
               headerClassName: 'text-right',
             },
           ]}
-          data={shifts as object[]}
+          data={visibleShifts as object[]}
           emptyMessage="No shifts defined yet."
         />
       )}
 
       {/* Create shift modal */}
-      <Modal open={addOpen} onClose={() => setAddOpen(false)} title="Create Shift" size="lg">
+      <Drawer open={addOpen} onClose={() => setAddOpen(false)} title="Create Shift" size="lg">
         <form onSubmit={shiftForm.handleSubmit((v: ShiftForm) => createShiftMutation.mutate(v))} className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
-            <Input label="Shift Name" {...shiftForm.register('name')} error={shiftForm.formState.errors.name?.message} />
+            <div className="flex flex-col gap-1">
+              <Input label="Shift Name" {...shiftForm.register('name')}
+                error={shiftForm.formState.errors.name?.message}
+                helper="Other people meet this name in a dropdown with no other context, so it should say when the shift runs." />
+              <Suggest suggestion={suggestedName} current={shiftName}
+                onUse={v => shiftForm.setValue('name', v, { shouldDirty: true })} />
+            </div>
             <div className="flex flex-col gap-1">
               <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Type</label>
               <select {...shiftForm.register('type')} className={selectClass}>
@@ -556,14 +598,20 @@ export default function SchedulesPage() {
             <Button type="submit" loading={createShiftMutation.isPending}>Create Shift</Button>
           </div>
         </form>
-      </Modal>
+      </Drawer>
 
       {/* Edit shift modal */}
-      <Modal open={!!editTarget} onClose={() => setEditTarget(null)} title="Edit Shift" size="lg">
+      <Drawer open={!!editTarget} onClose={() => setEditTarget(null)} title="Edit Shift" size="lg">
         {editTarget && (
           <form onSubmit={editShiftForm.handleSubmit((v: ShiftForm) => editShiftMutation.mutate({ id: editTarget.id, values: v }))} className="space-y-4">
             <div className="grid grid-cols-2 gap-4">
-              <Input label="Shift Name" {...editShiftForm.register('name')} error={editShiftForm.formState.errors.name?.message} />
+              <div className="flex flex-col gap-1">
+                <Input label="Shift Name" {...editShiftForm.register('name')}
+                  error={editShiftForm.formState.errors.name?.message}
+                  helper="Read in a dropdown with no other context, so it should say when the shift runs." />
+                <Suggest suggestion={editSuggestedName} current={editShiftName}
+                  onUse={v => editShiftForm.setValue('name', v, { shouldDirty: true })} />
+              </div>
               <div className="flex flex-col gap-1">
                 <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Type</label>
                 <select {...editShiftForm.register('type')} className={selectClass}>
@@ -623,10 +671,10 @@ export default function SchedulesPage() {
             </div>
           </form>
         )}
-      </Modal>
+      </Drawer>
 
       {/* Assign schedule modal */}
-      <Modal open={assignOpen} onClose={() => setAssignOpen(false)} title="Assign Schedule">
+      <Drawer open={assignOpen} onClose={() => setAssignOpen(false)} title="Assign Schedule">
         <form onSubmit={assignForm.handleSubmit((v: AssignForm) => assignMutation.mutate(v))} className="space-y-4">
           <div className="flex flex-col gap-1">
             <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Employee</label>
@@ -707,13 +755,13 @@ export default function SchedulesPage() {
 
           <label className="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" {...assignForm.register('geofencing_enabled')}
-              disabled={!assignForm.watch('location_id')}
+              disabled={!assignLocationId}
               className="w-4 h-4 rounded border-slate-300 text-blue-600 disabled:opacity-50" />
-            <span className={`text-sm ${assignForm.watch('location_id')
+            <span className={`text-sm ${assignLocationId
               ? 'text-slate-700 dark:text-slate-300'
               : 'text-slate-400 dark:text-slate-500'}`}>
               Enable geofencing
-              {!assignForm.watch('location_id') && ' — pick a location first'}
+              {!assignLocationId && ' — pick a location first'}
             </span>
           </label>
 
@@ -731,7 +779,7 @@ export default function SchedulesPage() {
             <Button type="submit" loading={assignMutation.isPending}>Assign</Button>
           </div>
         </form>
-      </Modal>
+      </Drawer>
     </div>
   );
 }

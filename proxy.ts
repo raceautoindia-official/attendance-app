@@ -20,6 +20,8 @@ const PROTECTED_API_PREFIXES = [
   '/api/leaves',
   '/api/audit-log',
   '/api/policies',
+  '/api/org',
+  '/api/access',
 ];
 
 const ADMIN_PAGE_PREFIXES = [
@@ -37,6 +39,9 @@ const ADMIN_PAGE_PREFIXES = [
   '/policies',
   '/performance',
   '/documents',
+  '/organisation',
+  '/access',
+  '/onboarding',
 ];
 
 const EMPLOYEE_PAGE_PREFIXES = ['/dashboard'];

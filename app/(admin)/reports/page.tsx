@@ -1,12 +1,12 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import Table from '@/components/ui/Table';
 import Button from '@/components/ui/Button';
 import Input from '@/components/ui/Input';
-import Modal from '@/components/ui/Modal';
+import Drawer from '@/components/ui/Drawer';
 import Badge from '@/components/ui/Badge';
 import Pagination from '@/components/ui/Pagination';
 import Spinner from '@/components/ui/Spinner';
@@ -158,6 +158,210 @@ const CORE_COLUMNS = new Set([
   'attendance_percentage',
 ]);
 
+interface MonthClosure {
+  period_month: string;
+  closed_through: string;
+  is_closed: boolean;
+  closed_by_name: string | null;
+  closed_at: string;
+  reopened_by_name: string | null;
+  reopened_at: string | null;
+  reopen_reason: string | null;
+  notes: string | null;
+}
+
+/**
+ * Closing the month, and lifting it again.
+ *
+ * The ledger below has always said 'close the month once it has been reviewed
+ * to make it final' and 'cannot be edited unless the month is reopened'. Both
+ * acts existed only in the API: a whole sign-off feature, with an audit trail
+ * and a reopen reason, that no screen could reach. Figures were either never
+ * final or frozen by somebody with a database client.
+ *
+ * It sits with the period picker because closing is a statement about the
+ * period showing, and nowhere else on the page is about a month as a whole.
+ */
+function MonthCloseCard({ month, onChanged }: {
+  /** YYYY-MM, or '' when the range is not exactly one month. */
+  month: string;
+  onChanged: () => void;
+}) {
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [notes, setNotes] = useState('');
+  const [reason, setReason] = useState('');
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  const { data: closure, isLoading } = useQuery<MonthClosure | null>({
+    queryKey: ['month-close', month],
+    enabled: month !== '',
+    queryFn: async () => {
+      const res = await fetch(`/api/month-close?month=${month}`);
+      const json: ApiResponse<{ closure: MonthClosure | null }> = await res.json();
+      if (!json.success) throw new Error(json.error ?? 'Could not read the closure');
+      return json.data?.closure ?? null;
+    },
+  });
+
+  const after = () => {
+    qc.invalidateQueries({ queryKey: ['month-close'] });
+    onChanged();
+  };
+
+  const close = useMutation({
+    mutationFn: async () => {
+      const res = await fetch('/api/month-close', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ month, notes: notes.trim() || null }),
+      });
+      const json: ApiResponse<{ warnings: string[] }> = await res.json();
+      if (!json.success) throw new Error(json.error ?? 'Could not close the month');
+      return json.data?.warnings ?? [];
+    },
+    onSuccess: w => {
+      // Warnings are what the server noticed, not a refusal - the month IS
+      // closed. Shown afterwards so they are not mistaken for an error.
+      setWarnings(w); setError(null); setNotes(''); setOpen(false); after();
+    },
+    onError: (e: Error) => setError(e.message),
+  });
+
+  const reopen = useMutation({
+    mutationFn: async () => {
+      const res = await fetch('/api/month-close', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ month, reason: reason.trim() }),
+      });
+      const json: ApiResponse = await res.json();
+      if (!json.success) throw new Error(json.error ?? 'Could not reopen the month');
+      return true;
+    },
+    onSuccess: () => {
+      setWarnings([]); setError(null); setReason(''); setOpen(false); after();
+    },
+    onError: (e: Error) => setError(e.message),
+  });
+
+  if (month === '') {
+    return (
+      <Card>
+        <p className="text-xs text-slate-500 dark:text-slate-400">
+          <strong>Signing a month off.</strong> Pick a whole month above and the
+          option to close it appears here. Closing is about a calendar month, so it
+          cannot be done for a custom range.
+        </p>
+      </Card>
+    );
+  }
+
+  const label = new Date(`${month}-01T00:00:00Z`).toLocaleDateString('en-IN', {
+    month: 'long', year: 'numeric', timeZone: 'UTC',
+  });
+  const isClosed = Boolean(closure?.is_closed);
+
+  return (
+    <Card className={isClosed
+      ? 'border-l-4 border-l-emerald-500'
+      : 'border-l-4 border-l-slate-300 dark:border-l-slate-600'}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+            {label} is {isLoading ? '\u2026' : isClosed ? 'closed' : 'open'}
+          </h2>
+          <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+            {isClosed
+              ? `Figures are final through ${closure!.closed_through}. Attendance in this period cannot be edited, and a shift cannot be backdated into it.`
+              : 'Figures can still change - a correction or a late clock-out will move them. Close it once the month has been reviewed.'}
+          </p>
+          {isClosed && closure && (
+            <p className="mt-1 text-xs text-slate-400">
+              Signed off{closure.closed_by_name ? ` by ${closure.closed_by_name}` : ''}
+              {closure.closed_at
+                ? ` on ${new Date(closure.closed_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}`
+                : ''}
+              {closure.notes ? ` \u00b7 ${closure.notes}` : ''}
+            </p>
+          )}
+          {!isClosed && closure?.reopened_at && (
+            <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">
+              Reopened{closure.reopened_by_name ? ` by ${closure.reopened_by_name}` : ''}
+              {closure.reopen_reason ? `: ${closure.reopen_reason}` : ''}
+            </p>
+          )}
+        </div>
+        <Button
+          variant={isClosed ? 'secondary' : 'primary'}
+          onClick={() => { setOpen(v => !v); setError(null); }}
+          className="shrink-0"
+        >
+          {open ? 'Cancel' : isClosed ? 'Reopen this month' : 'Close this month'}
+        </Button>
+      </div>
+
+      {open && !isClosed && (
+        <div className="mt-3 space-y-2 border-t border-slate-200 pt-3 dark:border-slate-700">
+          <Input
+            label="Note for the record (optional)"
+            value={notes}
+            onChange={e => setNotes(e.target.value)}
+            placeholder="Reviewed against the muster roll"
+          />
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            This locks every day in {label}. Anything the app noticed - an open
+            session, somebody with no hours - is reported after closing rather than
+            blocking it, because only you know whether it matters.
+          </p>
+          <Button loading={close.isPending} onClick={() => close.mutate()}>
+            Close {label}
+          </Button>
+        </div>
+      )}
+
+      {open && isClosed && (
+        <div className="mt-3 space-y-2 border-t border-slate-200 pt-3 dark:border-slate-700">
+          <Input
+            label="Why is it being reopened?"
+            value={reason}
+            onChange={e => setReason(e.target.value)}
+            placeholder="Missing clock-out for two people on the 28th"
+          />
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            The reason goes on the record next to who reopened it and when. Figures
+            already acted on can change after this, which is why it is asked for.
+          </p>
+          <Button
+            variant="danger"
+            loading={reopen.isPending}
+            disabled={reason.trim().length < 5}
+            onClick={() => reopen.mutate()}
+          >
+            Reopen {label}
+          </Button>
+        </div>
+      )}
+
+      {warnings.length > 0 && (
+        <div className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+          <p className="font-semibold">Closed, with things worth a look:</p>
+          <ul className="mt-1 list-disc space-y-0.5 pl-4">
+            {warnings.map(w => <li key={w}>{w}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {error && (
+        <p className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-950/40 dark:text-red-300">
+          {error}
+        </p>
+      )}
+    </Card>
+  );
+}
+
 export default function ReportsPage() {
   return (
     <Suspense fallback={<Card><div className="flex justify-center py-10"><Spinner /></div></Card>}>
@@ -208,6 +412,7 @@ function ReportsPageInner() {
     const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
     return toDate === `${ym}-${String(last).padStart(2, '0')}` ? ym : '';
   }, [fromDate, toDate]);
+  const qc = useQueryClient();
   const [employeeId, setEmployeeId] = useState('');
   const [page, setPage] = useState(1);
   const [exporting, setExporting] = useState<'csv' | 'pdf' | 'excel' | null>(null);
@@ -433,6 +638,15 @@ function ReportsPageInner() {
           </div>
         </div>
       </Card>
+
+      {/* 1b. IS IT FINAL - the sign-off, next to the period it signs off. */}
+      <MonthCloseCard
+        month={monthValue}
+        onChanged={() => {
+          qc.invalidateQueries({ queryKey: ['hours-ledger'] });
+          qc.invalidateQueries({ queryKey: ['reports'] });
+        }}
+      />
 
       {/* 2. WHAT TO SHOW, and what to take away ------------------------ */}
       <div className="flex flex-wrap items-center gap-3">
@@ -1057,7 +1271,7 @@ function ReportsPageInner() {
       ))}
 
       {/* Which days sit behind an Absent / Leave count */}
-      <Modal
+      <Drawer
         open={!!drillDown}
         onClose={() => setDrillDown(null)}
         title={drillDown?.kind === 'absent' ? 'Absent Days' : 'Leave Days'}
@@ -1109,7 +1323,7 @@ function ReportsPageInner() {
             </div>
           </div>
         )}
-      </Modal>
+      </Drawer>
     </div>
   );
 }

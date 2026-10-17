@@ -592,3 +592,153 @@ export async function addManualHoliday(args: {
 
   return id;
 }
+
+/**
+ * Correct a holiday already on the calendar.
+ *
+ * Adding one was the only act the calendar allowed: a typo in a name, a date
+ * entered as the wrong day, or a duplicate added twice, stayed on the list for
+ * good and the only remedy was to leave it unobserved and ignore it. (The date
+ * could be corrected, but ONLY as a side effect of observing it with a
+ * confirmed date, which is not something anybody would find.)
+ *
+ * WHAT IS SAFE TO CHANGE, AND WHEN
+ * --------------------------------
+ * The name, the type, the state and the notes are labels - changing them moves
+ * nobody's hours, so they may be changed at any time.
+ *
+ * The DATE decides which day stops counting towards required hours, so it may
+ * only be changed while the holiday is observed nowhere. Once a site observes
+ * it there is a real closure on a real day, possibly inside a month already
+ * closed, and moving it silently would rewrite what people were held to. The
+ * way to move an observed holiday is to switch its sites off, change the date,
+ * and switch them on again - three deliberate acts, each audited.
+ *
+ * Editing marks the row `manual`, which is what stops the bundled importer
+ * overwriting the correction on the next import.
+ */
+export async function editHoliday(args: {
+  id: number;
+  date?: string;
+  name?: string;
+  type?: HolidayType;
+  stateCode?: string | null;
+  notes?: string | null;
+  actorId: number;
+}): Promise<void> {
+  const holiday = await queryOne<{
+    id: number; holiday_date: string; name: string; observed: number;
+  }>(
+    `SELECT hc.id, hc.holiday_date, hc.name,
+            (SELECT COUNT(*) FROM holiday_observances o
+              WHERE o.holiday_id = hc.id AND o.is_observed = TRUE) AS observed
+       FROM holiday_calendar hc WHERE hc.id = ? LIMIT 1`,
+    [args.id],
+  );
+  if (!holiday) throw new HolidayError('No such holiday in the calendar.', 404);
+
+  const sets: string[] = [];
+  const values: unknown[] = [];
+
+  if (args.date !== undefined) {
+    if (!YMD.test(args.date)) throw new HolidayError('Date must be YYYY-MM-DD.');
+    if (args.date !== ymd(holiday.holiday_date)) {
+      if (Number(holiday.observed) > 0) {
+        throw new HolidayError(
+          `"${holiday.name}" is observed somewhere, so its date cannot be moved from here - `
+          + 'the closure is already on that day. Switch every site off first, change the '
+          + 'date, then switch them back on.',
+        );
+      }
+      sets.push('holiday_date = ?', 'year = ?', 'needs_verification = FALSE');
+      values.push(args.date, Number(args.date.slice(0, 4)));
+    }
+  }
+
+  if (args.name !== undefined) {
+    if (!args.name.trim()) throw new HolidayError('A name is required.');
+    sets.push('name = ?');
+    values.push(args.name.trim());
+  }
+  if (args.type !== undefined) { sets.push('holiday_type = ?'); values.push(args.type); }
+  if (args.stateCode !== undefined) { sets.push('state_code = ?'); values.push(args.stateCode); }
+  if (args.notes !== undefined) { sets.push('notes = ?'); values.push(args.notes); }
+
+  if (sets.length === 0) return;
+
+  // Hand-edited rows are left alone by the importer, which is the point.
+  sets.push("source = 'manual'");
+
+  await query(
+    `UPDATE holiday_calendar SET ${sets.join(', ')} WHERE id = ?`,
+    [...values, args.id],
+  );
+
+  await insertAuditLog({
+    action: 'holiday_edited',
+    entity: 'holiday',
+    entity_id: args.id,
+    performed_by: args.actorId,
+    details: {
+      was: { date: ymd(holiday.holiday_date), name: holiday.name },
+      now: { date: args.date, name: args.name, type: args.type, notes: args.notes },
+    },
+  });
+}
+
+/**
+ * Take a holiday off the calendar.
+ *
+ * Only one that closes nothing. A holiday observed anywhere has written a
+ * `leave_records` row that attendance, required hours and every figure built on
+ * them already read; deleting it underneath them would change a month's figures
+ * with no record of why. Switching the sites off reverses that properly - it is
+ * audited, and it puts the hours back - and only then is there nothing left to
+ * lose by removing the row.
+ *
+ * A row that came from the bundled dataset or the holiday library can be removed
+ * too, but importing that year again will offer it back. The caller is told so,
+ * because a date that reappears looks like the delete silently failed.
+ */
+export async function removeHoliday(args: {
+  id: number;
+  actorId: number;
+}): Promise<{ name: string; date: string; source: string }> {
+  const holiday = await queryOne<{
+    id: number; holiday_date: string; name: string; source: string; observed: number;
+  }>(
+    `SELECT hc.id, hc.holiday_date, hc.name, hc.source,
+            (SELECT COUNT(*) FROM holiday_observances o
+              WHERE o.holiday_id = hc.id AND o.is_observed = TRUE) AS observed
+       FROM holiday_calendar hc WHERE hc.id = ? LIMIT 1`,
+    [args.id],
+  );
+  if (!holiday) throw new HolidayError('No such holiday in the calendar.', 404);
+
+  if (Number(holiday.observed) > 0) {
+    throw new HolidayError(
+      `"${holiday.name}" is observed somewhere, so it is a real closure and cannot `
+      + 'just be deleted. Untick every site under "Who closes" first - that puts the '
+      + 'hours back - and then remove it.',
+    );
+  }
+
+  // Observance rows that say 'not observed' are decisions, not closures. They
+  // go with the holiday they were about.
+  await query('DELETE FROM holiday_observances WHERE holiday_id = ?', [args.id]);
+  await query('DELETE FROM holiday_calendar WHERE id = ?', [args.id]);
+
+  await insertAuditLog({
+    action: 'holiday_removed',
+    entity: 'holiday',
+    entity_id: args.id,
+    performed_by: args.actorId,
+    details: {
+      date: ymd(holiday.holiday_date), name: holiday.name, source: holiday.source,
+    },
+  });
+
+  return {
+    name: holiday.name, date: ymd(holiday.holiday_date), source: holiday.source,
+  };
+}

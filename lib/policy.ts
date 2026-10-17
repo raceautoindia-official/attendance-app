@@ -47,6 +47,10 @@ export interface Policy {
   min_hours_full_day: number | null;
   min_hours_half_day: number | null;
   late_grace_minutes: number | null;
+  late_alert_days_per_month: number | null;
+  leave_alert_days_per_month: number | null;
+  missing_clockin_alert_minutes: number | null;
+  low_hours_alert_ratio: number | null;
   overtime_after_minutes: number | null;
   overtime_multiplier: number | null;
 
@@ -110,6 +114,10 @@ function toPolicy(r: Record<string, unknown>): Policy {
     min_hours_full_day: num(r.min_hours_full_day),
     min_hours_half_day: num(r.min_hours_half_day),
     late_grace_minutes: num(r.late_grace_minutes),
+    late_alert_days_per_month: num(r.late_alert_days_per_month),
+    leave_alert_days_per_month: num(r.leave_alert_days_per_month),
+    missing_clockin_alert_minutes: num(r.missing_clockin_alert_minutes),
+    low_hours_alert_ratio: num(r.low_hours_alert_ratio),
     overtime_after_minutes: num(r.overtime_after_minutes),
     overtime_multiplier: num(r.overtime_multiplier),
 
@@ -269,6 +277,10 @@ export interface PolicyInput {
   min_hours_full_day?: number | null;
   min_hours_half_day?: number | null;
   late_grace_minutes?: number | null;
+  late_alert_days_per_month?: number | null;
+  leave_alert_days_per_month?: number | null;
+  missing_clockin_alert_minutes?: number | null;
+  low_hours_alert_ratio?: number | null;
   overtime_after_minutes?: number | null;
   overtime_multiplier?: number | null;
   casual_leave_days?: number | null;
@@ -294,6 +306,8 @@ const COLUMNS: Array<keyof PolicyInput> = [
   'name', 'code', 'description', 'is_active',
   'hours_basis', 'monthly_hours', 'week_offs_per_month', 'default_shift_id',
   'min_hours_full_day', 'min_hours_half_day', 'late_grace_minutes',
+  'late_alert_days_per_month', 'leave_alert_days_per_month',
+  'missing_clockin_alert_minutes', 'low_hours_alert_ratio',
   'overtime_after_minutes', 'overtime_multiplier',
   'casual_leave_days', 'sick_leave_days', 'earned_leave_days',
   'carry_forward_days', 'permission_hours_per_month',

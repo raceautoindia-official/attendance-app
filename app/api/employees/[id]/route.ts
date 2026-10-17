@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
+import { zBool } from '@/lib/zodFields';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth, hashPin } from '@/lib/auth';
 import { getWorkDateIST } from '@/lib/attendance';
+import { assignToOrg, listAssignments } from '@/lib/org';
 import {
   hasBankColumns,
   bankSelect,
@@ -147,12 +149,17 @@ const UpdateEmployeeSchema = z.object({
   email: z.preprocess(blankToNull, z.string().email().nullable().optional()),
   phone: z.preprocess(blankToNull, z.string().max(20).nullable().optional()),
   department: z.preprocess(blankToNull, z.string().max(100).nullable().optional()),
+  // Sent by the edit form when the chosen department is a real one. The
+  // legacy name column is still written - the mobile app reads it - but a
+  // chosen department ALSO moves them in the org chart, so the label on the
+  // record and the placement access control reads cannot drift apart.
+  department_id: z.number().int().positive().nullable().optional(),
   role: z.enum(['employee', 'manager', 'super_admin']).optional(),
   manager_id: z.number().int().positive().nullable().optional(),
-  is_active: z.boolean().optional(),
-  live_tracking_enabled: z.boolean().optional(),
+  is_active: zBool.optional(),
+  live_tracking_enabled: zBool.optional(),
   work_mode: z.enum(['on_site', 'off_site']).optional(),
-  allow_multiple_sessions: z.boolean().optional(),
+  allow_multiple_sessions: zBool.optional(),
   // blankToAbsent, never blankToNull: a PIN is not a field that can be emptied.
   // Left blank it keeps the one they have; there is no way to leave an employee
   // with no PIN at all.
@@ -199,9 +206,21 @@ export async function PUT(request: NextRequest, context: Params) {
   }
 
   const {
-    name, email, phone, department, role, manager_id, is_active,
+    name, email, phone, department, department_id, role, manager_id, is_active,
     live_tracking_enabled, work_mode, allow_multiple_sessions, new_pin,
   } = parsed.data;
+
+  // A chosen department decides the stored name, so the two can only agree.
+  let departmentName = department;
+  if (department_id) {
+    const dept = await queryOne<{ name: string }>(
+      'SELECT name FROM departments WHERE id = ? AND is_active = TRUE', [department_id]);
+    if (!dept) {
+      return NextResponse.json<ApiResponse>(
+        { success: false, error: 'No such department' }, { status: 400 });
+    }
+    departmentName = dept.name;
+  }
   // The edit form always submits these fields, so with the migration not yet
   // run they are silently skipped (the form could only contain the synthesized
   // defaults anyway) — a 503 here would block editing EVERY employee field.
@@ -232,7 +251,7 @@ export async function PUT(request: NextRequest, context: Params) {
   if (name !== undefined) apply('name', name);
   if (email !== undefined) apply('email', email);
   if (phone !== undefined) apply('phone', phone);
-  if (department !== undefined) apply('department', department);
+  if (departmentName !== undefined) apply('department', departmentName);
   if (role !== undefined) apply('role', role);
   if (manager_id !== undefined) apply('manager_id', manager_id);
   if (is_active !== undefined) apply('is_active', is_active ? 1 : 0);
@@ -247,6 +266,7 @@ export async function PUT(request: NextRequest, context: Params) {
   if (bankColsExist) {
     for (const [col, val] of Object.entries(bankFields)) apply(col, val);
   }
+
 
   if (setClauses.length === 0) {
     return NextResponse.json<ApiResponse>(
@@ -265,6 +285,29 @@ export async function PUT(request: NextRequest, context: Params) {
        WHERE employee_id = ? AND is_active = TRUE`,
       [employeeId],
     );
+  }
+
+  // Placement follows the department, and only when it actually changed:
+  // assignments are DATED, so writing one on every save would fill the
+  // history with rows that record nothing. Non-fatal, like the create path -
+  // a saved edit that failed to re-place somebody is a state the Organisation
+  // page shows and can correct.
+  if (department_id) {
+    try {
+      const today = getWorkDateIST();
+      const [current] = await listAssignments({ employeeId, onDate: today });
+      if (current?.department_id !== department_id) {
+        await assignToOrg({
+          employeeId,
+          departmentId: department_id,
+          effectiveFrom: today,
+          by: auth.id,
+          ip: request.headers.get('x-forwarded-for')?.split(',')[0].trim() ?? null,
+        });
+      }
+    } catch (err) {
+      console.error('[employees] org placement failed:', err);
+    }
   }
 
   await insertAuditLog({

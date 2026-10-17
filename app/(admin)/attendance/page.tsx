@@ -9,7 +9,7 @@ import { formatInTimeZone, fromZonedTime } from 'date-fns-tz';
 import Table from '@/components/ui/Table';
 import Button from '@/components/ui/Button';
 import Input from '@/components/ui/Input';
-import Modal from '@/components/ui/Modal';
+import Drawer from '@/components/ui/Drawer';
 import Badge from '@/components/ui/Badge';
 import Pagination from '@/components/ui/Pagination';
 import Spinner from '@/components/ui/Spinner';
@@ -365,7 +365,7 @@ export default function AttendancePage() {
       )}
 
       {/* Edit modal */}
-      <Modal open={!!editTarget} onClose={() => setEditTarget(null)} title="Edit Attendance Record">
+      <Drawer open={!!editTarget} onClose={() => setEditTarget(null)} title="Edit Attendance Record">
         {editTarget && (
           <form onSubmit={editForm.handleSubmit(v => editMutation.mutate({ id: editTarget.id, values: v }))} className="space-y-4">
             <div className="text-sm text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-700/50 rounded-lg px-3 py-2">
@@ -405,9 +405,9 @@ export default function AttendancePage() {
             </div>
           </form>
         )}
-      </Modal>
+      </Drawer>
       {/* The day, as a story. */}
-      <Modal
+      <Drawer
         open={!!dayView}
         onClose={() => setDayView(null)}
         title={dayView ? `${dayView.name} — ${dayView.date}` : ''}
@@ -469,7 +469,7 @@ export default function AttendancePage() {
             )}
           </div>
         )}
-      </Modal>
+      </Drawer>
     </div>
   );
 }

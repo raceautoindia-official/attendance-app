@@ -9,7 +9,7 @@ import { format } from 'date-fns';
 import Table from '@/components/ui/Table';
 import Button from '@/components/ui/Button';
 import Input from '@/components/ui/Input';
-import Modal from '@/components/ui/Modal';
+import Drawer from '@/components/ui/Drawer';
 import Badge from '@/components/ui/Badge';
 import Pagination from '@/components/ui/Pagination';
 import Spinner from '@/components/ui/Spinner';
@@ -463,7 +463,7 @@ export default function LeavesPage() {
       )}
 
       {/* Add leave modal */}
-      <Modal open={addOpen} onClose={() => setAddOpen(false)} title="Mark Leave or Holiday">
+      <Drawer open={addOpen} onClose={() => setAddOpen(false)} title="Mark Leave or Holiday">
         <form
           onSubmit={form.handleSubmit(
             (v: LeaveForm) => createMutation.mutate(v),
@@ -532,7 +532,7 @@ export default function LeavesPage() {
             </Button>
           </div>
         </form>
-      </Modal>
+      </Drawer>
     </div>
   );
 }

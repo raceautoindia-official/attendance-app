@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
+import { zBool } from '@/lib/zodFields';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { assessLocation } from '@/lib/locationTrust';
 import { checkDevice } from '@/lib/deviceBinding';
@@ -21,9 +22,9 @@ const ClockOutSchema = z.object({
   longitude: z.number({ error: 'longitude must be a number' }).nullable().optional(),
   // True when the phone performed this action itself (geofence exit, or
   // location kept off through all warnings) rather than a button tap.
-  auto: z.boolean().optional(),
+  auto: zBool.optional(),
   reason: z.enum(['geofence_exit', 'location_off']).optional(),
-  is_mocked: z.boolean().optional(),
+  is_mocked: zBool.optional(),
   accuracy_m: z.number().nullable().optional(),
 });
 

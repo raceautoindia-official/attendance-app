@@ -17,7 +17,7 @@
  */
 
 import { query } from '@/lib/db';
-import { listPolicies as listPolicyRows, listAssignments, policyTimelineFor } from '@/lib/policy';
+import { listPolicies as listPolicyRows, policyTimelineFor } from '@/lib/policy';
 import { rankPerformance } from '@/lib/performance';
 import { buildComplianceReport } from '@/lib/documentCompliance';
 import { POLICY_FIELDS_THAT_CHANGE_FIGURES } from '@/lib/policyFields';

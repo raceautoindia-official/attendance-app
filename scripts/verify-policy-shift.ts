@@ -44,6 +44,12 @@ async function cleanup() {
   await query(
     `DELETE ep FROM employee_policies ep JOIN employees e ON e.id = ep.employee_id
       WHERE e.emp_id LIKE 'ZZPS%'`);
+  // The attendance rows this test writes have to go first: employees are
+  // ON DELETE RESTRICT, so leaving them behind made the NEXT run fail at its
+  // own cleanup rather than at anything it was testing.
+  await query(
+    `DELETE a FROM attendance a JOIN employees e ON e.id = a.employee_id
+      WHERE e.emp_id LIKE 'ZZPS%'`);
   await query(`DELETE FROM employees WHERE emp_id LIKE 'ZZPS%'`);
   await query(`DELETE FROM policies WHERE code LIKE 'ZZPS-%'`);
   await query(`DELETE FROM shifts WHERE name LIKE 'ZZps_%'`);

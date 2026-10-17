@@ -15,7 +15,6 @@ import { NextRequest } from 'next/server';
 import { GET, POST, DELETE } from '../app/api/month-close/route';
 import { PUT as editAttendance } from '../app/api/attendance/[id]/route';
 import { POST as createLeave } from '../app/api/leaves/route';
-import { DELETE as deleteLeave } from '../app/api/leaves/[id]/route';
 import { lockFor, lastDayOfMonth, closeMonth } from '../lib/monthClose';
 import { buildHoursLedger } from '../lib/hoursLedger';
 import { signAccessToken, currentTokenVersion } from '../lib/auth';
