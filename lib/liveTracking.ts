@@ -27,8 +27,15 @@ export async function requireOpenShift(employeeId: number): Promise<NextResponse
      WHERE employee_id = ? AND is_active = TRUE`,
     [employeeId],
   );
+  // `code` lets the phone tell "your shift is closed" from "tracking is
+  // disabled for you": after an automatic clock-out it keeps the location
+  // service alive to notice the employee is back, instead of shutting down.
   return NextResponse.json<ApiResponse>(
-    { success: false, error: 'Not clocked in — live tracking only runs during an active shift' },
+    {
+      success: false,
+      code: 'no_open_shift',
+      error: 'Not clocked in — live tracking only runs during an active shift',
+    },
     { status: 403 },
   );
 }

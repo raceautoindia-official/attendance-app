@@ -6,13 +6,14 @@ import './src/location/geofenceAuto';
 import './src/location/locationWatch';
 
 import { initNotifications } from './src/notifications/setup';
+import { markDecisionAnnounced } from './src/notifications/permissionUpdates';
+import * as Notifications from 'expo-notifications';
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { View, Text, TouchableOpacity, ActivityIndicator, StatusBar, StyleSheet } from 'react-native';
 import { getAccessToken } from './src/storage/tokens';
-import { stopBackgroundTracking } from './src/location/tracking';
-import { stopGeofenceAutoMode } from './src/location/geofenceAuto';
-import { stopLocationWatch } from './src/location/locationWatch';
+import { logout } from './src/api/client';
+import { endLocalSession } from './src/auth/session';
 import { biometricAvailable, authenticateBiometric } from './src/auth/biometric';
 import LoginScreen from './src/screens/LoginScreen';
 import DashboardScreen from './src/screens/DashboardScreen';
@@ -44,27 +45,54 @@ export default function App() {
   // no error to show for it.
   useEffect(() => {
     void initNotifications();
+    // A pushed decision seen with the app open, or tapped to open it, is
+    // already announced — the dashboard's own announcement must not repeat it
+    // in the moments before the server has confirmed the push was delivered.
+    const received = Notifications.addNotificationReceivedListener(n => {
+      void markDecisionAnnounced(n.request.content.data);
+    });
+    const tapped = Notifications.addNotificationResponseReceivedListener(r => {
+      void markDecisionAnnounced(r.notification.request.content.data);
+    });
+    return () => {
+      received.remove();
+      tapped.remove();
+    };
   }, []);
 
-  useEffect(() => {
-    (async () => {
-      const token = await getAccessToken();
-      if (!token) {
-        setAuthed(false);
-        return;
-      }
-      setAuthed(true);
-      await runUnlock(); // existing session still requires biometric to open
-    })();
+  // Could the saved session be read at all? Not the same as "there is none".
+  // A secure-storage read can fail outright on some phones, and an unhandled
+  // failure here left the launch spinner up for ever. Treating it as signed
+  // out would be worse — that stops tracking mid-shift — so it is said, with a
+  // way to try again.
+  const [bootFailed, setBootFailed] = useState(false);
+
+  const boot = useCallback(async () => {
+    setBootFailed(false);
+    let token: string | null;
+    try {
+      token = await getAccessToken();
+    } catch {
+      setBootFailed(true);
+      return;
+    }
+    if (!token) {
+      setAuthed(false);
+      return;
+    }
+    setAuthed(true);
+    await runUnlock(); // existing session still requires biometric to open
   }, [runUnlock]);
 
   useEffect(() => {
+    void boot();
+  }, [boot]);
+
+  useEffect(() => {
     if (authed === false) {
-      // Covers FORCED logouts (expired session) too, not just the button:
-      // nothing may keep watching location on a logged-out device.
-      void stopBackgroundTracking();
-      void stopGeofenceAutoMode();
-      void stopLocationWatch();
+      // Covers FORCED logouts (expired or revoked session) too, not just the
+      // buttons — the same full list either way, see endLocalSession.
+      void endLocalSession();
     }
   }, [authed]);
 
@@ -76,11 +104,27 @@ export default function App() {
     setAuthed(false);
     setUnlocked(false);
   };
+  // The unlock screen's Sign out. It used to change only what was on screen:
+  // the saved session stayed, so closing and reopening the app went straight
+  // back to "Unlock to continue" — signed in all along.
+  const signOutFromLock = async () => {
+    await logout();
+    onLogout();
+  };
 
   if (authed === null) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator color="#3b82f6" size="large" />
+        {bootFailed ? (
+          <>
+            <Text style={styles.subtitle}>Could not open your saved sign-in.</Text>
+            <TouchableOpacity style={styles.button} onPress={() => { void boot(); }} activeOpacity={0.85}>
+              <Text style={styles.buttonText}>Try again</Text>
+            </TouchableOpacity>
+          </>
+        ) : (
+          <ActivityIndicator color="#3b82f6" size="large" />
+        )}
       </View>
     );
   }
@@ -104,7 +148,7 @@ export default function App() {
           <TouchableOpacity style={styles.button} onPress={runUnlock} activeOpacity={0.85}>
             <Text style={styles.buttonText}>🔒  Unlock with fingerprint / face</Text>
           </TouchableOpacity>
-          <TouchableOpacity onPress={onLogout} style={{ marginTop: 18 }}>
+          <TouchableOpacity onPress={() => { void signOutFromLock(); }} style={{ marginTop: 18 }}>
             <Text style={styles.signout}>Sign out</Text>
           </TouchableOpacity>
         </View>

@@ -4,6 +4,7 @@ import { readJsonColumn } from '@/lib/jsonColumn';
 import { requireAuth } from '@/lib/auth';
 import { getWorkDateIST, workDayEndUtc, previousWorkDate, toMySQLDatetime, overtimeMinutes } from '@/lib/attendance';
 import { hasWorkModeColumns } from '@/lib/employeeDetails';
+import { lastFenceClosure } from '@/lib/fenceClosure';
 import {
   hasOnDutyColumn,
   activeOnDuty,
@@ -12,6 +13,7 @@ import {
   getMonthlyBalance,
   hasPermissionTable,
   requiredMinutesForShift,
+  timeOffOnly,
 } from '@/lib/permissions';
 import { formatInTimeZone } from 'date-fns-tz';
 import { TIMEZONE, MIN_FENCE_RADIUS_M } from '@/lib/constants';
@@ -32,6 +34,8 @@ import type {
 interface TodayResponse {
   attendance: AttendanceRecord | null;
   schedule: EmployeeSchedule | null;
+  /** The fence in force now (= schedule.location); null = not fenced. */
+  location: unknown;
   /** Plant staff: may clock in again after completing a session today */
   multi_session: boolean;
   /** Approved permission minutes for today */
@@ -58,6 +62,8 @@ interface TodayResponse {
     status: string;
     review_notes: string | null;
     reviewed_at: string;
+    /** Delivered to the phone by push already — do not announce it again. */
+    pushed: boolean;
   }>;
   /**
    * Every session of the day, in order, paired from the audit log — because
@@ -171,10 +177,16 @@ export async function GET(request: NextRequest) {
   const permissionsAvailable = await hasPermissionTable();
   let permissionMinutes = 0;
   if (permissionsAvailable && attendance) {
+    // Time OFF only. Approved on-duty is work done away from the site and is
+    // already in the clocked hours; summing it here counted it twice — an
+    // on-duty day showed a full shift by noon and "includes approved
+    // permission" over time nobody took off. Every report already filters
+    // this way, which is why the history row disagreed with this card.
     const row = await queryOne<{ minutes: number | null }>(
       `SELECT COALESCE(SUM(minutes), 0) AS minutes
        FROM permission_requests
-       WHERE employee_id = ? AND permission_date = ? AND status = 'approved'`,
+       WHERE employee_id = ? AND permission_date = ? AND status = 'approved'
+         ${timeOffOnly(await hasOnDutyColumn())}`,
       [auth.id, attendance.work_date],
     );
     permissionMinutes = Number(row?.minutes ?? 0);
@@ -210,18 +222,15 @@ export async function GET(request: NextRequest) {
     // deliberately", refused to re-open it, and tore its own geofence down. The
     // result was an employee clocked out for stepping away and never clocked
     // back in, on a phone that had also stopped watching.
+    //
+    // The PHONE's own away-from-site clock-out counts too. Only the watchdog's
+    // was read here, so re-entry after a phone-side closure depended entirely
+    // on a flag the phone kept in its own storage — and a flag lost there meant
+    // the phone saw "closed by hand", tore its geofence down and never clocked
+    // anyone back in. The same rule clock-in uses to allow the re-open decides
+    // it, so the two cannot disagree.
     if (attendance.clock_out_utc) {
-      const auto = await queryOne<{ n: number }>(
-        `SELECT COUNT(*) AS n FROM audit_log
-          WHERE action = 'geofence_auto_clockout'
-            AND entity = 'attendance'
-            AND entity_id = ?
-            -- Tied to THIS closure, not an earlier session on the same row: a
-            -- multi-session day reuses one attendance row all day.
-            AND created_at >= DATE_SUB(?, INTERVAL 2 MINUTE)`,
-        [attendance.id, attendance.clock_out_utc],
-      );
-      attendance.auto_clocked_out = Number(auto?.n ?? 0) > 0;
+      attendance.auto_clocked_out = !!(await lastFenceClosure(attendance.id));
     } else {
       attendance.auto_clocked_out = false;
     }
@@ -233,6 +242,14 @@ export async function GET(request: NextRequest) {
       data: {
         attendance: attendance ?? null,
         schedule: schedule ?? null,
+        // The fence in force right now, at the top level, because that is
+        // where the phone's BACKGROUND code looks for it: an explicit null is
+        // its signal that geofencing has been switched off and it must stand
+        // down. Only schedule.location was ever sent, so the signal never
+        // arrived — a phone left in a pocket kept warning and clocking people
+        // out from a fence the admin had already removed. Same value as
+        // schedule.location (null when not fenced, or with no schedule).
+        location: (schedule as { location?: unknown } | null)?.location ?? null,
         multi_session: multiSession,
         permission_minutes: permissionMinutes,
         permission_balance: permissionsAvailable
@@ -246,7 +263,13 @@ export async function GET(request: NextRequest) {
               `SELECT pr.id,
                       ${await hasOnDutyColumn() ? 'pr.request_type' : "'permission' AS request_type"},
                       DATE_FORMAT(pr.permission_date, '%Y-%m-%d') AS permission_date,
-                      pr.start_time, pr.end_time, pr.status, pr.review_notes, pr.reviewed_at
+                      pr.start_time, pr.end_time, pr.status, pr.review_notes, pr.reviewed_at,
+                      -- Already on their phone by push (Google confirmed it, for
+                      -- THIS verdict), so the phone must not announce it again.
+                      EXISTS (SELECT 1 FROM audit_log al
+                               WHERE al.entity = 'permission_request' AND al.entity_id = pr.id
+                                 AND al.action = 'push_delivered'
+                                 AND JSON_UNQUOTE(JSON_EXTRACT(al.details, '$.status')) = pr.status) AS pushed
                FROM permission_requests pr
                WHERE pr.employee_id = ?
                  AND pr.status IN ('approved', 'rejected')
@@ -254,7 +277,7 @@ export async function GET(request: NextRequest) {
                ORDER BY pr.reviewed_at DESC
                LIMIT 20`,
               [auth.id],
-            ).catch(() => [])
+            ).then(rows => rows.map(r => ({ ...r, pushed: Boolean(Number(r.pushed)) }))).catch(() => [])
           : [],
         today_sessions: await (async () => {
           // The audit log is the only place every session survives — the row

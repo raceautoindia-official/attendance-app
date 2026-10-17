@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "964346598553",
+    "project_id": "attendance-27e7f",
+    "storage_bucket": "attendance-27e7f.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:964346598553:android:f90d110d954ffac4cb1408",
+        "android_client_info": {
+          "package_name": "com.attendance.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDVCamfbc-LXc-3LjwcAqC5BHbs4w9w1-g"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

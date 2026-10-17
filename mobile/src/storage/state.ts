@@ -20,46 +20,74 @@ import * as SecureStore from 'expo-secure-store';
 // sandbox already owns the device. Secrets (tokens, device id, consent) stay
 // in SecureStore where they belong.
 //
-// One JSON file, read fresh on every get and rewritten on every set: separate
-// headless task runtimes (geofence event, background poll, foreground app)
-// each see the latest state at the moment they act, which module-level caching
-// would break.
+// ONE FILE PER KEY. This was one JSON file holding every key, read and
+// rewritten whole on each set — by the foreground app, the 30-second tracking
+// task, the geofence task and the background polls, with no lock. Two writers
+// overlapping meant the second wrote back the first one's stale copy, so an
+// unrelated key vanished; and a read that caught the file half-written parsed
+// as empty, so the next set wrote a file holding ONE key and wiped the rest.
+// The fence, the auto clock-out flag and the reminder ids went that way — the
+// flag is what re-entry clock-in depends on. With a file per key, a write can
+// only ever touch its own key.
+//
+// Read fresh on every get: separate headless task runtimes each see the latest
+// state at the moment they act, which module-level caching would break.
 // ---------------------------------------------------------------------------
 
-const FILE = `${FileSystem.documentDirectory}app-state.json`;
+const DIR = `${FileSystem.documentDirectory}app-state/`;
+/** The single-file store this replaced; migrated once, then deleted. */
+const LEGACY_FILE = `${FileSystem.documentDirectory}app-state.json`;
 
-async function readAll(): Promise<Record<string, string>> {
-  try {
-    const info = await FileSystem.getInfoAsync(FILE);
-    if (!info.exists) return {};
-    const raw = await FileSystem.readAsStringAsync(FILE);
-    const parsed = JSON.parse(raw) as Record<string, string>;
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
+function fileFor(key: string): string {
+  return `${DIR}${encodeURIComponent(key)}`;
 }
 
-async function writeAll(state: Record<string, string>): Promise<void> {
-  try {
-    await FileSystem.writeAsStringAsync(FILE, JSON.stringify(state));
-  } catch {
-    // A failed write leaves the previous state on disk — the next check reads
-    // slightly stale values and self-corrects, which is the same contract the
-    // callers already lived by.
+let ready: Promise<void> | null = null;
+
+/** Creates the directory and carries the old single file over, once per runtime. */
+function ensureReady(): Promise<void> {
+  if (!ready) {
+    ready = (async () => {
+      await FileSystem.makeDirectoryAsync(DIR, { intermediates: true }).catch(() => {});
+      try {
+        const info = await FileSystem.getInfoAsync(LEGACY_FILE);
+        if (!info.exists) return;
+        const parsed = JSON.parse(await FileSystem.readAsStringAsync(LEGACY_FILE)) as Record<string, unknown>;
+        for (const [key, value] of Object.entries(parsed ?? {})) {
+          if (typeof value !== 'string') continue;
+          // Never over a per-key file: another runtime may already have
+          // migrated and written something newer since.
+          const target = fileFor(key);
+          if (!(await FileSystem.getInfoAsync(target)).exists) {
+            await FileSystem.writeAsStringAsync(target, value);
+          }
+        }
+        await FileSystem.deleteAsync(LEGACY_FILE, { idempotent: true });
+      } catch {
+        // Unreadable or half-written: nothing trustworthy to carry over. Left
+        // in place, and the next runtime tries again.
+      }
+    })();
   }
+  return ready;
 }
 
 /** Read one value. Falls back to SecureStore ONCE per key, migrating any value
  *  written before this store existed, so an in-flight escalation or a pending
  *  auto-login survives the app update that ships this change. */
 export async function getState(key: string): Promise<string | null> {
-  const all = await readAll();
-  if (key in all) return all[key];
+  await ensureReady();
+  const file = fileFor(key);
+  try {
+    if ((await FileSystem.getInfoAsync(file)).exists) {
+      return await FileSystem.readAsStringAsync(file);
+    }
+  } catch {
+    return null;
+  }
   const legacy = await SecureStore.getItemAsync(key).catch(() => null);
   if (legacy != null) {
-    all[key] = legacy;
-    await writeAll(all);
+    await setState(key, legacy);
     await SecureStore.deleteItemAsync(key).catch(() => {});
     return legacy;
   }
@@ -67,14 +95,17 @@ export async function getState(key: string): Promise<string | null> {
 }
 
 export async function setState(key: string, value: string): Promise<void> {
-  const all = await readAll();
-  all[key] = value;
-  await writeAll(all);
+  await ensureReady();
+  try {
+    await FileSystem.writeAsStringAsync(fileFor(key), value);
+  } catch {
+    // A failed write leaves the previous value on disk — the next check reads
+    // a slightly stale value and self-corrects, which is the same contract the
+    // callers already lived by.
+  }
 }
 
 export async function removeState(key: string): Promise<void> {
-  const all = await readAll();
-  if (!(key in all)) return;
-  delete all[key];
-  await writeAll(all);
+  await ensureReady();
+  await FileSystem.deleteAsync(fileFor(key), { idempotent: true }).catch(() => {});
 }

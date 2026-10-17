@@ -25,7 +25,9 @@ export async function GET(request: NextRequest) {
   const conditions: string[] = [];
   const params: unknown[] = [];
 
-  if (auth.role === 'employee') {
+  // mine=1: the caller's OWN update, whatever their role — the phone's
+  // "today's update" box, which for a manager was filled with a team member's.
+  if (auth.role === 'employee' || searchParams.get('mine') === '1') {
     conditions.push('d.employee_id = ?');
     params.push(auth.id);
   } else if (auth.role === 'manager') {
@@ -90,7 +92,9 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request, ['employee']);
+  // Anyone who clocks in writes their OWN update (it is saved against auth.id).
+  // Employee-only meant a manager using the phone app got a 403 on every Save.
+  const auth = await requireAuth(request, ['employee', 'manager', 'super_admin']);
   if (auth instanceof NextResponse) return auth;
 
   let body: unknown;

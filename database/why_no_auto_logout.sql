@@ -16,9 +16,12 @@
 --   employee_schedules.location_id   -> an ACTIVE location
 --   attendance: clocked in, not clocked out, and in for longer than the grace
 --   no approved on-duty covering right now
---   and no location fix has placed them inside the fence for the grace period
+--   no location fix has placed them inside the fence for the grace period
+--   and at least @min_outside fixes since then place them OUTSIDE it, even
+--   allowing for each fix's own accuracy. A phone that simply went quiet is
+--   never clocked out - it is reported, and the day is left open.
 --
--- The three settings below MUST match the server's .env, or this report will
+-- The four settings below MUST match the server's .env, or this report will
 -- disagree with the watchdog and send you looking for a fault that isn't there.
 -- It has done exactly that once: it assumed a 200 m minimum fence long after
 -- the floor was removed, so for a 50 m site it called someone 700 m away
@@ -30,6 +33,7 @@ SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;
 SET @grace_min := 10;   -- GEOFENCE_PRESENCE_GRACE_MIN
 SET @min_fence := 0;    -- MIN_FENCE_RADIUS_M   (0 = each site's own radius, no floor)
 SET @max_acc   := 500;  -- MAX_ACCURACY_ALLOWANCE_M
+SET @min_outside := 3;  -- GEOFENCE_MIN_OUTSIDE_FIXES
 
 -- The fence a fix is measured against, exactly as the code computes it:
 --   fence     = MAX(the site's radius, @min_fence)
@@ -93,6 +97,23 @@ presence AS (
       WHERE p3.employee_id = os.employee_id
       ORDER BY p3.tracked_at_utc DESC LIMIT 1) AS last_ping_m
   FROM open_sessions os
+),
+evidence AS (
+  SELECT presence.*,
+    -- Fixes since presence was last confirmed that put them OUTSIDE the fence
+    -- even if each is off by its whole reported accuracy. This is the evidence
+    -- of leaving; without enough of it the watchdog only reports.
+    (SELECT COUNT(*)
+       FROM live_tracking_points p4
+      WHERE p4.employee_id = presence.employee_id
+        AND p4.tracked_at_utc > COALESCE(presence.last_inside_utc, presence.clock_in_utc)
+        AND (6371000 * 2 * ASIN(SQRT(
+              POWER(SIN(RADIANS(p4.latitude  - presence.loc_lat) / 2), 2) +
+              COS(RADIANS(presence.loc_lat)) * COS(RADIANS(p4.latitude)) *
+              POWER(SIN(RADIANS(p4.longitude - presence.loc_lng) / 2), 2))))
+            > presence.fence + COALESCE(p4.accuracy_meters, 0)
+    ) AS outside_fixes
+  FROM presence
 )
 SELECT
   emp_id,
@@ -121,9 +142,10 @@ SELECT
   TIMESTAMPDIFF(MINUTE, COALESCE(last_inside_utc, clock_in_utc), UTC_TIMESTAMP())
                                                                      AS min_unconfirmed,
   IF(last_inside_utc IS NULL, 'never since clock-in', 'yes')         AS seen_inside,
+  outside_fixes,
 
   IF(EXISTS (SELECT 1 FROM permission_requests pr
-              WHERE pr.employee_id = presence.employee_id
+              WHERE pr.employee_id = evidence.employee_id
                 AND pr.status = 'approved'
                 AND pr.request_type = 'on_duty'
                 AND pr.permission_date = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+05:30'))
@@ -144,7 +166,7 @@ SELECT
     WHEN TIMESTAMPDIFF(MINUTE, clock_in_utc, UTC_TIMESTAMP()) < @grace_min
                                              THEN 'skipped: within grace'
     WHEN EXISTS (SELECT 1 FROM permission_requests pr
-                  WHERE pr.employee_id = presence.employee_id
+                  WHERE pr.employee_id = evidence.employee_id
                     AND pr.status = 'approved'
                     AND pr.request_type = 'on_duty'
                     AND pr.permission_date = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+05:30'))
@@ -156,10 +178,13 @@ SELECT
     -- never should be.
     WHEN TIMESTAMPDIFF(MINUTE, COALESCE(last_inside_utc, clock_in_utc), UTC_TIMESTAMP())
            < @grace_min                      THEN 'skipped: seen inside the fence recently'
+    -- Quiet, not gone: no fixes outside, so nothing says they left. Reported
+    -- in the audit log as geofence_presence_unverifiable; the day stays open.
+    WHEN outside_fixes < @min_outside        THEN 'skipped: phone quiet, never seen outside'
     ELSE '>>> WOULD BE CLOCKED OUT'
   END                                                                AS verdict
 
-FROM presence
+FROM evidence
 ORDER BY verdict DESC, emp_id;
 
 

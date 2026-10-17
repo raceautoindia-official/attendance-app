@@ -18,6 +18,11 @@ import { readJsonColumn } from '@/lib/jsonColumn';
  * closure — the fence is no longer what ended their day, and they should not be
  * held to it.
  *
+ * The end-of-day settlement and an admin's edit are closures too, and are read
+ * so that they WIN when they came last: this now decides whether a closed day
+ * may be re-opened (see clock-in), and a day an admin closed by hand must not
+ * re-open because the fence had closed it earlier that morning.
+ *
  * Returns null when nothing closed the day, when the audit trail has no record
  * of it, or when the row is still open. Absence of evidence deliberately reads
  * as "not fence-closed": a missing audit entry must not lock somebody out of
@@ -31,7 +36,7 @@ export async function lastFenceClosure(
        FROM audit_log
       WHERE entity = 'attendance'
         AND entity_id = ?
-        AND action IN ('geofence_auto_clockout', 'clock_out')
+        AND action IN ('geofence_auto_clockout', 'clock_out', 'session_auto_closed', 'attendance_edited')
       ORDER BY created_at DESC, id DESC
       LIMIT 1`,
     [attendanceId],
@@ -41,6 +46,8 @@ export async function lastFenceClosure(
   if (row.action === 'geofence_auto_clockout') {
     return { action: row.action, reason: 'geofence_exit' };
   }
+  // Settled or edited: whatever its details say, the fence did not end this.
+  if (row.action !== 'clock_out') return null;
 
   // Both shapes read, and a malformed one treated as "no reason recorded"
   // rather than throwing inside a clock-in — see readJsonColumn.

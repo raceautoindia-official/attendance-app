@@ -2,13 +2,14 @@
   "expo": {
     "name": "Attendance",
     "slug": "attendance-mobile",
-    "version": "1.4.23",
+    "version": "1.4.25",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#0f172a",
     "newArchEnabled": true,
     "android": {
       "package": "com.attendance.app",
+      "googleServicesFile": "./google-services.json",
       "backgroundColor": "#0f172a",
       "permissions": [
         "ACCESS_COARSE_LOCATION",
@@ -18,9 +19,15 @@
         "FOREGROUND_SERVICE_LOCATION",
         "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
         "POST_NOTIFICATIONS",
-        "USE_BIOMETRIC"
+        "SCHEDULE_EXACT_ALARM",
+        "USE_BIOMETRIC",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_BACKGROUND_LOCATION",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_LOCATION"
       ],
-      "versionCode": 30
+      "versionCode": 32
     },
     "plugins": [
       [
@@ -47,6 +54,12 @@
         }
       ]
     ],
-    "icon": "./assets/icon.png"
+    "icon": "./assets/icon.png",
+    "extra": {
+      "eas": {
+        "projectId": "3408ceb0-bb7e-4b77-b95a-5980b8b1b5c4"
+      }
+    },
+    "owner": "trackie"
   }
 }

@@ -49,7 +49,13 @@ export async function GET(request: NextRequest) {
   const conditions: string[] = [];
   const params: unknown[] = [];
 
-  if (auth.role === 'employee') {
+  // mine=1: the caller's OWN records, whatever their role. The phone app is
+  // used by managers and admins too, to clock their own attendance, and asked
+  // for its history here — which by role meant a manager's team without the
+  // manager, or everybody for an admin, shown with no names as "Last 7 days".
+  const mine = searchParams.get('mine') === '1';
+
+  if (auth.role === 'employee' || mine) {
     conditions.push('a.employee_id = ?');
     params.push(auth.id);
   } else if (auth.role === 'manager') {

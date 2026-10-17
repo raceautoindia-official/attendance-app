@@ -19,6 +19,9 @@ import type { ApiResponse, Employee } from '@/lib/types';
 // pair in the body. The app calls this when an API request returns 401.
 // ---------------------------------------------------------------------------
 
+/** How long a refresh token keeps working after it has been rotated. */
+const REFRESH_ROTATION_GRACE_SECONDS = 60 * 60;
+
 const RefreshSchema = z.object({
   refreshToken: z.string().min(1, 'refreshToken is required'),
 });
@@ -74,8 +77,35 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 3. Rotate: delete the old token, issue a fresh pair
-  await query('DELETE FROM refresh_tokens WHERE id = ?', [row.token_id]);
+  // 3. Rotate: retire the old token, issue a fresh pair.
+  //
+  // RETIRED, NOT DELETED ON THE SPOT. It used to be deleted here, and on a
+  // phone that is the wrong order of events to bet on: the rotation is
+  // committed the moment this line runs, but the reply carrying the new pair
+  // still has to make it back over mobile data. When it did not — a dropped
+  // signal, a 20-second timeout in a lift — the phone was left holding the
+  // only token it had, which no longer existed. Its next refresh was refused,
+  // the app treated that as a logout and wiped the session, and the background
+  // tracking went on collecting fixes it could no longer upload. That is the
+  // "live tracking sometimes works, sometimes not", and the unexplained trips
+  // back to the login screen.
+  //
+  // So the old token stays good for a grace period from its first use, long
+  // enough to outlast a patch of bad signal; a repeat inside it simply gets
+  // another fresh pair. Logging out and an admin's revoke still delete every
+  // token the employee holds, grace or not.
+  await query(
+    `UPDATE refresh_tokens
+        SET expires_at = LEAST(expires_at, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND))
+      WHERE id = ?`,
+    [REFRESH_ROTATION_GRACE_SECONDS, row.token_id],
+  );
+  // Retired tokens are no longer deleted on use, so sweep this employee's
+  // expired ones here instead — the table stays as small as it was.
+  await query(
+    'DELETE FROM refresh_tokens WHERE employee_id = ? AND expires_at < UTC_TIMESTAMP()',
+    [row.id],
+  );
 
   const newAccessToken = signAccessToken({ id: row.id, emp_id: row.emp_id, role: row.role, tv: await currentTokenVersion(row.id) });
   const newRefreshToken = signRefreshToken({ id: row.id });

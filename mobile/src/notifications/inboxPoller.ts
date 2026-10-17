@@ -1,8 +1,8 @@
 import * as BackgroundTask from 'expo-background-task';
 import * as TaskManager from 'expo-task-manager';
-import { PermissionsAndroid, Platform } from 'react-native';
 import { apiFetch, ApiError } from '../api/client';
 import { notifyPermissionUpdates, PermissionUpdate } from './permissionUpdates';
+import { cancelTodaysClockInReminder } from './clockInReminder';
 
 // ---------------------------------------------------------------------------
 // The inbox heartbeat — polls for things the employee should be TOLD about,
@@ -30,6 +30,7 @@ import { notifyPermissionUpdates, PermissionUpdate } from './permissionUpdates';
 export const INBOX_TASK = 'attendance-inbox-poller';
 
 interface TodayInbox {
+  attendance?: { clock_in_utc: string | null } | null;
   permission_updates?: PermissionUpdate[];
 }
 
@@ -39,6 +40,10 @@ TaskManager.defineTask(INBOX_TASK, async () => {
   try {
     const today = await apiFetch<TodayInbox>('/api/attendance/today');
     await notifyPermissionUpdates(today.permission_updates);
+    // Already clocked in today (on the website, or by the geofence) — this
+    // morning's "Good morning — clock in" would be telling them to do what
+    // they have done. The phone's own clock-in cancels it; this catches the rest.
+    if (today.attendance?.clock_in_utc) await cancelTodaysClockInReminder();
   } catch (err) {
     // Logged out — nothing on this device should keep polling on their behalf.
     if (err instanceof ApiError && err.status === 401) {
@@ -50,19 +55,13 @@ TaskManager.defineTask(INBOX_TASK, async () => {
 });
 
 /** Registers the heartbeat. Safe to call on every app open — re-registering an
- *  already-registered task is a no-op, and calling it early also ensures the
- *  notification permission exists for someone who never started tracking. */
+ *  already-registered task is a no-op.
+ *
+ *  It no longer asks for POST_NOTIFICATIONS itself: App asks once at launch
+ *  (initNotifications), for everyone, and asking again here put a second
+ *  prompt on screen right behind the first. A phone that refused is told so
+ *  on the dashboard instead (see notifications/health.ts). */
 export async function startInboxPoller(): Promise<void> {
-  // Android 13+ shows nothing without POST_NOTIFICATIONS. Tracking start also
-  // requests it, but an employee can receive a permission verdict without ever
-  // having tracked — the announcement must not depend on that coincidence.
-  if (Platform.OS === 'android' && typeof Platform.Version === 'number' && Platform.Version >= 33) {
-    try {
-      await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
-    } catch {
-      // best effort
-    }
-  }
   try {
     await BackgroundTask.registerTaskAsync(INBOX_TASK, {
       minimumInterval: 15, // minutes — the floor Android allows

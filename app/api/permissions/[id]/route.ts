@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
+import { zBool } from '@/lib/zodFields';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import { getClientIp } from '@/lib/attendance';
@@ -11,6 +12,7 @@ import {
   hasPermissionTable,
   missingPermissionTableError,
 } from '@/lib/permissions';
+import { pushToEmployee } from '@/lib/push';
 import type { ApiResponse, PermissionRequest } from '@/lib/types';
 
 type Params = { params: Promise<{ id: string }> };
@@ -32,7 +34,7 @@ const ReviewSchema = z.object({
    * looking at it — and that protection is worth keeping. With it, the admin
    * is saying "I know it was decided; change it."
    */
-  revise: z.boolean().optional(),
+  revise: zBool.optional(),
 });
 
 function fail(error: string, status: number) {
@@ -219,6 +221,36 @@ export async function PATCH(request: NextRequest, context: Params) {
     },
     ip_address: getClientIp(request),
   });
+
+  // Tell the employee NOW, on their phone, app open or not — see lib/push.ts.
+  // The phone used to learn of a decision only when it next asked, which for
+  // a closed app meant when they next opened it. The same wording as the
+  // phone's own announcement, which it still makes if this push never lands:
+  // a decision is marked delivered only once Firebase has accepted it for the
+  // employee's phone, and the phone skips the ones that are.
+  const kind = existing.request_type === 'on_duty' ? 'On-duty request' : 'Permission request';
+  const [y, m, d] = existing.permission_date.split('-');
+  const window = `${d}-${m}-${y}, ${existing.start_time.slice(0, 5)}–${existing.end_time.slice(0, 5)}`;
+  void pushToEmployee(
+    existing.employee_id,
+    {
+      title: newStatus === 'approved' ? `${kind} approved ✅` : `${kind} rejected`,
+      body: newStatus === 'approved'
+        ? `Your ${window} request was approved.${review_notes ? ` Note: ${review_notes}` : ''}`
+        : `Your ${window} request was rejected.${review_notes ? ` Reason: ${review_notes}` : ' Speak to your manager for details.'}`,
+      channelId: 'permission-updates',
+      data: { kind: 'permission_decision', id: requestId, status: newStatus },
+    },
+    () => insertAuditLog({
+      action: 'push_delivered',
+      entity: 'permission_request',
+      entity_id: requestId,
+      performed_by: null,
+      // The verdict it carried: a decision revised later is a new announcement.
+      details: { employee_id: existing.employee_id, status: newStatus },
+      ip_address: null,
+    }),
+  );
 
   return NextResponse.json<ApiResponse<PermissionRequest>>({
     success: true,

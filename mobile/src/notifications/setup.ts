@@ -178,18 +178,25 @@ export async function notify(
   }
 }
 
-/** Schedule one for a specific moment, returning its identifier. */
+/**
+ * Schedule one for a specific moment, returning its identifier.
+ *
+ * @param identifier  Pass a fixed one to make rescheduling REPLACE the pending
+ *                    notification instead of adding a second copy of it.
+ */
 export async function scheduleAt(
   channel: ChannelId,
   fireAt: Date,
   title: string,
   body: string,
+  identifier?: string,
 ): Promise<string | null> {
   try {
     ensureHandler();
     await ensureChannels();
     if (!(await ensureNotificationPermission(false))) return null;
     return await Notifications.scheduleNotificationAsync({
+      identifier,
       content: { title, body, sound: 'default' },
       trigger: {
         type: Notifications.SchedulableTriggerInputTypes.DATE,

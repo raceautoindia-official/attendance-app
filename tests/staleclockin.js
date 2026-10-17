@@ -60,6 +60,7 @@ const jiti = createJiti(__filename, {
     '@/lib/locationTrust': stub('permissive.js'),
     '@/lib/mailer': stub('permissive.js'),
     '@/lib/jsonColumn': path.join(ROOT, 'lib', 'jsonColumn.ts'),
+    '@/lib/zodFields': path.join(ROOT, 'lib', 'zodFields.ts'),
     '@/lib/employeeDetails': path.join(ROOT, 'lib', 'employeeDetails.ts'),
     '@/lib/attendance': path.join(ROOT, 'lib', 'attendance.ts'),
     '@/lib/constants': path.join(ROOT, 'lib', 'constants.ts'),

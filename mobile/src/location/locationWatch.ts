@@ -3,7 +3,8 @@ import * as TaskManager from 'expo-task-manager';
 import * as Location from 'expo-location';
 import { getState, setState } from '../storage/state';
 import { apiFetch, ApiError } from '../api/client';
-import { stopBackgroundTracking } from './tracking';
+import { AppState } from 'react-native';
+import { stopBackgroundTracking, startBackgroundTracking, lastFixAgeMs, TRACKING_STALE_MS } from './tracking';
 import { reconcileGeofenceAttendance } from './geofenceAuto';
 import { cancelShiftEndReminders } from '../notifications/shiftReminder';
 import { decideLocationAction, MAX_WARNINGS } from './locationWatchPolicy';
@@ -92,6 +93,7 @@ export async function checkLocationAndWarn(): Promise<void> {
 
   if (await locationHealthy()) {
     await resetLocationStrikes();
+    await checkTrackingAlive();
     return;
   }
 
@@ -120,6 +122,36 @@ export async function checkLocationAndWarn(): Promise<void> {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Location is on, permissions are fine — but is the tracking service actually
+// delivering fixes? Battery savers and OEM task killers stop it without a
+// word, and the registration it leaves behind still reads as "running".
+//
+// With the app open, it is simply restarted (allowed from the foreground).
+// From the background Android 12+ refuses to start it, so the employee is told
+// instead — one tap on the notification opens the app, which restarts it. At
+// most once every half hour: this runs every check, and the same message
+// repeated is noise.
+// ---------------------------------------------------------------------------
+const TRACKING_NUDGE_KEY = 'tracking_stalled_notified_ms';
+const TRACKING_NUDGE_SPACING_MS = 30 * 60_000;
+
+async function checkTrackingAlive(): Promise<void> {
+  const age = await lastFixAgeMs();
+  if (age === null || age <= TRACKING_STALE_MS) return;
+  if (AppState.currentState === 'active') {
+    await startBackgroundTracking().catch(() => {});
+    return;
+  }
+  const last = Number(await getState(TRACKING_NUDGE_KEY)) || 0;
+  if (Date.now() - last < TRACKING_NUDGE_SPACING_MS) return;
+  await setState(TRACKING_NUDGE_KEY, String(Date.now()));
+  await notify(
+    'Location tracking has stopped',
+    'Your phone stopped attendance tracking in the background. Open Attendance to turn it back on.',
+  );
+}
+
 async function autoClockOut(): Promise<void> {
   // Location is off, so a fresh fix is impossible; send the last known
   // position if the OS still has one, otherwise no coordinates.
@@ -144,7 +176,17 @@ async function autoClockOut(): Promise<void> {
       'Location stayed off after 4 warnings, so your attendance has been clocked out automatically.',
     );
   } catch (err) {
-    // 4xx = the server understood and refused (404 already clocked out,
+    // 409 = the server DECLINED: location-off clock-outs are switched off
+    // there by default. The employee is still clocked in, so tracking and
+    // their reminders must carry on. This used to fall into the branch below
+    // and stop the tracking service — and a clocked-in phone that has stopped
+    // reporting is exactly what the server's watchdog used to read as "left
+    // the site", so a refused clock-out became a real one half an hour later.
+    if (err instanceof ApiError && err.status === 409) {
+      await resetLocationStrikes().catch(() => {});
+      return;
+    }
+    // Other 4xx = the server understood and refused (404 already clocked out,
     // 401 logged out) — nothing left to enforce. 5xx and network errors keep
     // the counter at MAX so the next check retries the clock-out rather than
     // restarting the whole warning cycle.

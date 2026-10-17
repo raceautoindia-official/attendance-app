@@ -9,7 +9,7 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
-import { login, requestPasswordReset } from '../api/client';
+import { login, logout, requestPasswordReset } from '../api/client';
 import { biometricAvailable, authenticateBiometric } from '../auth/biometric';
 import { colors } from '../theme';
 
@@ -60,6 +60,10 @@ export default function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) 
       if (await biometricAvailable()) {
         const ok = await authenticateBiometric("Confirm it's you");
         if (!ok) {
+          // login() has already saved a session. Leaving it saved meant the
+          // next launch skipped sign-in altogether — and each retry added
+          // another live session on the server.
+          await logout();
           setError('Fingerprint / face verification is required to sign in.');
           return;
         }

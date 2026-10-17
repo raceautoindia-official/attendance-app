@@ -21,8 +21,15 @@ import { WebView } from 'react-native-webview';
 import * as Location from 'expo-location';
 import { apiFetch, logout, ApiError } from '../api/client';
 import { getStoredEmployee, StoredEmployee } from '../storage/tokens';
-import { saveTodayCache, getTodayCache, clearTodayCache } from '../storage/cache';
-import { startBackgroundTracking, stopBackgroundTracking, isTrackingRunning, diagnoseTracking } from '../location/tracking';
+import { saveTodayCache, getTodayCache } from '../storage/cache';
+import {
+  startBackgroundTracking,
+  stopBackgroundTracking,
+  isTrackingRunning,
+  diagnoseTracking,
+  lastFixAgeMs,
+  TRACKING_STALE_MS,
+} from '../location/tracking';
 import {
   startGeofenceAutoMode,
   stopGeofenceAutoMode,
@@ -37,7 +44,16 @@ import {
   REMINDER_HOUR,
 } from '../notifications/clockInReminder';
 import { notifyPermissionUpdates, PermissionUpdate } from '../notifications/permissionUpdates';
-import { startInboxPoller, stopInboxPoller } from '../notifications/inboxPoller';
+import { startInboxPoller } from '../notifications/inboxPoller';
+import { registerForPush } from '../notifications/push';
+import {
+  checkNotificationHealth,
+  fixNotifications,
+  shouldAskForExactAlarms,
+  markExactAlarmsAsked,
+  openExactAlarmSettings,
+  type NotificationProblem,
+} from '../notifications/health';
 import DatePicker from './DatePicker';
 import TimePicker from './TimePicker';
 import { requestIgnoreBatteryOptimization, openAppSettings } from '../location/batteryOptimization';
@@ -83,10 +99,14 @@ interface TodayAttendance {
   banked_minutes?: number | null;
   status: string | null;
   geofence_status?: string | null;
+  /** The day was closed automatically for being away from the site. */
+  auto_clocked_out?: boolean;
 }
 
 interface HistoryRow {
   work_date: string;
+  /** The day's first login; clock_in_utc is the latest session's start. */
+  first_clock_in_utc?: string | null;
   clock_in_utc: string | null;
   clock_out_utc: string | null;
   total_minutes: number | null;
@@ -263,6 +283,54 @@ export interface FixPayload {
 }
 
 /**
+ * The promise's value, or null once `ms` have passed — and null on a rejection
+ * too. For the location calls below, "no answer", "too slow" and "refused" all
+ * mean the same thing: no position. Every await on the clock buttons' path goes
+ * through this, so none of them can hold the spinner for ever.
+ */
+function within<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  return Promise.race([
+    promise.catch(() => null),
+    new Promise<null>(resolve => setTimeout(() => resolve(null), ms)),
+  ]);
+}
+
+// ---------------------------------------------------------------------------
+// A position fetched BEFORE the tap.
+//
+// Clock-in was the slow one, and the time went on the location, not the
+// server (which answers in a fraction of a second). Before clock-in nothing
+// keeps a position fresh — tracking only starts afterwards — so every morning
+// the tap began a cold lookup: up to 8 seconds, and indoors up to 34 before it
+// gave up. So the lookup now starts as soon as the Clock In button is on screen
+// and repeats while it stays there. By the time a finger reaches the button
+// the position is usually already in hand, and a tap that comes sooner joins
+// the lookup already under way instead of starting again from cold.
+// ---------------------------------------------------------------------------
+let warmFix: { pos: Location.LocationObject; at: number } | null = null;
+let warming: Promise<Location.LocationObject | null> | null = null;
+
+/** How old a warmed position may be and still be used for a clock-in. Short,
+ *  because the fence is judged on it: a position taken at the gate must not
+ *  be what a tap at the desk sends. Refreshed more often than it expires. */
+const WARM_FIX_MAX_AGE_MS = 30_000;
+const WARM_FIX_REFRESH_MS = 20_000;
+
+async function warmUpLocation(): Promise<void> {
+  if (warming) return;
+  // Never prompts: asking for permission is the button's job, after consent.
+  const perm = await Location.getForegroundPermissionsAsync().catch(() => null);
+  if (!perm?.granted) return;
+  warming = within(Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }), 20_000);
+  try {
+    const pos = await warming;
+    if (pos) warmFix = { pos, at: Date.now() };
+  } finally {
+    warming = null;
+  }
+}
+
+/**
  * Where the phone thinks it is, or an honest admission that it does not know.
  *
  * @param allowUnknown  Return null coordinates instead of throwing when no fix
@@ -288,20 +356,45 @@ async function getCoords(
   //      sent along, so the server judges it honestly;
   //   4. only with no cached fix at all do we keep waiting for the lock —
   //      there is genuinely nothing else to offer.
-  const last = await Location.getLastKnownPositionAsync({ maxAge: 120_000, requiredAccuracy: 250 });
+  //
+  // A REJECTED fix counts as no fix. It used to escape as an exception: with
+  // Location switched off (or the "turn on location" dialog declined) Android
+  // rejects getCurrentPositionAsync, the race threw, and Clock Out failed with
+  // an error — the opposite of allowUnknown, and the employee was left with a
+  // day they could not close. The cached-fix reads are bounded as well; they
+  // normally answer at once, but nothing on this path may wait unbounded.
+  //
+  // 0. Before all of that: the position warmed while the button was on screen.
+  const warm = warmFix
+    && Date.now() - warmFix.at < WARM_FIX_MAX_AGE_MS
+    && (warmFix.pos.coords.accuracy ?? 0) <= 250
+    ? warmFix.pos
+    : null;
+  // The OS's cached position is held to the same short limit for a clock-in,
+  // which the fence judges; two minutes is fine for a clock-out's record.
+  const last = warm ?? await within(
+    Location.getLastKnownPositionAsync({
+      maxAge: allowUnknown ? 120_000 : WARM_FIX_MAX_AGE_MS,
+      requiredAccuracy: 250,
+    }),
+    3_000,
+  );
   let pos = last;
   if (!pos) {
-    const fresh = Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-    pos = await Promise.race([
-      fresh,
-      new Promise<null>(resolve => setTimeout(() => resolve(null), 8_000)),
-    ]);
+    // A lookup the screen already started is joined, not restarted.
+    const fresh = warming ?? Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+    // Clock-out only wants the position for the record, so it waits less.
+    pos = await within(fresh, allowUnknown ? 4_000 : 8_000);
     if (!pos) {
       // Any older fix will do at this point — its own accuracy travels with it,
       // so the server judges it honestly rather than trusting it blindly.
-      pos = await Location.getLastKnownPositionAsync({ maxAge: 600_000 });
+      pos = await within(Location.getLastKnownPositionAsync({ maxAge: 600_000 }), 3_000);
     }
-    if (!pos) {
+    // Clock-out skips this last wait. It succeeds without a position, so twenty
+    // more seconds of spinner buys a coordinate the server does not need — on
+    // exactly the phones (tracking off, indoors) where the lock never comes.
+    // Worst case for clock-out is now a few seconds instead of ~34.
+    if (!pos && !allowUnknown) {
       // Last resort: keep waiting for the lock, but NOT for ever.
       //
       // This used to be a bare `await fresh`, with no timeout at all. On a
@@ -312,10 +405,7 @@ async function getCoords(
       // unclosed session, which is the other half of the reports.
       //
       // Twenty more seconds, then answer honestly.
-      pos = await Promise.race([
-        fresh,
-        new Promise<null>(resolve => setTimeout(() => resolve(null), 20_000)),
-      ]);
+      pos = await within(fresh, 20_000);
     }
   }
 
@@ -342,10 +432,23 @@ async function getCoords(
 export default function DashboardScreen({ onLogout }: { onLogout: () => void }) {
   const [employee, setEmployee] = useState<StoredEmployee | null>(null);
   const [attendance, setAttendance] = useState<TodayAttendance | null>(null);
+  /** Numbers each /today request so a late, older answer cannot overwrite a newer state. */
+  const todaySeqRef = useRef(0);
   const [shift, setShift] = useState<Shift | null>(null);
   const [history, setHistory] = useState<HistoryRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [notifProblem, setNotifProblem] = useState<NotificationProblem>(null);
+  const [notifCanAsk, setNotifCanAsk] = useState(false);
+  // Which step a clock action is on, shown beside the spinner. A bare spinner
+  // reads as "frozen" after a few seconds, and a frozen-looking app gets
+  // force-closed mid-request — the step name says it is still working.
+  const [busyLabel, setBusyLabel] = useState<string | null>(null);
+  // /today could not be loaded on the last attempt, so the card is showing the
+  // copy saved on this phone. Said on screen: a stale "Clock Out" button the
+  // server no longer agrees with is how a person ends up tapping in a loop.
+  const [todayStale, setTodayStale] = useState(false);
   const [tracking, setTracking] = useState(false);
   // The reason tracking is not running, in the employee's words. Thrown away
   // before, which left "tap to fix" offering battery settings for problems
@@ -359,7 +462,16 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   const [hasConsent, setHasConsent] = useState<boolean | null>(null);
   const [consentVisible, setConsentVisible] = useState(false);
   // Which action the consent modal should continue with after acceptance.
-  const consentActionRef = useRef<'in' | 'out'>('in');
+  // What accepting the location notice goes on to do. 'fix' is the tracking
+  // helper: it used to borrow 'in', so tapping "tracking is off — tap to fix"
+  // on a fresh install and accepting the notice CLOCKED THE EMPLOYEE IN.
+  const consentActionRef = useRef<'in' | 'out' | 'fix'>('in');
+  // startGeofenceAutoMode() returns false and does nothing at all when
+  // background location isn't granted — silently, so the employee's day looks
+  // protected while nothing is actually watching the fence. Warn once per app
+  // session the first time that happens, instead of leaving them to notice a
+  // status pill on a screen they have likely already closed.
+  const geofenceStartFailedRef = useRef(false);
   // True once /today has actually answered — effects that stop/start the
   // geofence auto mode must not act on the initial empty state.
   const [todayLoaded, setTodayLoaded] = useState(false);
@@ -367,6 +479,11 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   const [now, setNow] = useState(new Date());
   const [liveCoords, setLiveCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [dailyUpdate, setDailyUpdate] = useState('');
+  // True while the box holds typing that has not been saved. Every refresh
+  // reloads the saved update — after clock-in and clock-out, on pull-down, on
+  // coming back to the app — and it used to replace whatever was being typed,
+  // so "write the update, clock out, then save" lost the update.
+  const dailyUpdateDirtyRef = useRef(false);
   const [savingUpdate, setSavingUpdate] = useState(false);
 
   // Permission hours — short paid time off inside the working day.
@@ -416,6 +533,10 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
 
   const clockedIn = !!attendance?.clock_in_utc;
   const clockedOut = !!attendance?.clock_out_utc;
+  // A day the system closed re-opens like a multi-session one (the server
+  // allows it from inside the fence), so the button has to be there for it —
+  // it used to say "completed for today" over a day the employee never ended.
+  const canClockIn = !clockedIn || (clockedOut && (multiSession || !!attendance?.auto_clocked_out));
   const today = istYmd(now);
   const showClockOutReminder = clockedIn && !clockedOut && istHour(now) >= 19;
 
@@ -446,6 +567,13 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   }, []);
 
   const loadToday = useCallback(async () => {
+    // Only the NEWEST answer may set the screen. The Clock In button shows
+    // before the first answer arrives, and someone who taps it at once had
+    // that first answer — "not clocked in", true when it left the server —
+    // land AFTER their clock-in: the screen went back to Clock In, and the
+    // tracking effect, seeing a confirmed "not on shift", stopped the tracking
+    // the clock-in had just started. If it landed last, both stayed that way.
+    const seq = ++todaySeqRef.current;
     try {
       const data = await apiFetch<{
         attendance: TodayAttendance | null;
@@ -456,6 +584,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         permission_updates?: PermissionUpdate[];
         today_sessions?: TodaySession[];
       }>('/api/attendance/today');
+      if (seq !== todaySeqRef.current) return; // overtaken by a newer load or a clock action
       setTodaySessions(data.today_sessions ?? []);
       // Announce approved/rejected permission decisions — deduped internally,
       // so calling on every refresh is safe.
@@ -477,8 +606,15 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       );
       saveTodayCache(istYmd(new Date()), data.attendance);
       setTodayLoaded(true);
+      setTodayStale(false);
     } catch (e) {
-      if (e instanceof Error && e.message.includes('log in again')) onLogout();
+      if (e instanceof Error && e.message.includes('log in again')) {
+        onLogout();
+        return;
+      }
+      // A failed request that a newer one already replaced says nothing
+      // about whether the server can be reached now.
+      if (seq === todaySeqRef.current) setTodayStale(true);
     }
   }, [onLogout]);
 
@@ -498,7 +634,9 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     from.setDate(from.getDate() - 6);
     try {
       const data = await apiFetch<{ records: HistoryRow[] }>(
-        `/api/attendance?from_date=${istYmd(from)}&to_date=${istYmd(to)}&limit=7&page=1`,
+        // mine=1: this phone's own days, also for a manager or admin — by role
+        // the server returns their team or everybody.
+        `/api/attendance?from_date=${istYmd(from)}&to_date=${istYmd(to)}&limit=7&page=1&mine=1`,
       );
       setHistory(data.records ?? []);
     } catch {
@@ -510,9 +648,9 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     const d = istYmd(new Date());
     try {
       const data = await apiFetch<{ updates: Array<{ update_text: string }> }>(
-        `/api/daily-updates?from_date=${d}&to_date=${d}&limit=1&page=1`,
+        `/api/daily-updates?from_date=${d}&to_date=${d}&limit=1&page=1&mine=1`,
       );
-      setDailyUpdate(data.updates?.[0]?.update_text ?? '');
+      if (!dailyUpdateDirtyRef.current) setDailyUpdate(data.updates?.[0]?.update_text ?? '');
     } catch {
       /* non-fatal */
     }
@@ -524,7 +662,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     try {
       const [list, balance] = await Promise.all([
         apiFetch<{ permissions: PermissionRow[] }>(
-          `/api/permissions?from_date=${monthStart}&limit=5&page=1`,
+          `/api/permissions?from_date=${monthStart}&limit=5&page=1&mine=1`,
         ),
         apiFetch<PermissionBalance>('/api/permissions/balance'),
       ]);
@@ -538,19 +676,22 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   useEffect(() => {
     let active = true;
     (async () => {
+      // Each read tolerates failure. Secure storage can refuse outright on some
+      // phones, and one rejection here used to leave the whole screen on its
+      // loading spinner for ever — `loading` never turned false.
       const [emp, cached, running] = await Promise.all([
-        getStoredEmployee(),
-        getTodayCache<TodayAttendance | null>(istYmd(new Date())),
+        getStoredEmployee().catch(() => null),
+        getTodayCache<TodayAttendance | null>(istYmd(new Date())).catch(() => null),
         isTrackingRunning(),
       ]);
       // Consent: stored flag, or grandfathered for existing installs that
       // already granted background location before this screen existed.
-      let consent = (await SecureStore.getItemAsync(CONSENT_KEY)) === '1';
+      let consent = (await SecureStore.getItemAsync(CONSENT_KEY).catch(() => null)) === '1';
       if (!consent) {
         const bg = await Location.getBackgroundPermissionsAsync().catch(() => null);
         if (bg?.granted) {
           consent = true;
-          await SecureStore.setItemAsync(CONSENT_KEY, '1');
+          await SecureStore.setItemAsync(CONSENT_KEY, '1').catch(() => {});
         }
       }
       if (!active) return;
@@ -588,7 +729,20 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       // Not on shift: kill any leftover service from a previous day (e.g. the
       // employee never clocked out and attendance was auto-closed) so the
       // phone doesn't keep reporting location while they are not logged in.
-      void stopBackgroundTracking();
+      //
+      // Except straight after an AUTOMATIC closure today: a running service is
+      // then what notices the employee coming back. It uploads nothing while
+      // the shift is closed and stops itself once the fence is disarmed (see
+      // tracking.ts), so leaving it running costs no data and ends on its own.
+      //
+      // And never on the CACHED state alone. Opening the app shows the last
+      // saved copy of today at once, then asks the server. That copy can be
+      // missing or behind — a background auto clock-in never updates it — and
+      // stopping on it switched tracking off mid-shift on an ordinary app
+      // open; if the server then could not be reached, it stayed off. The
+      // auto-attendance effect below waits for todayLoaded for exactly this
+      // reason. Stopping does too: only on the server's word.
+      if (todayLoaded && !(clockedOut && attendance?.auto_clocked_out)) void stopBackgroundTracking();
       setTracking(false);
       setLiveCoords(null);
       return;
@@ -609,7 +763,10 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     const ensureTracking = async () => {
       try {
         const running = await isTrackingRunning();
-        if (!running) {
+        // Registered is not alive: a service the OS killed still reads as
+        // running, so a silent one is restarted too (see lastFixAgeMs).
+        const age = await lastFixAgeMs();
+        if (!running || age === null || age > TRACKING_STALE_MS) {
           await startBackgroundTracking();
         }
         if (active) { setTracking(true); setTrackingIssue(null); }
@@ -623,15 +780,28 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       }
     };
 
+    // The map is a WebView whose page is built from these coordinates, so every
+    // new value reloads it — every 20 seconds, throwing away the employee's
+    // zoom and pan, for GPS wobble of a few metres. Only a real move redraws.
+    const MAP_REDRAW_M = 25;
+    const showPos = (lat: number, lng: number) => setLiveCoords(prev => {
+      if (prev) {
+        const dy = (lat - prev.lat) * 111_320;
+        const dx = (lng - prev.lng) * 111_320 * Math.cos((lat * Math.PI) / 180);
+        if (Math.hypot(dx, dy) < MAP_REDRAW_M) return prev;
+      }
+      return { lat, lng };
+    });
+
     const fetchPos = async () => {
       try {
         const perm = await Location.getForegroundPermissionsAsync();
         if (perm.status !== 'granted') return;
         // Last-known fix is instant → the map shows immediately.
         const last = await Location.getLastKnownPositionAsync({ maxAge: 120_000 });
-        if (last && active) setLiveCoords({ lat: last.coords.latitude, lng: last.coords.longitude });
+        if (last && active) showPos(last.coords.latitude, last.coords.longitude);
         const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-        if (active) setLiveCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        if (active) showPos(pos.coords.latitude, pos.coords.longitude);
       } catch {
         /* ignore transient GPS misses */
       }
@@ -643,9 +813,6 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     // in-app check every minute while the dashboard is open (strike spacing
     // is enforced inside checkLocationAndWarn, so this cannot spam).
     void startLocationWatch();
-    // Inbox heartbeat: announces permission decisions with the app closed.
-    // Independent of shift/tracking state — it dies only at logout.
-    void startInboxPoller();
     void checkLocationAndWarn();
     const watchId = setInterval(() => void checkLocationAndWarn(), 60_000);
     const id = setInterval(fetchPos, 20_000);
@@ -672,7 +839,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       clearInterval(watchId);
       appState.remove();
     };
-  }, [clockedIn, clockedOut, trackingEnabled, loading, hasConsent, loadToday]);
+  }, [clockedIn, clockedOut, trackingEnabled, loading, hasConsent, loadToday, attendance?.auto_clocked_out, todayLoaded]);
 
   const refresh = useCallback(() => {
     loadToday();
@@ -681,6 +848,73 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     loadTrackingEnabled();
     loadPermissions();
   }, [loadToday, loadHistory, loadDailyUpdate, loadTrackingEnabled, loadPermissions]);
+
+  // While Clock In is on screen: keep a position ready (see warmUpLocation),
+  // and when the app comes back to the foreground, reload. The reload matters
+  // for speed too — the login token lasts 15 minutes, so a phone left in a
+  // pocket since yesterday spent its clock-in tap on a refused request, a
+  // token refresh and a retry. Reloading on return pays that while they are
+  // still reading the screen. (Mid-shift, the tracking effect already reloads.)
+  useEffect(() => {
+    if (loading || hasConsent !== true || !canClockIn) return;
+    void warmUpLocation();
+    const id = setInterval(() => {
+      if (AppState.currentState === 'active') void warmUpLocation();
+    }, WARM_FIX_REFRESH_MS);
+    const sub = AppState.addEventListener('change', state => {
+      if (state !== 'active') return;
+      void warmUpLocation();
+      refresh();
+    });
+    return () => {
+      clearInterval(id);
+      sub.remove();
+    };
+  }, [loading, hasConsent, canClockIn, refresh]);
+
+  const recheckNotifications = useCallback(async () => {
+    const { problem, canAsk } = await checkNotificationHealth();
+    setNotifProblem(problem);
+    setNotifCanAsk(canAsk);
+    return problem;
+  }, []);
+
+  // Notifications, whatever the shift.
+  //
+  // The inbox heartbeat — which announces permission approvals with the app
+  // closed — was registered only inside the on-shift tracking effect. So the
+  // people most likely to be waiting for a verdict (not clocked in, or with
+  // tracking switched off) never had it, and heard nothing until they next
+  // opened the app.
+  //
+  // Also: say when the phone is refusing notifications (re-checked on every
+  // return to the app, so the banner clears once they fix it in Settings), and
+  // on Android 14+ ask once for on-time reminders.
+  useEffect(() => {
+    if (loading) return;
+    void startInboxPoller();
+    void (async () => {
+      const problem = await recheckNotifications();
+      if (problem) return;
+      // Give the server this phone's push address, so approvals and automatic
+      // clock-outs arrive with the app closed (see notifications/push.ts).
+      void registerForPush();
+      if (!(await shouldAskForExactAlarms())) return;
+      Alert.alert(
+        'Get reminders on time',
+        'Allow "Alarms & reminders" for Attendance so your clock-in and clock-out reminders arrive at the right '
+          + 'time, not up to an hour late.',
+        [
+          { text: 'Not now', style: 'cancel', onPress: () => { void markExactAlarmsAsked(); } },
+          { text: 'Allow', onPress: () => { void openExactAlarmSettings(); } },
+        ],
+      );
+    })();
+    const sub = AppState.addEventListener('change', state => {
+      if (state === 'active') void recheckNotifications();
+    });
+    return () => sub.remove();
+  }, [loading, recheckNotifications]);
 
   // OS-level "shift over, please clock out" notifications — they fire on the
   // lock screen even with the app closed, exactly 9 hours after clock-in.
@@ -733,26 +967,37 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     }
     if (clockedIn && !clockedOut) {
       void (async () => {
-        await startGeofenceAutoMode(
+        const started = await startGeofenceAutoMode(
           fenceLocation.latitude,
           fenceLocation.longitude,
           fenceLocation.radius_meters,
         );
+        if (!started && !geofenceStartFailedRef.current) {
+          geofenceStartFailedRef.current = true;
+          void fixTracking();
+        }
         await reconcileGeofenceAttendance().catch(() => {});
       })();
     } else if (clockedIn && clockedOut) {
       void (async () => {
-        if (await isAutoOutPending()) {
-          await startGeofenceAutoMode(
+        // The server's word counts as much as this phone's own flag: most of
+        // these days are closed by the server, which this phone's flag never
+        // knew about, so opening the app re-armed nothing and checked nothing.
+        if (attendance?.auto_clocked_out || (await isAutoOutPending())) {
+          const started = await startGeofenceAutoMode(
             fenceLocation.latitude,
             fenceLocation.longitude,
             fenceLocation.radius_meters,
           );
+          if (!started && !geofenceStartFailedRef.current) {
+            geofenceStartFailedRef.current = true;
+            void fixTracking();
+          }
           await reconcileGeofenceAttendance().catch(() => {});
         }
       })();
     }
-  }, [clockedIn, clockedOut, multiSession, fenceLocation, trackingEnabled, loading, hasConsent, todayLoaded]);
+  }, [clockedIn, clockedOut, multiSession, fenceLocation, trackingEnabled, loading, hasConsent, todayLoaded, attendance?.auto_clocked_out]);
 
   // Consent must precede ANY location access (Google Play prominent
   // disclosure). Clock-in itself needs coordinates, so without consent we show
@@ -771,35 +1016,62 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     setHasConsent(true);
     setConsentVisible(false);
     if (consentActionRef.current === 'in') await performClockIn();
-    else await performClockOut();
+    else if (consentActionRef.current === 'out') await performClockOut();
+    else await fixTracking();
   };
 
   const performClockIn = async () => {
     setBusy(true);
     setError(null);
     try {
+      setBusyLabel('Finding your location…');
       const coords = await getCoords();
-      await apiFetch('/api/attendance/clock-in', {
+      setBusyLabel('Saving…');
+      const record = await apiFetch<TodayAttendance>('/api/attendance/clock-in', {
         method: 'POST',
         body: coords,
       });
+      // The server's own record of the clock-in IS today's state now. Shown at
+      // once — the button flips without waiting for a reload — and any /today
+      // still in flight from before the tap is void (see loadToday).
+      todaySeqRef.current++;
+      if (record) setAttendance(record);
+      // The server has RECORDED the clock-in from this line on. Anything that
+      // fails below is a tracking problem, not a failed clock-in. It used to
+      // fall into the catch, which said "failed", skipped refresh() and left
+      // the Clock In button up — so the next tap got "Already clocked in" and
+      // the employee concluded they could not clock in at all.
+      let trackingProblem: string | null = null;
       // Only start location tracking if the admin enabled it for this employee.
       if (trackingEnabled) {
-        await startBackgroundTracking();
-        setTracking(true);
-        // One-time: ask the OS to keep tracking alive in the background.
-        const prompted = await SecureStore.getItemAsync('battery_prompted');
-        if (!prompted) {
-          await SecureStore.setItemAsync('battery_prompted', '1');
-          Alert.alert(
-            'Keep tracking running',
-            'So your location keeps recording while the screen is off, tap "Allow" on the next screen.',
-            [{ text: 'OK', onPress: () => { void requestIgnoreBatteryOptimization(); } }],
-          );
+        try {
+          setBusyLabel('Starting location tracking…');
+          await startBackgroundTracking();
+          setTracking(true);
+          setTrackingIssue(null);
+          // One-time: ask the OS to keep tracking alive in the background.
+          const prompted = await SecureStore.getItemAsync('battery_prompted');
+          if (!prompted) {
+            await SecureStore.setItemAsync('battery_prompted', '1');
+            Alert.alert(
+              'Keep tracking running',
+              'So your location keeps recording while the screen is off, tap "Allow" on the next screen.',
+              [{ text: 'OK', onPress: () => { void requestIgnoreBatteryOptimization(); } }],
+            );
+          }
+        } catch (te) {
+          trackingProblem = te instanceof Error ? te.message : 'Location tracking could not start.';
+          setTracking(false);
+          setTrackingIssue(trackingProblem);
         }
       }
       refresh();
-      toast('Clocked in successfully ✓');
+      if (trackingProblem) {
+        setError(`You are clocked in, but location tracking is not running: ${trackingProblem}`);
+        toast('Clocked in ✓ — tracking is off');
+      } else {
+        toast('Clocked in successfully ✓');
+      }
     } catch (e) {
       // Away from the work site — refused, with no way through it from here.
       // A reason box used to open at this point and let them in; it is gone,
@@ -812,6 +1084,9 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       // radius and how far out they are, so it says how far there is to walk.
       if (e instanceof ApiError
           && (e.code === 'outside_fence' || e.code === 'fence_closed_day')) {
+        // The next try must measure afresh, not resend the position that was
+        // just refused — they may well have walked in since.
+        warmFix = null;
         setBusy(false);
         Alert.alert(
           e.code === 'fence_closed_day'
@@ -828,8 +1103,13 @@ If you are working away from the site today, ask your `
       const msg = e instanceof Error ? e.message : 'Clock-in failed.';
       setError(msg);
       toast(msg);
+      // The server answered — e.g. 409 "Already clocked in at 9:08 am" — so
+      // reload what it holds. Otherwise the screen keeps the button the server
+      // just refused, and every tap repeats the same refusal.
+      if (e instanceof ApiError) refresh();
     } finally {
       setBusy(false);
+      setBusyLabel(null);
     }
   };
 
@@ -850,13 +1130,21 @@ If you are working away from the site today, ask your `
     try {
       // allowUnknown: a phone that cannot see where it is must still be able to
       // end its owner's day. The alternative is the day staying open all night.
+      setBusyLabel('Finding your location…');
       const coords = await getCoords({ allowUnknown: true });
+      setBusyLabel('Saving…');
       await apiFetch('/api/attendance/clock-out', { method: 'POST', body: coords });
-      await stopBackgroundTracking();
-      // Manual clock-out means done for the day — end geofence auto mode and
-      // the location-off watchdog.
-      await stopGeofenceAutoMode();
-      await stopLocationWatch();
+      // A /today from before the tap would show the shift still open. Void it;
+      // the reload below (after the housekeeping) brings the closed day.
+      todaySeqRef.current++;
+      // Manual clock-out means done for the day — end tracking, geofence auto
+      // mode and the location-off watchdog. Independent of each other, so side
+      // by side rather than one after another; and allSettled, because the
+      // day is already closed on the server and a hiccup in tidying up must
+      // not be reported as a failed clock-out. Still finished BEFORE refresh():
+      // the auto-attendance effect reads the pending re-entry flag the moment
+      // the screen learns the day is closed, and must find it cleared.
+      await Promise.allSettled([stopBackgroundTracking(), stopGeofenceAutoMode(), stopLocationWatch()]);
       setTracking(false);
       refresh();
       toast('Clocked out successfully ✓');
@@ -864,8 +1152,13 @@ If you are working away from the site today, ask your `
       const msg = e instanceof Error ? e.message : 'Clock-out failed.';
       setError(msg);
       toast(msg);
+      // Same as clock-in: a 404 "No open clock-in found" means the day was
+      // already closed elsewhere (the 07:00 settle, the fence, an admin), and
+      // the Clock Out button on screen is stale. Show what the server holds.
+      if (e instanceof ApiError) refresh();
     } finally {
       setBusy(false);
+      setBusyLabel(null);
     }
   };
 
@@ -880,6 +1173,7 @@ If you are working away from the site today, ask your `
         method: 'POST',
         body: { work_date: today, update_text: dailyUpdate.trim() },
       });
+      dailyUpdateDirtyRef.current = false;
       toast('Daily update saved ✓');
     } catch (e) {
       toast(e instanceof Error ? e.message : 'Failed to save update');
@@ -969,6 +1263,9 @@ If you are working away from the site today, ask your `
                 await loadPermissions();
               } catch (e) {
                 toast(e instanceof Error ? e.message : 'Failed to cancel');
+                // Usually "already approved/rejected" — show what it is now,
+                // not a pending row with a Withdraw button that cannot work.
+                await loadPermissions();
               }
             })();
           },
@@ -978,12 +1275,13 @@ If you are working away from the site today, ask your `
   };
 
   const handleLogout = async () => {
-    await stopBackgroundTracking().catch(() => {});
-    await stopGeofenceAutoMode().catch(() => {});
-    await stopLocationWatch().catch(() => {});
-    await stopInboxPoller().catch(() => {});
-    await cancelShiftEndReminders();
-    await clearTodayCache();
+    if (signingOut) return;
+    setSigningOut(true);
+    geofenceStartFailedRef.current = false; // next login gets its own warning
+    // logout() clears the session on the phone at once and tells the server
+    // in the background, so a weak signal no longer holds the screen for up
+    // to 20 seconds with nothing to show for the tap. App then runs the full
+    // local cleanup (endLocalSession) the moment it sees the session gone.
     await logout();
     onLogout();
   };
@@ -993,10 +1291,14 @@ If you are working away from the site today, ask your `
   // everything, so an employee whose real problem was the location permission
   // could grant background activity all day and see the same dialog return.
   const fixTracking = async () => {
+    // Tracking belongs to a shift. Off it, starting the service only had the
+    // server refuse the first upload and stop it again, while the pill had
+    // already turned green.
+    if (!(clockedIn && !clockedOut)) return;
     // Consent first: nothing else can start without it, and no settings screen
     // can grant it — it is a tap inside this app.
     if (hasConsent !== true) {
-      consentActionRef.current = 'in';
+      consentActionRef.current = 'fix';
       setConsentVisible(true);
       return;
     }
@@ -1105,6 +1407,14 @@ If you are working away from the site today, ask your `
     .toLocaleTimeString('en-IN', { timeZone: TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
     .toLowerCase();
 
+  // What the clock buttons show while busy: the spinner plus the current step.
+  const busyIndicator = (
+    <View style={styles.busyRow}>
+      <ActivityIndicator color={colors.text} />
+      {busyLabel && <Text style={styles.busyText}>{busyLabel}</Text>}
+    </View>
+  );
+
   return (
     <View style={styles.container}>
       <ConsentModal
@@ -1127,8 +1437,8 @@ If you are working away from the site today, ask your `
           <View style={styles.avatar}>
             <Text style={styles.avatarText}>{initials(employee?.name)}</Text>
           </View>
-          <TouchableOpacity onPress={handleLogout}>
-            <Text style={styles.signOut}>Sign out</Text>
+          <TouchableOpacity onPress={handleLogout} disabled={signingOut}>
+            <Text style={styles.signOut}>{signingOut ? 'Signing out…' : 'Sign out'}</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -1166,6 +1476,38 @@ If you are working away from the site today, ask your `
             </View>
           );
         })()}
+
+        {/* The last /today request failed, so the card below is the copy saved
+            on this phone — possibly a day or a clock-out behind the server. */}
+        {todayStale && (
+          <TouchableOpacity style={[styles.warnBox, { marginTop: 16 }]} onPress={refresh} activeOpacity={0.8}>
+            <Text style={styles.warnText}>
+              ⚠ Can&apos;t reach the server. Showing your last saved status, which may be out of date —
+              tap here or pull down to try again.
+            </Text>
+          </TouchableOpacity>
+        )}
+
+        {/* Notifications refused. Every reminder, warning and approval in this
+            app is a notification, and a phone that blocks them used to give no
+            sign of it — the employee simply stopped hearing anything. */}
+        {notifProblem && (
+          <TouchableOpacity
+            style={[styles.warnBox, { marginTop: 16 }]}
+            onPress={() => { void fixNotifications(notifCanAsk).then(recheckNotifications); }}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.warnTitle}>
+              {notifProblem === 'blocked'
+                ? '🔕 Notifications are off — tap to turn on'
+                : '🔕 Some notifications are switched off — tap to fix'}
+            </Text>
+            <Text style={styles.warnText}>
+              Without them you won&apos;t get clock-in reminders, away-from-site warnings or permission
+              approvals.
+            </Text>
+          </TouchableOpacity>
+        )}
 
         {/* TODAY */}
         <View style={styles.card}>
@@ -1263,9 +1605,22 @@ If you are working away from the site today, ask your `
             </View>
           )}
 
-          {(!clockedIn || (clockedOut && multiSession)) && (
+          {/* Tracking is not running during a shift. Said HERE, beside the Clock
+              Out button, not only in the pill at the foot of the page: a phone
+              that records nothing all day has no recent position by the
+              evening, which is what makes Clock Out slow — and an employee
+              whose tracking never started had no reason to scroll down to the
+              one line that said so. */}
+          {clockedIn && !clockedOut && trackingEnabled && !tracking && (
+            <TouchableOpacity style={styles.warnBox} onPress={() => { void fixTracking(); }} activeOpacity={0.8}>
+              <Text style={styles.warnTitle}>📍 Location tracking is off — tap to fix</Text>
+              {trackingIssue && <Text style={styles.warnText}>{trackingIssue}</Text>}
+            </TouchableOpacity>
+          )}
+
+          {canClockIn && (
             <TouchableOpacity style={styles.action} onPress={handleClockIn} disabled={busy} activeOpacity={0.8}>
-              {busy ? <ActivityIndicator color={colors.text} /> : (
+              {busy ? busyIndicator : (
                 <Text style={styles.actionText}>
                   {clockedOut ? '→  Clock In Again' : '→  Clock In'}
                 </Text>
@@ -1282,10 +1637,10 @@ If you are working away from the site today, ask your `
           )}
           {clockedIn && !clockedOut && (
             <TouchableOpacity style={styles.action} onPress={handleClockOut} disabled={busy} activeOpacity={0.8}>
-              {busy ? <ActivityIndicator color={colors.text} /> : <Text style={styles.actionText}>←  Clock Out</Text>}
+              {busy ? busyIndicator : <Text style={styles.actionText}>←  Clock Out</Text>}
             </TouchableOpacity>
           )}
-          {clockedIn && clockedOut && !multiSession && <Text style={styles.done}>Attendance completed for today ✓</Text>}
+          {clockedIn && clockedOut && !canClockIn && <Text style={styles.done}>Attendance completed for today ✓</Text>}
         </View>
 
         {/* Geofence warning */}
@@ -1306,7 +1661,10 @@ If you are working away from the site today, ask your `
             </View>
             <TouchableOpacity
               style={styles.permApplyBtn}
-              onPress={() => { setPermError(null); setPermDate(today); setPermFormOpen(o => !o); }}
+              // The CALENDAR date: `today` is the work date, which until 07:00
+              // is still yesterday — so an early-morning request opened on the
+              // wrong day, with the "Today" chip not even highlighted.
+              onPress={() => { setPermError(null); setPermDate(istCalendarYmd(new Date())); setPermFormOpen(o => !o); }}
               activeOpacity={0.85}
             >
               <Text style={styles.permApplyText}>{permFormOpen ? 'Close' : 'Apply'}</Text>
@@ -1472,7 +1830,7 @@ If you are working away from the site today, ask your `
           <TextInput
             style={styles.textarea}
             value={dailyUpdate}
-            onChangeText={setDailyUpdate}
+            onChangeText={text => { dailyUpdateDirtyRef.current = true; setDailyUpdate(text); }}
             multiline
             numberOfLines={3}
             maxLength={1000}
@@ -1495,6 +1853,12 @@ If you are working away from the site today, ask your `
           <View style={styles.trackPill}>
             <View style={[styles.dot, { backgroundColor: colors.textFaint }]} />
             <Text style={[styles.trackText, { color: colors.textMuted }]}>Location tracking is disabled</Text>
+          </View>
+        ) : !(clockedIn && !clockedOut) && !tracking ? (
+          // Off shift there is nothing to fix: tracking starts with the clock-in.
+          <View style={styles.trackPill}>
+            <View style={[styles.dot, { backgroundColor: colors.textFaint }]} />
+            <Text style={[styles.trackText, { color: colors.textMuted }]}>Location tracking starts when you clock in</Text>
           </View>
         ) : (
           <TouchableOpacity
@@ -1559,7 +1923,10 @@ If you are working away from the site today, ask your `
                     </Text>
                   )}
                 </View>
-                <Text style={[styles.histCell, styles.colTime]}>{timeOnly(r.clock_in_utc)}</Text>
+                {/* The day's first clock-in, as on the Today card. clock_in_utc is
+                    the LATEST session's start, so a day closed and re-opened
+                    showed its afternoon start here and its morning on Today. */}
+                <Text style={[styles.histCell, styles.colTime]}>{timeOnly(r.first_clock_in_utc ?? r.clock_in_utc)}</Text>
                 <Text style={[styles.histCell, styles.colTime]}>{timeOnly(r.clock_out_utc)}</Text>
                 <View style={styles.colHrsWrap}>
                   <Text style={[styles.histCell, styles.histHrs]}>
@@ -1622,6 +1989,8 @@ const styles = StyleSheet.create({
   errorText: { color: colors.redText, fontSize: 13 },
   action: { borderWidth: 1, borderColor: colors.borderInput, borderRadius: 12, paddingVertical: 16, alignItems: 'center', marginTop: 20 },
   actionText: { color: colors.text, fontSize: 16, fontWeight: '600' },
+  busyRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  busyText: { color: colors.textMuted, fontSize: 14 },
   done: { color: colors.greenText, textAlign: 'center', marginTop: 20, fontSize: 15, fontWeight: '600' },
   reminderNote: { color: colors.textFaint, textAlign: 'center', marginTop: 10, fontSize: 12 },
   textarea: {

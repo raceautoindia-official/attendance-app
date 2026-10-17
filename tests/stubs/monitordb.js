@@ -3,14 +3,16 @@
 
 let candidate = null;
 let lastInsideFix = null;   // Date | null — last fix that landed inside
+let outsideFixes = 0;       // fixes since then that place them clearly outside
 const updates = [];
 const audits = [];
 
 function setCandidate(c) { candidate = c; }
 function setLastInsideFix(d) { lastInsideFix = d; }
+function setOutsideFixes(n) { outsideFixes = n; }
 function attendanceUpdates() { return updates.filter(u => /UPDATE attendance/i.test(u.sql)); }
 function auditEntries() { return audits.slice(); }
-function reset() { candidate = null; lastInsideFix = null; updates.length = 0; audits.length = 0; }
+function reset() { candidate = null; lastInsideFix = null; outsideFixes = 0; updates.length = 0; audits.length = 0; }
 
 async function query(sql, params) {
   if (/INFORMATION_SCHEMA/i.test(sql)) return [{ c: 1 }];
@@ -18,6 +20,7 @@ async function query(sql, params) {
   if (/FROM\s+attendance\s+a[\s\S]*employee_schedules/i.test(sql)) {
     return candidate ? [candidate] : [];
   }
+  if (/COUNT\(\*\)\s+AS\s+n\s+FROM\s+live_tracking_points/i.test(sql)) return [{ n: outsideFixes }];
   if (/FROM\s+live_tracking_points/i.test(sql)) {
     return lastInsideFix ? [{ tracked_at_utc: lastInsideFix, latitude: 13.0, longitude: 80.0 }] : [];
   }
@@ -40,5 +43,5 @@ async function insertAuditLog(e) { audits.push(e); }
 
 module.exports = {
   query, queryOne, insertAuditLog,
-  setCandidate, setLastInsideFix, attendanceUpdates, auditEntries, reset,
+  setCandidate, setLastInsideFix, setOutsideFixes, attendanceUpdates, auditEntries, reset,
 };

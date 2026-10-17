@@ -95,7 +95,9 @@ const fixFn = auto.slice(auto.indexOf('async function onTrackedFix'), auto.index
 check('a fix only ADVANCES an escalation, never starts one (on-duty safety)',
   /warnings > 0.*progressFenceExit/s.test(fixFn), 'guard missing');
 check('a fix back inside the fence resets the count',
-  /dist <= fence\.radius[\s\S]{0,120}resetFenceExitStrikes\(true\)/.test(fixFn));
+  /confidentlyInside\([\s\S]{0,120}resetFenceExitStrikes\(true\)/.test(fixFn));
+check('a fix advances the count only when clearly outside, allowing for its error',
+  /!confidentlyOutside\([\s\S]{0,200}progressFenceExit/.test(fixFn));
 
 // The decisive moment double-checks with the server.
 const progress = auto.slice(auto.indexOf('async function progressFenceExit'), auto.indexOf('async function onTrackedFix'));
