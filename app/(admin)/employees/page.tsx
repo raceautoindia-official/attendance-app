@@ -213,6 +213,25 @@ export default function EmployeesPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['employees'] }),
   });
 
+  // Reactivate. Deactivating was a one-way door in this UI: DELETE flips
+  // is_active off, and nothing — not the row actions, not the edit form —
+  // could turn it back on, so a mis-click could only be undone in SQL.
+  // The PUT endpoint has always accepted is_active; only the button was
+  // missing. Deactivation also deletes refresh tokens, so the employee signs
+  // in again after this — their passkeys, schedule and history are untouched.
+  const activateMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`/api/employees/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_active: true }),
+      });
+      const json = await res.json() as ApiResponse;
+      if (!json.success) throw new Error(json.error ?? 'Failed');
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['employees'] }),
+  });
+
   // Grant / revoke exemption
   const grantExemptionMutation = useMutation({
     mutationFn: async (id: number) => {
@@ -398,6 +417,21 @@ export default function EmployeesPage() {
                         onClick={e => { e.stopPropagation(); if (confirm('Deactivate this employee?')) deactivateMutation.mutate((r as EmpRow).id); }}
                       >
                         Deactivate
+                      </Button>
+                    )}
+                    {isSuperAdmin && !(r as EmpRow).is_active && (
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        loading={activateMutation.isPending}
+                        onClick={e => {
+                          e.stopPropagation();
+                          if (confirm(`Activate ${(r as EmpRow).name}?\n\nThey will be able to sign in and mark attendance again. They must log in once more, as deactivating ended their session.`)) {
+                            activateMutation.mutate((r as EmpRow).id);
+                          }
+                        }}
+                      >
+                        Activate
                       </Button>
                     )}
                   </div>

@@ -8,6 +8,7 @@ import Badge from '@/components/ui/Badge';
 import Pagination from '@/components/ui/Pagination';
 import Spinner from '@/components/ui/Spinner';
 import Input from '@/components/ui/Input';
+import { AUDIT_ENTITIES } from '@/lib/constants';
 import type { AuditLog, ApiResponse } from '@/lib/types';
 
 type LogRow = AuditLog & { performed_by_name?: string | null };
@@ -18,8 +19,13 @@ const ENTITY_BADGE: Record<string, 'info' | 'warning' | 'success' | 'danger' | '
   passkey: 'warning',
   passkey_exemption: 'warning',
   employee_schedule: 'neutral',
+  employee_schedules: 'neutral',
   location: 'neutral',
   auth: 'danger',
+  permission_request: 'info',
+  // An archive run deletes rows that cannot be got back from the app, only
+  // from the CSV in Drive. Worth being the colour that means "read this one".
+  live_tracking_points: 'warning',
 };
 
 const selectClass = 'block w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500';
@@ -79,13 +85,9 @@ export default function AuditLogPage() {
             className={selectClass}
           >
             <option value="">All</option>
-            <option value="attendance">Attendance</option>
-            <option value="employee">Employee</option>
-            <option value="passkey">Passkey</option>
-            <option value="passkey_exemption">Passkey Exemption</option>
-            <option value="employee_schedule">Schedule</option>
-            <option value="location">Location</option>
-            <option value="auth">Auth</option>
+            {AUDIT_ENTITIES.map(e => (
+              <option key={e.value} value={e.value}>{e.label}</option>
+            ))}
           </select>
         </div>
       </div>

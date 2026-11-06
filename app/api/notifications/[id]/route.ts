@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { query, queryOne, insertAuditLog } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
-import { hasOutOfFenceReviewColumns } from '@/lib/employeeDetails';
+import { hasOutOfFenceReviewColumns, hasOutOfFenceReasonColumn } from '@/lib/employeeDetails';
 import type { ApiResponse } from '@/lib/types';
 
 type Params = { params: Promise<{ id: string }> };
@@ -52,6 +52,12 @@ export async function PATCH(request: NextRequest, context: Params) {
   const { action, review_notes } = parsed.data;
   const nextStatus = action === 'approve' ? 'approved' : 'rejected';
 
+  // hasOutOfFenceReviewColumns() above only proves out_of_fence_status exists.
+  // On a database migrated by hand rather than in the order the migration
+  // files assume, that does not also prove out_of_fence_reason does — this
+  // route learned that the hard way (ER_BAD_FIELD_ERROR on every review),
+  // while every sibling query already guards it. Same guard, here too.
+  const reasonCol = await hasOutOfFenceReasonColumn();
   const existing = await queryOne<{
     id: number;
     employee_id: number;
@@ -61,7 +67,8 @@ export async function PATCH(request: NextRequest, context: Params) {
     out_of_fence_reason: string | null;
   }>(
     `SELECT a.id, a.employee_id, e.emp_id, e.manager_id,
-            a.out_of_fence_status, a.out_of_fence_reason
+            a.out_of_fence_status,
+            ${reasonCol ? 'a.out_of_fence_reason' : 'NULL AS out_of_fence_reason'}
      FROM attendance a JOIN employees e ON e.id = a.employee_id
      WHERE a.id = ?`,
     [attendanceId],

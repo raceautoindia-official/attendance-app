@@ -182,3 +182,36 @@ export const PERMISSION_MAX_FUTURE_DAYS =
 // Pagination
 export const DEFAULT_PAGE_SIZE = 25;
 export const MAX_PAGE_SIZE = 100;
+
+/**
+ * Every `entity` value that is actually written into `audit_log`, and the label
+ * the Audit Log filter shows for it.
+ *
+ * One list, used by both the API's filter whitelist and the page's dropdown.
+ * They were two separate lists, and they drifted: `permission_request` and
+ * `live_tracking_points` were being written but could not be filtered to, so
+ * the only way to find either was to page through everything else. An entity
+ * missing from here is silently unfindable, which is the opposite of what an
+ * audit log is for — so add to this when a new entity starts being audited.
+ *
+ * `employee_schedules` is the plural spelling that scripts/repair-attendance.js
+ * writes for `geofencing_disarmed`, as against the singular the API routes use.
+ * Both spellings exist in the table, so both have to be selectable; do not
+ * "tidy" one away without also rewriting the rows already logged under it.
+ */
+export const AUDIT_ENTITIES: ReadonlyArray<{ value: string; label: string }> = [
+  { value: 'attendance',           label: 'Attendance' },
+  { value: 'employee',             label: 'Employee' },
+  { value: 'passkey',              label: 'Passkey' },
+  { value: 'passkey_exemption',    label: 'Passkey Exemption' },
+  { value: 'employee_schedule',    label: 'Schedule' },
+  { value: 'employee_schedules',   label: 'Schedule (geofence disarm)' },
+  { value: 'location',             label: 'Location' },
+  { value: 'auth',                 label: 'Auth' },
+  { value: 'permission_request',   label: 'Permission Request' },
+  { value: 'live_tracking_points', label: 'Location History (archive)' },
+];
+
+/** Just the values, for the API's `entity` filter whitelist. */
+export const AUDIT_ENTITY_VALUES: ReadonlyArray<string> =
+  AUDIT_ENTITIES.map(e => e.value);

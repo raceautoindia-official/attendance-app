@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
-import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from '@/lib/constants';
+import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, AUDIT_ENTITY_VALUES } from '@/lib/constants';
 import type { ApiResponse, AuditLog } from '@/lib/types';
 
 // ---------------------------------------------------------------------------
@@ -44,12 +44,10 @@ export async function GET(request: NextRequest) {
       params.push(pb);
     }
   }
-  // Whitelist entity values to prevent injection
-  const validEntities = [
-    'attendance', 'employee', 'passkey', 'passkey_exemption',
-    'employee_schedule', 'location', 'auth',
-  ];
-  if (entity && validEntities.includes(entity)) {
+  // Whitelist entity values to prevent injection. AUDIT_ENTITY_VALUES is the
+  // same list the page builds its dropdown from, so an entity cannot be
+  // offered in the UI but rejected here, or vice versa.
+  if (entity && AUDIT_ENTITY_VALUES.includes(entity)) {
     conditions.push('al.entity = ?');
     params.push(entity);
   }

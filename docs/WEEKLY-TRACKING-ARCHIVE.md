@@ -9,28 +9,52 @@ It is a **move**, not a copy: the rows are gone from MySQL afterwards. Read the
 
 ## Setup, once
 
-**1. Reuse the backup service account.** The database dumps already reach Drive
-as `drive-backup-service@...`, so a key file exists on the server. Find it:
+**1. Reuse the backup service account.** The two-hourly database dumps already
+reach Drive as `drive-backup-service@primal-bonbon-452013-p0`, so its key is
+already on the server. Find it by its project id — this prints paths only, never
+contents:
 
 ```bash
-sudo find / -name '*.json' -path '*backup*' 2>/dev/null
-# or look at whatever runs the dumps:
-crontab -l; sudo crontab -l; systemctl list-timers
+sudo grep -rl "primal-bonbon-452013-p0" /home/deploy --include=*.json 2>/dev/null
 ```
 
-**2. Add two lines to `.env.local`:**
+On the production box that is
+`/home/deploy/raceautoindia-db-backup-app/credentials.json`, owned by the
+`backup-app` PM2 process. Check the app's own user can read it — the Sunday job
+runs as `deploy`, not as root:
+
+```bash
+test -r /home/deploy/raceautoindia-db-backup-app/credentials.json \
+  && echo "readable" || echo "NOT readable — fix this first"
+```
+
+Pointing at another app's key file couples the two: if
+`raceautoindia-db-backup-app` is ever re-cloned from scratch, this job stops
+until the path is corrected. That is a fair trade against copying a private key
+to a second place on disk, but it is a coupling, and the failure shows up as
+`Google refused the credentials` on a Sunday.
+
+**2. Add two lines to the env file the app actually uses.** On this deployment
+that is **`.env`** — there is no `.env.local` in `/home/deploy/attendance-app`:
 
 ```
-GDRIVE_SERVICE_ACCOUNT_JSON=/path/to/that-key.json
+GDRIVE_SERVICE_ACCOUNT_JSON=/home/deploy/raceautoindia-db-backup-app/credentials.json
 GDRIVE_TRACKING_FOLDER_ID=1UMh4q5aYGjy_X_9YqhcbtAEdS0m5tmg8
 ```
 
-The folder ID is the last path segment of the Drive URL. Using the same folder
-as the dumps is fine — the filenames do not collide.
+`scripts/lib/env.js` reads `.env.local` then `.env`, in Next.js's own
+precedence, so either file works and the database credentials do not have to be
+duplicated. It used to read `.env.local` alone, which on this server meant the
+script started with no configuration at all and failed against
+`undefined:3306`. The summary line `Config from : .env` says which file was
+actually read — check it if the settings seem to be ignored.
 
-**3. Check the service account can write there.** If the folder was shared with
-it by hand rather than created by it, share it again with **Editor** on that
-service-account address. A first run will say plainly if it cannot.
+**3. The folder is already writable.** `1UMh4q5aYGjy_X_9YqhcbtAEdS0m5tmg8` is
+"race auto Website Database", owned by `raceautoindia@gmail.com`, and the
+service account writes a dump into it every two hours — so the Editor share is
+in place and needs no action. Sharing the folder is only a step if you point
+`GDRIVE_TRACKING_FOLDER_ID` somewhere new. The archive filenames start
+`tracking_` and cannot collide with the dumps' `db_backup_`.
 
 **4. Look before you leap:**
 
