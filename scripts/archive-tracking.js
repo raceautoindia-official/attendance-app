@@ -39,7 +39,9 @@
  *   node scripts/archive-tracking.js --confirm --week=2026-W33
  *
  * Configure the upload with GDRIVE_SERVICE_ACCOUNT_JSON and
- * GDRIVE_TRACKING_FOLDER_ID (see .env.example).
+ * GDRIVE_TRACKING_FOLDER_ID, in `.env.local` or `.env` — whichever this
+ * deployment uses; both are read. There is no .env.example in this repo, which
+ * is what this line used to point at: see docs/WEEKLY-TRACKING-ARCHIVE.md.
  */
 
 const fs = require('fs');
@@ -48,18 +50,7 @@ const zlib = require('zlib');
 const crypto = require('crypto');
 
 const ROOT = path.join(__dirname, '..');
-// Deployments differ: a local checkout uses .env.local, the production server
-// uses .env. Reading only .env.local meant this script silently loaded NOTHING
-// on the server - no DB credentials - so it died with Access denied for user ''.
-// First file wins per key, so .env.local still overrides .env where both exist.
-for (const envName of ['.env.local', '.env']) {
-  const envPath = path.join(ROOT, envName);
-  if (!fs.existsSync(envPath)) continue;
-  for (const line of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
-    const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*)$/.exec(line);
-    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
-  }
-}
+const ENV_LOADED = require('./lib/env').loadEnv(ROOT);
 
 const mysql = require(path.join(ROOT, 'node_modules/mysql2/promise'));
 const drive = require('./lib/drive');
@@ -129,6 +120,24 @@ const sqlTime = (d) => d.toISOString().slice(0, 19).replace('T', ' ');
 const md5 = (buf) => crypto.createHash('md5').update(buf).digest('hex');
 
 (async () => {
+  // Say "nobody loaded the config" in those words. Without this, a missing env
+  // file surfaces as ECONNREFUSED against undefined:3306 or "Access denied for
+  // user 'undefined'", which sends you looking at MySQL instead of at the file
+  // the script was never able to read.
+  const missing = ['DB_HOST', 'DB_USER', 'DB_NAME'].filter(k => !process.env[k]);
+  if (missing.length) {
+    console.error(
+      'No database configuration: ' + missing.join(', ') + ' not set.\n\n' +
+      (ENV_LOADED.length
+        ? 'Read ' + ENV_LOADED.join(' and ') + ', but ' +
+          (missing.length === 1 ? 'that key was' : 'those keys were') + ' not in ' +
+          (ENV_LOADED.length === 1 ? 'it' : 'either') + '.\n'
+        : 'Looked for .env.local and .env in ' + ROOT + ' and found neither.\n') +
+      '\nNothing was read, written or deleted.',
+    );
+    process.exit(1);
+  }
+
   const c = await mysql.createConnection({
     host: process.env.DB_HOST,
     port: Number(process.env.DB_PORT) || 3306,
@@ -208,6 +217,10 @@ const md5 = (buf) => crypto.createHash('md5').update(buf).digest('hex');
   console.log('\n  ' + grandTotal.toLocaleString() + ' rows total.');
   console.log('  Local copies : ' + OUT_DIR);
   console.log('  Drive folder : ' + (FOLDER_ID || '(GDRIVE_TRACKING_FOLDER_ID not set)'));
+  // Which file the settings came from. This deployment keeps its config in
+  // `.env`, not `.env.local`, and a script that reads the wrong one looks
+  // exactly like a script whose database is down.
+  console.log('  Config from  : ' + (ENV_LOADED.length ? ENV_LOADED.join(', ') : 'the environment only'));
   console.log('\n  What this costs: an archived week can no longer be drawn on the Live');
   console.log('  Tracking map, and its day timelines lose their trail. Hours, clock-ins');
   console.log('  and clock-outs are untouched.');

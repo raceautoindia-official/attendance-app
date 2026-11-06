@@ -46,17 +46,10 @@
  *   node scripts/repair-attendance.js --reopen-today --confirm
  */
 
-const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const envPath = path.join(ROOT, '.env.local');
-if (fs.existsSync(envPath)) {
-  for (const line of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
-    const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*)$/.exec(line);
-    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
-  }
-}
+require('./lib/env').loadEnv(ROOT);
 
 const mysql = require(path.join(ROOT, 'node_modules/mysql2/promise'));
 
