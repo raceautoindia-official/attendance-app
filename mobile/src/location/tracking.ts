@@ -7,11 +7,18 @@ import { LOCATION_INTERVAL_MS, LOCATION_DISTANCE_M, LOCATION_MAX_QUEUE } from '.
 import { withTimeout } from '../util/withTimeout';
 
 // A permission dialog waits for a human, so it gets a human-sized deadline
-// rather than a network-sized one. Ninety seconds is longer than anyone spends
-// reading it, and far shorter than "never": an employee who taps Clock In and
+// rather than a network-sized one — but a SMALL one, because three of these
+// run back to back inside startBackgroundTracking() and the whole chain sits
+// on the clock-in path. The screen's watchdog allows 150s per step (see
+// DashboardScreen), so three dialogs must fit inside that: 3 x 45 = 135s, with
+// margin. At 90s each they did not, and the watchdog fired mid-dialog on a
+// clock-in that had already succeeded.
+//
+// 45 seconds is still far longer than anyone spends reading a permission
+// dialog, and far shorter than "never": an employee who taps Clock In and
 // pockets the phone without answering used to leave this promise unsettled for
 // the rest of the day, holding the button's spinner with it.
-const PERMISSION_TIMEOUT_MS = 90_000;
+const PERMISSION_TIMEOUT_MS = 45_000;
 const PERMISSION_TIMEOUT_MSG =
   'The location permission request went unanswered. Tap Clock In again and choose '
   + '"While using the app", then "Allow all the time".';

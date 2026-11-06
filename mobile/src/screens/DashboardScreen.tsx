@@ -906,9 +906,21 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   // a whole day of attendance, so "in principle it cannot happen" has been
   // tried and is not good enough.
   //
-  // 100 seconds sits just above the slowest LEGITIMATE clock-in: a 90s
-  // permission dialog, a bounded GPS attempt, a 20s upload. If any of those
-  // deadlines grow, raise this above their sum or it will cut off real work.
+  // It measures ONE STEP, not the whole operation — busyLabel is in the
+  // dependency list, so every phase change restarts the clock. That distinction
+  // is the difference between a backstop and a bug. Measured end to end, a
+  // first-ever clock-in legitimately runs: a location permission dialog, a GPS
+  // lock, an upload, then startBackgroundTracking()'s THREE more dialogs. Well
+  // over five minutes of honest waiting on a human, on the one install where
+  // every dialog appears. A whole-operation deadline tight enough to be useful
+  // would have fired in the middle of them and announced a timeout on a
+  // clock-in the server had already recorded — on every phone, the first time
+  // anybody used it.
+  //
+  // 150s per step, against the longest legitimate step: the three 45s
+  // permission dialogs inside 'Starting location tracking…' (135s). Keep this
+  // above 3 x PERMISSION_TIMEOUT_MS in location/tracking.ts, or it starts
+  // cutting off real work again.
   // -------------------------------------------------------------------------
   useEffect(() => {
     if (!busy) return;
@@ -925,9 +937,10 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
         + 'you have a working connection, then try again.',
       );
       toast('Timed out — pull down to refresh');
-    }, 100_000);
+    }, 150_000);
     return () => clearTimeout(id);
-  }, [busy]);
+    // busyLabel: progress restarts the deadline — see above.
+  }, [busy, busyLabel]);
 
   // While Clock In is on screen: keep a position ready (see warmUpLocation),
   // and when the app comes back to the foreground, reload. The reload matters
