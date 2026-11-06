@@ -20,6 +20,10 @@ import * as SecureStore from 'expo-secure-store';
 import { WebView } from 'react-native-webview';
 import * as Location from 'expo-location';
 import { apiFetch, logout, ApiError } from '../api/client';
+// Read from app.json rather than restated here: the version is bumped there
+// and in build.gradle together, so this cannot drift out of step with the
+// build. Metro inlines the JSON, so it costs nothing at runtime.
+import appJson from '../../app.json';
 import { getStoredEmployee, StoredEmployee } from '../storage/tokens';
 import { saveTodayCache, getTodayCache, clearTodayCache } from '../storage/cache';
 import {
@@ -385,6 +389,30 @@ async function getCoords(
       );
     }
     return { latitude: null, longitude: null, is_mocked: false, accuracy_m: null };
+  }
+  // Android 12+ lets the grant be "Approximate" — roughly a 2 km square — and
+  // that still reports as GRANTED, so this path sailed straight past it. The
+  // cost was paid on every single tap, every day: the warm fix and the cached
+  // fix are both held to 250 m, which an approximate fix can never meet, so
+  // both were discarded and the full slow path ran to the end. Then it sent a
+  // position two kilometres wide, which the fence — a plain point-in-circle on
+  // the server — refuses as off-site. Slow, then refused, with nothing on
+  // screen connecting either to the setting that caused it.
+  //
+  // startBackgroundTracking already refuses coarse location with this same
+  // instruction, but it runs AFTER the clock-in it was meant to protect, so
+  // the employee met the wall later and in a more confusing place. Checked
+  // here it costs nothing, answers immediately instead of in 34 seconds, and
+  // names the one setting that fixes it.
+  //
+  // Clock-out is deliberately exempt: a vague position is no reason to leave
+  // somebody's day open, and allowUnknown already covers having none at all.
+  if (!allowUnknown && Platform.OS === 'android' && perm.android?.accuracy === 'coarse') {
+    throw new Error(
+      'Location is set to Approximate, which is not precise enough for attendance. '
+      + 'Open Settings → Apps → Attendance → Permissions → Location, turn on '
+      + '"Use precise location", then try again.',
+    );
   }
   // Clock-in must feel instant, and a fresh GPS lock is the one thing that
   // cannot be made instant — cold, indoors, it takes 5–30 seconds, and it has
@@ -1588,7 +1616,14 @@ If you are working away from the site today, ask your `
         refreshControl={<RefreshControl refreshing={false} onRefresh={refresh} tintColor={colors.textMuted} />}
       >
         <Text style={styles.hello}>Hello, {employee?.name?.split(' ')[0] ?? 'there'}</Text>
-        <Text style={styles.date}>{dateStr}</Text>
+        {/* The version, on screen at last.
+            Diagnosing anything has meant asking "which build is this?" and
+            getting a guess, because the app never said — and the answer has
+            twice turned out to be a build from months before the fix being
+            discussed. One muted word beside the date ends that for good: an
+            employee can read it out, and a screenshot carries it without
+            anyone having to ask. */}
+        <Text style={styles.date}>{dateStr} · v{appJson.expo.version}</Text>
         <Text style={styles.clock}>{timeStr}</Text>
 
         {/* How far from the work site, refreshed with the 20s position poll.
