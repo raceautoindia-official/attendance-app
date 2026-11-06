@@ -4,6 +4,17 @@ import { PermissionsAndroid, Platform } from 'react-native';
 import { apiFetch, ApiError } from '../api/client';
 import { getState, setState } from '../storage/state';
 import { LOCATION_INTERVAL_MS, LOCATION_DISTANCE_M, LOCATION_MAX_QUEUE } from '../config';
+import { withTimeout } from '../util/withTimeout';
+
+// A permission dialog waits for a human, so it gets a human-sized deadline
+// rather than a network-sized one. Ninety seconds is longer than anyone spends
+// reading it, and far shorter than "never": an employee who taps Clock In and
+// pockets the phone without answering used to leave this promise unsettled for
+// the rest of the day, holding the button's spinner with it.
+const PERMISSION_TIMEOUT_MS = 90_000;
+const PERMISSION_TIMEOUT_MSG =
+  'The location permission request went unanswered. Tap Clock In again and choose '
+  + '"While using the app", then "Allow all the time".';
 
 export const LOCATION_TASK = 'attendance-background-location';
 /** Owned by geofenceAuto, declared here so this module can ask whether the
@@ -248,7 +259,11 @@ export async function startBackgroundTracking(): Promise<void> {
   uploadsPausedAt = 0;
   // The staleness clock starts now: the first fix is up to an interval away.
   await setState(LAST_FIX_KEY, String(Date.now()));
-  const fg = await Location.requestForegroundPermissionsAsync();
+  const fg = await withTimeout(
+    Location.requestForegroundPermissionsAsync(),
+    PERMISSION_TIMEOUT_MS,
+    PERMISSION_TIMEOUT_MSG,
+  );
   if (fg.status !== 'granted') {
     throw new Error('Location permission is required to track attendance.');
   }
@@ -259,7 +274,11 @@ export async function startBackgroundTracking(): Promise<void> {
       'Precise location is off. Open Settings → Apps → Attendance → Permissions → Location and turn on "Use precise location".',
     );
   }
-  const bg = await Location.requestBackgroundPermissionsAsync();
+  const bg = await withTimeout(
+    Location.requestBackgroundPermissionsAsync(),
+    PERMISSION_TIMEOUT_MS,
+    PERMISSION_TIMEOUT_MSG,
+  );
   if (bg.status !== 'granted') {
     throw new Error('Please allow location "All the time" so tracking works with the app closed.');
   }

@@ -4,6 +4,12 @@
 import './src/location/tracking';
 import './src/location/geofenceAuto';
 import './src/location/locationWatch';
+// The inbox heartbeat defines its task at module load too, and the OS may
+// invoke it headlessly after the app is killed. It was reaching the bundle only
+// via DashboardScreen's import chain — true today, but it made a task
+// registration depend on which screen happens to import what. Registered here
+// beside the other three, for the same reason they are.
+import './src/notifications/inboxPoller';
 
 import { initNotifications } from './src/notifications/setup';
 import { markDecisionAnnounced } from './src/notifications/permissionUpdates';

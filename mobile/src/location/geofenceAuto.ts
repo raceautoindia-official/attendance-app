@@ -10,6 +10,7 @@ import {
 } from './tracking';
 import { scheduleShiftEndReminders, cancelShiftEndReminders } from '../notifications/shiftReminder';
 import { decideFenceExitAction, EXIT_MAX_WARNINGS } from './fenceExitPolicy';
+import { withTimeout } from '../util/withTimeout';
 
 // Automatic attendance around the work-site fence:
 //   - the FIRST clock-in of the day is always manual;
@@ -407,7 +408,22 @@ async function fetchToday(): Promise<TodayResponse | null> {
  *  be hundreds of metres out. They are taken rarely, so GPS costs little here. */
 async function currentCoords(): Promise<Fix | null> {
   try {
-    const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+    // Bounded. Every caller handles null by falling back to the fence centre
+    // or retrying on the next fix, so a deadline costs nothing here and
+    // prevents a great deal: unbounded, on a phone that cannot get a fix, this
+    // hung the HEADLESS task it was running in. Both the geofence event handler
+    // and the periodic location watch call it, and Android kills a background
+    // task that never returns, counting that against the app's future
+    // scheduling — so one phone's bad GPS cost the fleet background wake-ups.
+    //
+    // A last-known fix first: usually instant, and good enough to answer
+    // "inside or outside a 200 m fence".
+    const last = await Location.getLastKnownPositionAsync({ maxAge: 120_000 }).catch(() => null);
+    const pos = last ?? await withTimeout(
+      Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }),
+      20_000,
+      'no fix',
+    );
     return {
       latitude: pos.coords.latitude,
       longitude: pos.coords.longitude,
@@ -612,10 +628,27 @@ export async function startGeofenceAutoMode(
   // early and then decides for itself, rather than never being woken at all.
   const OS_MIN_REGION_M = 100;
   const osInner = Math.max(inner, OS_MIN_REGION_M);
-  await Location.startGeofencingAsync(GEOFENCE_TASK, [
-    { identifier: INNER_ID, latitude, longitude, radius: osInner, notifyOnEnter: true, notifyOnExit: false },
-    { identifier: OUTER_ID, latitude, longitude, radius: osInner + EXIT_MARGIN_M, notifyOnEnter: false, notifyOnExit: true },
-  ]);
+  // Guard the native call, not just the permissions above.
+  //
+  // This function's whole contract is "false means it did not start", and
+  // DashboardScreen leans on it to raise the "tap to fix" warning. But
+  // startGeofencingAsync can THROW — revoked permissions, Play Services
+  // missing or out of date, an OS region limit — and a throw is not a false.
+  // It escaped as an unhandled rejection, so the one case the warning exists
+  // for was the one case that produced no warning: geofencing silently absent,
+  // the employee's day unprotected, the status pill reading fine.
+  try {
+    await withTimeout(
+      Location.startGeofencingAsync(GEOFENCE_TASK, [
+        { identifier: INNER_ID, latitude, longitude, radius: osInner, notifyOnEnter: true, notifyOnExit: false },
+        { identifier: OUTER_ID, latitude, longitude, radius: osInner + EXIT_MARGIN_M, notifyOnEnter: false, notifyOnExit: true },
+      ]),
+      30_000,
+      'geofencing did not start',
+    );
+  } catch {
+    return false;
+  }
   return true;
 }
 

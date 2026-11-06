@@ -8,6 +8,7 @@ import { stopBackgroundTracking, startBackgroundTracking, lastFixAgeMs, TRACKING
 import { reconcileGeofenceAttendance } from './geofenceAuto';
 import { cancelShiftEndReminders } from '../notifications/shiftReminder';
 import { decideLocationAction, MAX_WARNINGS } from './locationWatchPolicy';
+import { withTimeout } from '../util/withTimeout';
 import { notifyPermissionUpdates, PermissionUpdate } from '../notifications/permissionUpdates';
 
 // Location-off enforcement: while an employee is clocked in, the phone checks
@@ -155,7 +156,16 @@ async function checkTrackingAlive(): Promise<void> {
 async function autoClockOut(): Promise<void> {
   // Location is off, so a fresh fix is impossible; send the last known
   // position if the OS still has one, otherwise no coordinates.
-  const last = await Location.getLastKnownPositionAsync({ maxAge: 60 * 60_000 }).catch(() => null);
+  // Bounded, and it must be: everything that matters here happens AFTER this
+  // line. Unbounded, a phone whose location provider never answered never
+  // reached the clock-out call at all — so the employee the escalation had just
+  // decided to clock out stayed clocked in, and every retry hung in the same
+  // place. The coordinates are a nice-to-have; the clock-out is the point.
+  const last = await withTimeout(
+    Location.getLastKnownPositionAsync({ maxAge: 60 * 60_000 }),
+    10_000,
+    'no last position',
+  ).catch(() => null);
   try {
     await apiFetch('/api/attendance/clock-out', {
       method: 'POST',

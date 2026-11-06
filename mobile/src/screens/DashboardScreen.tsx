@@ -21,7 +21,7 @@ import { WebView } from 'react-native-webview';
 import * as Location from 'expo-location';
 import { apiFetch, logout, ApiError } from '../api/client';
 import { getStoredEmployee, StoredEmployee } from '../storage/tokens';
-import { saveTodayCache, getTodayCache } from '../storage/cache';
+import { saveTodayCache, getTodayCache, clearTodayCache } from '../storage/cache';
 import {
   startBackgroundTracking,
   stopBackgroundTracking,
@@ -608,7 +608,12 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       setTodayLoaded(true);
       setTodayStale(false);
     } catch (e) {
-      if (e instanceof Error && e.message.includes('log in again')) {
+      // On the STATUS, not the message. apiFetch throws ApiError(401, …) with
+      // wording that is free to change — and the day it changed, this screen
+      // would have stopped logging out an expired session and sat there
+      // retrying a dead token instead. ApiError carries a status precisely so
+      // callers need not read English; see its note in api/client.ts.
+      if (e instanceof ApiError && e.status === 401) {
         onLogout();
         return;
       }
@@ -793,17 +798,27 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       return { lat, lng };
     });
 
+    // Bounded with within(), and this is the one place it matters most: this
+    // runs every 20 seconds for the whole shift. Unbounded, each call on a
+    // phone that cannot get a fix left a native location request pending for
+    // ever — one more every 20 seconds, around 1,600 over a nine-hour shift,
+    // none of them ever released. A stale map is a cosmetic failure; that is a
+    // leak which gets worse all day on exactly the phones already struggling.
+    // 15s is well under the interval, so calls cannot pile up.
     const fetchPos = async () => {
       try {
-        const perm = await Location.getForegroundPermissionsAsync();
-        if (perm.status !== 'granted') return;
+        const perm = await within(Location.getForegroundPermissionsAsync(), 10_000);
+        if (perm?.status !== 'granted') return;
         // Last-known fix is instant → the map shows immediately.
-        const last = await Location.getLastKnownPositionAsync({ maxAge: 120_000 });
+        const last = await within(Location.getLastKnownPositionAsync({ maxAge: 120_000 }), 8_000);
         if (last && active) showPos(last.coords.latitude, last.coords.longitude);
-        const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-        if (active) showPos(pos.coords.latitude, pos.coords.longitude);
+        const pos = await within(
+          Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
+          15_000,
+        );
+        if (pos && active) showPos(pos.coords.latitude, pos.coords.longitude);
       } catch {
-        /* ignore transient GPS misses */
+        /* ignore transient GPS misses — the last-known fix above still paints */
       }
     };
 
@@ -848,6 +863,71 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
     loadTrackingEnabled();
     loadPermissions();
   }, [loadToday, loadHistory, loadDailyUpdate, loadTrackingEnabled, loadPermissions]);
+
+  // -------------------------------------------------------------------------
+  // The work day rolling over.
+  //
+  // `today` already follows it — it derives from `now`, which ticks every
+  // second — but NOTHING was watching it change. So an app left open across
+  // the boundary carried the finished day into the new one: the button still
+  // read Clock Out, the session list still showed yesterday's times, and the
+  // hours kept counting up from a clock-in belonging to the day before.
+  //
+  // It corrected itself only when the app was backgrounded and reopened, since
+  // AppState 'active' calls loadToday(). Someone who leaves the app sitting
+  // open on a desk — much of the point of a persistent tracking notification —
+  // never did that, and met a screen describing yesterday.
+  //
+  // A ref rather than a bare [today] dependency: this must fire on a CHANGE,
+  // not on mount, where the bootstrap effect is already loading everything.
+  // -------------------------------------------------------------------------
+  const lastWorkDateRef = useRef(today);
+  useEffect(() => {
+    if (lastWorkDateRef.current === today) return;
+    lastWorkDateRef.current = today;
+    // Cleared by hand before refetching. The cache is date-keyed so it cannot
+    // be reused, but the STATE already painted from yesterday's copy has to go,
+    // or it stays on screen until the network answers — and if the network does
+    // not answer, it stays all morning.
+    setAttendance(null);
+    setTodaySessions([]);
+    setTodayLoaded(false);
+    void clearTodayCache();
+    refresh();
+  }, [today, refresh]);
+
+  // -------------------------------------------------------------------------
+  // Spinner watchdog — the promise that the button cannot stick.
+  //
+  // Every await beneath this screen now carries a deadline, so in principle
+  // this never fires. It is here for the hang nobody predicted: an OS call
+  // added next year, a phone nobody here owns, an Expo update that changes
+  // when a promise settles. That class of failure has already cost an employee
+  // a whole day of attendance, so "in principle it cannot happen" has been
+  // tried and is not good enough.
+  //
+  // 100 seconds sits just above the slowest LEGITIMATE clock-in: a 90s
+  // permission dialog, a bounded GPS attempt, a 20s upload. If any of those
+  // deadlines grow, raise this above their sum or it will cut off real work.
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    if (!busy) return;
+    const id = setTimeout(() => {
+      setBusy(false);
+      setBusyLabel(null);
+      // Deliberately not "it failed". The request may well have reached the
+      // server with only the reply lost, and telling someone their clock-in
+      // failed when it did not is how a day gets punched twice. Refreshing is
+      // what settles it, so that is what this asks for.
+      setError(
+        'That took too long, so it was stopped. Pull down to refresh — it may '
+        + 'have gone through. If it did not, check that Location is on and that '
+        + 'you have a working connection, then try again.',
+      );
+      toast('Timed out — pull down to refresh');
+    }, 100_000);
+    return () => clearTimeout(id);
+  }, [busy]);
 
   // While Clock In is on screen: keep a position ready (see warmUpLocation),
   // and when the app comes back to the foreground, reload. The reload matters

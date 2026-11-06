@@ -1,6 +1,7 @@
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { API_BASE_URL } from '../config';
+import { withTimeout } from '../util/withTimeout';
 import {
   getAccessToken,
   getRefreshToken,
@@ -45,7 +46,17 @@ export async function getDeviceId(): Promise<string> {
   if (cachedDeviceId) return cachedDeviceId;
   let stored: string | null;
   try {
-    stored = await SecureStore.getItemAsync(DEVICE_ID_KEY);
+    // Bounded as well as guarded. His catch below handles secure storage
+    // REFUSING the read; this handles it never answering at all, which is the
+    // same failure with a worse shape. It matters most here: getDeviceId runs
+    // inside apiFetch's send(), which BUILDS the request, so it happens before
+    // the request deadline below can exist. Unbounded, a stalled keystore hung
+    // every call in the app with no timeout anywhere near it.
+    stored = await withTimeout(
+      SecureStore.getItemAsync(DEVICE_ID_KEY),
+      10_000,
+      'Could not read this phone\'s device id. Please try again.',
+    );
   } catch {
     // Secure storage could not be READ — which is not "nothing stored". It
     // happens to background tasks on some locked phones (see storage/state.ts).
@@ -80,11 +91,37 @@ export async function getDeviceId(): Promise<string> {
 // ---------------------------------------------------------------------------
 const REQUEST_TIMEOUT_MS = 20_000;
 
-async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+/**
+ * One request, one deadline — covering the BODY as well as the headers.
+ *
+ * The version above cleared its timer the moment `fetch` resolved, which is
+ * when the response HEADERS arrive. Every caller then ran `await res.json()`
+ * with nothing bounding it, and a connection that sends headers and then goes
+ * quiet is the normal failure of weak mobile data, and of a Wi-Fi network
+ * holding you at its sign-in page. The timeout was real; it just did not cover
+ * the half of the request that actually hangs.
+ *
+ * Returns the response AND its parsed body, because the two now share a
+ * deadline and cannot be awaited separately. A body that is not JSON stays
+ * ordinary — an HTML error page from a proxy, an empty 204 — and callers judge
+ * those on res.ok exactly as before. A body whose read was ABORTED is not
+ * ordinary: it is the stall this exists to catch, and it throws.
+ */
+async function fetchJson(
+  url: string,
+  init?: RequestInit,
+): Promise<{ res: Response; json: Record<string, any> }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    const res = await fetch(url, { ...init, signal: controller.signal });
+    let json: Record<string, any> = {};
+    try {
+      json = (await res.json()) as Record<string, any>;
+    } catch (err) {
+      if (controller.signal.aborted) throw err;
+    }
+    return { res, json };
   } catch (err) {
     if (controller.signal.aborted) {
       throw new Error('Could not reach the server. Check your connection and try again.');
@@ -119,17 +156,19 @@ async function tryRefresh(): Promise<RefreshOutcome> {
     }
     if (!refreshToken) return 'rejected';
     let res: Response;
+    let json: Record<string, any>;
     try {
-      res = await fetchWithTimeout(`${API_BASE_URL}/api/auth/mobile/refresh`, {
+      ({ res, json } = await fetchJson(`${API_BASE_URL}/api/auth/mobile/refresh`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ refreshToken }),
-      });
+      }));
     } catch {
+      // Now also covers a body that stalled mid-read, which is still only a
+      // failure to REACH the server — never a verdict on the token.
       return 'unreachable';
     }
     if (res.status === 401 || res.status === 403) return 'rejected';
-    const json = await res.json().catch(() => ({}));
     // A 5xx, or a proxy's error page while the server restarts, is no verdict
     // on the token.
     if (!res.ok || !json?.success) return 'unreachable';
@@ -159,7 +198,7 @@ export async function apiFetch<T = unknown>(
   const send = async () => {
     const token = await getAccessToken();
     const deviceId = await getDeviceId();
-    return fetchWithTimeout(`${API_BASE_URL}${path}`, {
+    return fetchJson(`${API_BASE_URL}${path}`, {
       method,
       headers: {
         'Content-Type': 'application/json',
@@ -177,12 +216,17 @@ export async function apiFetch<T = unknown>(
     });
   };
 
-  let res = await send();
+  // NOTE: getAccessToken() and getDeviceId() in send() above run OUTSIDE this
+  // request's deadline — the timer cannot start until the request is built, and
+  // they are what builds it. Both are bounded at their own source (see
+  // getDeviceId above and storage/tokens.ts). Anything added to send() needs
+  // the same, or the timeout below becomes decorative.
+  let { res, json } = await send();
 
   if (res.status === 401 && autoRefresh) {
     const outcome = await tryRefresh();
     if (outcome === 'refreshed') {
-      res = await send();
+      ({ res, json } = await send());
     } else if (outcome === 'unreachable') {
       // The login could not be renewed because the server could not be
       // reached — the session itself is fine. Fail like any other network
@@ -191,7 +235,6 @@ export async function apiFetch<T = unknown>(
     }
   }
 
-  const json = await res.json().catch(() => ({}));
   if (res.status === 401) {
     // Refresh failed or token revoked — force re-login.
     await clearSession();
@@ -212,12 +255,11 @@ export interface LoginResult {
 }
 
 export async function login(empId: string, pin: string): Promise<LoginResult> {
-  const res = await fetchWithTimeout(`${API_BASE_URL}/api/auth/mobile/login`, {
+  const { res, json } = await fetchJson(`${API_BASE_URL}/api/auth/mobile/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ emp_id: empId, pin }),
   });
-  const json = await res.json().catch(() => ({}));
   if (!res.ok || !json?.success) {
     throw new ApiError(res.status, json?.error ?? 'Login failed');
   }
@@ -243,7 +285,9 @@ export async function logout(): Promise<void> {
   ]);
   await clearSession().catch(() => {});
   const deviceId = await getDeviceId().catch(() => null);
-  void fetchWithTimeout(`${API_BASE_URL}/api/auth/logout`, {
+  // Fire-and-forget, so the parsed body is simply discarded — the session is
+  // already gone from this phone either way.
+  void fetchJson(`${API_BASE_URL}/api/auth/logout`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -265,12 +309,11 @@ export async function logout(): Promise<void> {
  * cannot send mail at all, which is worth telling them plainly.
  */
 export async function requestPasswordReset(empId: string): Promise<string> {
-  const res = await fetchWithTimeout(`${API_BASE_URL}/api/auth/forgot-password`, {
+  const { res, json } = await fetchJson(`${API_BASE_URL}/api/auth/forgot-password`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ emp_id: empId }),
   });
-  const json = await res.json().catch(() => ({}));
   if (!res.ok || !json?.success) {
     throw new ApiError(res.status, json?.error ?? 'Could not request a reset.');
   }
