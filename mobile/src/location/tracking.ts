@@ -7,18 +7,29 @@ import { LOCATION_INTERVAL_MS, LOCATION_DISTANCE_M, LOCATION_MAX_QUEUE } from '.
 import { withTimeout } from '../util/withTimeout';
 
 // A permission dialog waits for a human, so it gets a human-sized deadline
-// rather than a network-sized one — but a SMALL one, because three of these
-// run back to back inside startBackgroundTracking() and the whole chain sits
-// on the clock-in path. The screen's watchdog allows 150s per step (see
-// DashboardScreen), so three dialogs must fit inside that: 3 x 45 = 135s, with
-// margin. At 90s each they did not, and the watchdog fired mid-dialog on a
-// clock-in that had already succeeded.
+// rather than a network-sized one — but a SMALL one, because THREE of them run
+// back to back inside startBackgroundTracking() (foreground, background,
+// notifications), and the whole chain sits on the clock-in path under a single
+// "Starting location tracking…" label.
 //
-// 45 seconds is still far longer than anyone spends reading a permission
-// dialog, and far shorter than "never": an employee who taps Clock In and
-// pockets the phone without answering used to leave this promise unsettled for
-// the rest of the day, holding the button's spinner with it.
-const PERMISSION_TIMEOUT_MS = 45_000;
+// THE SUM THAT MATTERS. The screen's watchdog allows 150s per step (see
+// DashboardScreen), and that step's worst case is all three dialogs plus the
+// foreground service starting:
+//
+//     3 x 30s dialogs  +  30s startLocationUpdatesAsync  =  120s,  margin 30s
+//
+// At 45s each it came to 165s — over the watchdog, so the backstop would have
+// fired on entirely honest work and announced a timeout on a clock-in the
+// server had already recorded. At 90s each, worse. If any deadline in this
+// file grows, or a step is added, re-do this sum. It is the only thing keeping
+// the backstop from becoming the bug it exists to catch.
+//
+// 30 seconds is still far longer than anyone spends reading a permission
+// dialog — people answer in two or three — and far shorter than "never": an
+// employee who taps Clock In and pockets the phone without answering used to
+// leave this promise unsettled for the rest of the day, holding the button's
+// spinner with it.
+export const PERMISSION_TIMEOUT_MS = 30_000;
 const PERMISSION_TIMEOUT_MSG =
   'The location permission request went unanswered. Tap Clock In again and choose '
   + '"While using the app", then "Allow all the time".';
@@ -252,7 +263,17 @@ TaskManager.defineTask(LOCATION_TASK, async ({ data, error }) => {
 async function ensureNotificationPermission(): Promise<void> {
   if (Platform.OS === 'android' && typeof Platform.Version === 'number' && Platform.Version >= 33) {
     try {
-      await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
+      // The third dialog on the clock-in path, and the one that was still
+      // unbounded while the other two were not — so the screen's watchdog
+      // arithmetic ("three 45s dialogs = 135s") was not actually true of this
+      // one. A notification permission nobody answers must not hold a clock-in:
+      // the same deadline as the other two, and a miss is tolerated, because
+      // tracking without a notification is better than no clock-in.
+      await withTimeout(
+        PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS),
+        PERMISSION_TIMEOUT_MS,
+        'notification permission went unanswered',
+      );
     } catch {
       // best effort
     }
@@ -295,7 +316,13 @@ export async function startBackgroundTracking(): Promise<void> {
   // Always (re)start — if the service is already running this just applies the
   // current options, so interval/accuracy changes shipped in an app update take
   // effect instead of the service running forever with stale settings.
-  await Location.startLocationUpdatesAsync(LOCATION_TASK, {
+  // Bounded. Starting a foreground service is a native call into the OS, and
+  // on a phone where the location stack is wedged it does not come back — so
+  // this held the "Starting location tracking…" step open for ever, AFTER the
+  // server had already recorded the clock-in. Failing here is caught by the
+  // caller as a tracking problem, which keeps the clock-in and warns about
+  // tracking: the honest outcome, and the one the employee can act on.
+  await withTimeout(Location.startLocationUpdatesAsync(LOCATION_TASK, {
     accuracy: Location.Accuracy.High,
     timeInterval: LOCATION_INTERVAL_MS,
     distanceInterval: LOCATION_DISTANCE_M,
@@ -306,7 +333,7 @@ export async function startBackgroundTracking(): Promise<void> {
       notificationBody: 'Your location is recorded while you are clocked in.',
       killServiceOnDestroy: false,
     },
-  });
+  }), 30_000, 'the phone did not respond while starting it — reopen the app to retry');
 }
 
 export async function stopBackgroundTracking(): Promise<void> {
@@ -317,14 +344,19 @@ export async function stopBackgroundTracking(): Promise<void> {
   pending = [];
   uploadsPausedAt = 0;
   try {
-    await Location.stopLocationUpdatesAsync(LOCATION_TASK);
+    // Bounded too: clock-out awaits this teardown, so a native call that never
+    // returns leaves the spinner up on a day the server has already closed.
+    await withTimeout(Location.stopLocationUpdatesAsync(LOCATION_TASK), 15_000, 'stop timed out');
   } catch {
-    // not running / already stopped — fine
+    // not running / already stopped / did not answer — either way, move on
   }
 }
 
 export async function isTrackingRunning(): Promise<boolean> {
-  return Location.hasStartedLocationUpdatesAsync(LOCATION_TASK).catch(() => false);
+  // Bounded: this runs in the screen's first load and in the status pill, so a
+  // stall here showed a dashboard that never finished loading.
+  return withTimeout(Location.hasStartedLocationUpdatesAsync(LOCATION_TASK), 10_000, 'x')
+    .catch(() => false);
 }
 
 /**
@@ -339,18 +371,18 @@ export async function isTrackingRunning(): Promise<boolean> {
 export type TrackingBlocker = 'services' | 'foreground' | 'precise' | 'background' | 'notifications' | null;
 
 export async function diagnoseTracking(): Promise<{ blocker: TrackingBlocker; message: string }> {
-  const services = await Location.hasServicesEnabledAsync().catch(() => false);
+  const services = await withTimeout(Location.hasServicesEnabledAsync(), 10_000, 'x').catch(() => false);
   if (!services) {
     return { blocker: 'services', message: 'Location (GPS) is switched off on this phone.' };
   }
-  const fg = await Location.getForegroundPermissionsAsync().catch(() => null);
+  const fg = await withTimeout(Location.getForegroundPermissionsAsync(), 10_000, 'x').catch(() => null);
   if (!fg?.granted) {
     return { blocker: 'foreground', message: 'This app does not have location permission.' };
   }
   if (Platform.OS === 'android' && fg.android?.accuracy === 'coarse') {
     return { blocker: 'precise', message: 'Location is set to Approximate. Attendance needs Precise.' };
   }
-  const bg = await Location.getBackgroundPermissionsAsync().catch(() => null);
+  const bg = await withTimeout(Location.getBackgroundPermissionsAsync(), 10_000, 'x').catch(() => null);
   if (!bg?.granted) {
     return {
       blocker: 'background',

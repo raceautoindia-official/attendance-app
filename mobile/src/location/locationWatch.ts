@@ -42,10 +42,14 @@ async function notify(title: string, body: string): Promise<void> {
 }
 
 async function locationHealthy(): Promise<boolean> {
-  const services = await Location.hasServicesEnabledAsync().catch(() => false);
+  // Bounded like the rest of this file: these run inside OS-invoked headless
+  // tasks, and Android counts a task that never returns against the app's
+  // future background scheduling. One phone's wedged location stack must not
+  // cost the whole fleet its wake-ups.
+  const services = await withTimeout(Location.hasServicesEnabledAsync(), 10_000, 'x').catch(() => false);
   if (!services) return false;
-  const fg = await Location.getForegroundPermissionsAsync().catch(() => null);
-  const bg = await Location.getBackgroundPermissionsAsync().catch(() => null);
+  const fg = await withTimeout(Location.getForegroundPermissionsAsync(), 10_000, 'x').catch(() => null);
+  const bg = await withTimeout(Location.getBackgroundPermissionsAsync(), 10_000, 'x').catch(() => null);
   return !!fg?.granted && !!bg?.granted;
 }
 

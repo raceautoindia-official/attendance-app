@@ -418,7 +418,9 @@ async function currentCoords(): Promise<Fix | null> {
     //
     // A last-known fix first: usually instant, and good enough to answer
     // "inside or outside a 200 m fence".
-    const last = await Location.getLastKnownPositionAsync({ maxAge: 120_000 }).catch(() => null);
+    const last = await withTimeout(
+      Location.getLastKnownPositionAsync({ maxAge: 120_000 }), 3_000, 'x',
+    ).catch(() => null);
     const pos = last ?? await withTimeout(
       Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }),
       20_000,
@@ -529,7 +531,13 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }) => {
  *  Called on app open and from the periodic location watch. Cheap no-op when
  *  auto mode isn't running. */
 export async function reconcileGeofenceAttendance(): Promise<void> {
-  const running = await Location.hasStartedGeofencingAsync(GEOFENCE_TASK).catch(() => false);
+  // Bounded like the rest of this file: these run inside OS-invoked headless
+  // tasks, and Android counts a task that never returns against the app's
+  // future background scheduling. One phone's wedged location stack must not
+  // cost the whole fleet its wake-ups.
+  const running = await withTimeout(
+    Location.hasStartedGeofencingAsync(GEOFENCE_TASK), 10_000, 'x',
+  ).catch(() => false);
   if (!running) return;
   const fence = await storedFence();
   if (!fence) return;
@@ -611,8 +619,12 @@ export async function startGeofenceAutoMode(
   longitude: number,
   radiusMeters: number,
 ): Promise<boolean> {
-  const fg = await Location.getForegroundPermissionsAsync().catch(() => null);
-  const bg = await Location.getBackgroundPermissionsAsync().catch(() => null);
+  // Bounded like the rest of this file: these run inside OS-invoked headless
+  // tasks, and Android counts a task that never returns against the app's
+  // future background scheduling. One phone's wedged location stack must not
+  // cost the whole fleet its wake-ups.
+  const fg = await withTimeout(Location.getForegroundPermissionsAsync(), 10_000, 'x').catch(() => null);
+  const bg = await withTimeout(Location.getBackgroundPermissionsAsync(), 10_000, 'x').catch(() => null);
   if (!fg?.granted || !bg?.granted) return false;
 
   // The configured radius is the one every DECISION uses — the jitter check on
@@ -654,11 +666,13 @@ export async function startGeofenceAutoMode(
 
 export async function stopGeofenceAutoMode(): Promise<void> {
   try {
-    if (await Location.hasStartedGeofencingAsync(GEOFENCE_TASK)) {
-      await Location.stopGeofencingAsync(GEOFENCE_TASK);
+    // Bounded: clock-out waits on this teardown alongside the tracking stop,
+    // so an unanswered native call here holds the spinner just as surely.
+    if (await withTimeout(Location.hasStartedGeofencingAsync(GEOFENCE_TASK), 10_000, 'x')) {
+      await withTimeout(Location.stopGeofencingAsync(GEOFENCE_TASK), 15_000, 'x');
     }
   } catch {
-    // not running — fine
+    // not running / did not answer — fine, the day is already closed
   }
   await removeState(AUTO_OUT_KEY);
   await removeState(FENCE_KEY);

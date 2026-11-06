@@ -29,6 +29,7 @@ import {
   diagnoseTracking,
   lastFixAgeMs,
   TRACKING_STALE_MS,
+  PERMISSION_TIMEOUT_MS,
 } from '../location/tracking';
 import {
   startGeofenceAutoMode,
@@ -316,17 +317,33 @@ let warming: Promise<Location.LocationObject | null> | null = null;
 const WARM_FIX_MAX_AGE_MS = 30_000;
 const WARM_FIX_REFRESH_MS = 20_000;
 
+/** In flight, including the permission read. See warmUpLocation. */
+let warmBusy = false;
+
 async function warmUpLocation(): Promise<void> {
-  if (warming) return;
-  // Never prompts: asking for permission is the button's job, after consent.
-  const perm = await Location.getForegroundPermissionsAsync().catch(() => null);
-  if (!perm?.granted) return;
-  warming = within(Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }), 20_000);
+  // `warming` only ever covered the position lookup, so the permission read
+  // below it was unguarded in both senses: unbounded, and outside the in-flight
+  // check. A phone that stalled on it therefore began a FRESH warm-up every 20
+  // seconds for the whole time the button was on screen, each one holding a
+  // native call that never returned — the same slow leak fetchPos had, on the
+  // same timer. One flag now covers the whole function.
+  if (warmBusy || warming) return;
+  warmBusy = true;
   try {
-    const pos = await warming;
-    if (pos) warmFix = { pos, at: Date.now() };
+    // Never prompts: asking for permission is the button's job, after consent.
+    // Reading granted state is a local call that answers in milliseconds; 5s is
+    // not a wait, it is a guarantee that this returns.
+    const perm = await within(Location.getForegroundPermissionsAsync(), 5_000);
+    if (!perm?.granted) return;
+    warming = within(Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }), 20_000);
+    try {
+      const pos = await warming;
+      if (pos) warmFix = { pos, at: Date.now() };
+    } finally {
+      warming = null;
+    }
   } finally {
-    warming = null;
+    warmBusy = false;
   }
 }
 
@@ -341,9 +358,32 @@ async function warmUpLocation(): Promise<void> {
 async function getCoords(
   { allowUnknown = false }: { allowUnknown?: boolean } = {},
 ): Promise<FixPayload> {
-  const perm = await Location.requestForegroundPermissionsAsync();
-  if (perm.status !== 'granted') {
-    if (!allowUnknown) throw new Error('Location permission is required.');
+  // Bounded — and this is the one that was missed when everything else on this
+  // path was bounded. It is the FIRST await after the button starts spinning,
+  // so a hang here shows "Finding your location…" and then nothing, for ever:
+  // precisely the screen employees reported, and the reason the comment above
+  // claiming "every await on this path" was not yet true.
+  //
+  // Permission already granted returns in milliseconds, so this costs a
+  // working phone nothing. The wait exists only for the dialog — and a dialog
+  // nobody answers (phone pocketed mid-tap, dialog opened behind another
+  // window, activity not resumed when it was requested) leaves this promise
+  // unsettled for the rest of the day. Same deadline as the dialogs inside
+  // startBackgroundTracking, imported from the same constant so the screen's
+  // 150s step watchdog cannot drift out of step with it.
+  const perm = await within(Location.requestForegroundPermissionsAsync(), PERMISSION_TIMEOUT_MS);
+  if (perm?.status !== 'granted') {
+    if (!allowUnknown) {
+      // Told apart deliberately: "you declined" and "nothing came back" need
+      // different things done about them, and sending someone to Settings to
+      // fix a permission they never actually refused wastes their morning.
+      throw new Error(
+        perm
+          ? 'Location permission is required.'
+          : 'The location permission request went unanswered. Tap Clock In again and '
+            + 'choose "While using the app".',
+      );
+    }
     return { latitude: null, longitude: null, is_mocked: false, accuracy_m: null };
   }
   // Clock-in must feel instant, and a fresh GPS lock is the one thing that
@@ -693,7 +733,9 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       // already granted background location before this screen existed.
       let consent = (await SecureStore.getItemAsync(CONSENT_KEY).catch(() => null)) === '1';
       if (!consent) {
-        const bg = await Location.getBackgroundPermissionsAsync().catch(() => null);
+        // Bounded: this sits in the screen's first load, so a stall here left
+        // the dashboard loading rather than merely missing a consent flag.
+        const bg = await within(Location.getBackgroundPermissionsAsync(), 10_000);
         if (bg?.granted) {
           consent = true;
           await SecureStore.setItemAsync(CONSENT_KEY, '1').catch(() => {});
@@ -917,10 +959,11 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   // clock-in the server had already recorded — on every phone, the first time
   // anybody used it.
   //
-  // 150s per step, against the longest legitimate step: the three 45s
-  // permission dialogs inside 'Starting location tracking…' (135s). Keep this
-  // above 3 x PERMISSION_TIMEOUT_MS in location/tracking.ts, or it starts
-  // cutting off real work again.
+  // 150s per step, against the longest legitimate step: 'Starting location
+  // tracking…', which is three 30s permission dialogs plus a 30s foreground
+  // service start — 120s, leaving 30s of margin. That sum is written out in
+  // location/tracking.ts beside PERMISSION_TIMEOUT_MS; if either side changes,
+  // re-do it there, or this backstop starts cutting off real work again.
   // -------------------------------------------------------------------------
   useEffect(() => {
     if (!busy) return;
@@ -1456,8 +1499,11 @@ If you are working away from the site today, ask your `
               void (async () => {
                 // Ask directly first — on Android 11+ the OS itself sends the
                 // employee to the right settings page for "all the time".
-                await Location.requestForegroundPermissionsAsync().catch(() => null);
-                await Location.requestBackgroundPermissionsAsync().catch(() => null);
+                await within(Location.requestForegroundPermissionsAsync(), PERMISSION_TIMEOUT_MS);
+                await within(Location.requestBackgroundPermissionsAsync(), PERMISSION_TIMEOUT_MS);
+                // Bounded so retryAfter() below always runs. Unanswered dialogs
+                // used to strand this button: the alert closed, nothing retried,
+                // and the tracking warning stayed up with no way to clear it.
                 await retryAfter();
               })();
             },
