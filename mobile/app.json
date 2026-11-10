@@ -2,7 +2,7 @@
   "expo": {
     "name": "Attendance",
     "slug": "attendance-mobile",
-    "version": "1.4.29",
+    "version": "1.4.30",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#0f172a",

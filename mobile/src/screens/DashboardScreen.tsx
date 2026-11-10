@@ -399,21 +399,22 @@ async function getCoords(
   // the server — refuses as off-site. Slow, then refused, with nothing on
   // screen connecting either to the setting that caused it.
   //
-  // startBackgroundTracking already refuses coarse location with this same
-  // instruction, but it runs AFTER the clock-in it was meant to protect, so
-  // the employee met the wall later and in a more confusing place. Checked
-  // here it costs nothing, answers immediately instead of in 34 seconds, and
-  // names the one setting that fixes it.
+  // NOTED, NOT REFUSED — and this is a correction of 1.4.29, which refused
+  // here and should not have.
   //
-  // Clock-out is deliberately exempt: a vague position is no reason to leave
-  // somebody's day open, and allowUnknown already covers having none at all.
-  if (!allowUnknown && Platform.OS === 'android' && perm.android?.accuracy === 'coarse') {
-    throw new Error(
-      'Location is set to Approximate, which is not precise enough for attendance. '
-      + 'Open Settings → Apps → Attendance → Permissions → Location, turn on '
-      + '"Use precise location", then try again.',
-    );
-  }
+  // Refusing before even looking meant a phone set to Approximate could no
+  // longer clock in AT ALL, where before it sometimes could: a coarse fix that
+  // happened to land inside the fence was accepted, and for somebody standing
+  // at their own desk that is most of the time. Every other deadline added in
+  // 1.4.27-29 turns "hangs for ever" into "fails with a reason", which cannot
+  // break a clock-in that was working. This one could, and did.
+  //
+  // So it only changes the MESSAGE now, not the outcome. The lookup runs
+  // exactly as it would have; if a usable fix arrives, the clock-in proceeds
+  // and nothing is lost. If no fix arrives, the employee is told about
+  // Approximate instead of being sent outdoors to fix weather that was never
+  // the problem. Fast and honest, without taking anything away.
+  const coarseGrant = Platform.OS === 'android' && perm.android?.accuracy === 'coarse';
   // Clock-in must feel instant, and a fresh GPS lock is the one thing that
   // cannot be made instant — cold, indoors, it takes 5–30 seconds, and it has
   // NO timeout, which is exactly the "clock in takes time" complaint. So:
@@ -448,6 +449,28 @@ async function getCoords(
     3_000,
   );
   let pos = last;
+  // Before paying for a cold lock: the two-minute cache, which is what 1.4.23
+  // used for EVERY clock-in.
+  //
+  // Narrowing the step above to thirty seconds is right — the fence is judged
+  // on that fix, and a position taken at the gate should not be what a tap at
+  // the desk sends. But it was narrowed with nothing behind it, so a fix aged
+  // between thirty seconds and two minutes stopped being used at all and the
+  // tap fell straight through to an eight-second lookup. The pre-warm was
+  // supposed to cover that gap, and does when it is running; when it is not —
+  // permission not yet granted, the screen only just opened, the effect's
+  // conditions not met — clock-in became SLOWER than the build everyone was
+  // complaining about.
+  //
+  // A cache read costs milliseconds and cannot make anything slower. The same
+  // 250 m accuracy gate still applies, and accuracy_m still travels with the
+  // fix, so the server judges it exactly as honestly as it judged 1.4.23's.
+  if (!pos && !allowUnknown) {
+    pos = await within(
+      Location.getLastKnownPositionAsync({ maxAge: 120_000, requiredAccuracy: 250 }),
+      2_000,
+    );
+  }
   if (!pos) {
     // A lookup the screen already started is joined, not restarted.
     const fresh = warming ?? Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
@@ -479,9 +502,15 @@ async function getCoords(
 
   if (!pos) {
     if (!allowUnknown) {
+      // The Approximate case gets its own wording: "move outside" is useless
+      // advice when the setting, not the sky, is what withheld the position.
       throw new Error(
-        'Could not get your location. Move outside or into an open area, check that ' +
-        'Location is switched on, and try again.',
+        coarseGrant
+          ? 'Location is set to Approximate, which is not precise enough for attendance. '
+            + 'Open Settings → Apps → Attendance → Permissions → Location, turn on '
+            + '"Use precise location", then try again.'
+          : 'Could not get your location. Move outside or into an open area, check that '
+            + 'Location is switched on, and try again.',
       );
     }
     // Clocking out matters more than knowing where from.
