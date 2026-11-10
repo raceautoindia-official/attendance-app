@@ -63,10 +63,10 @@ const reason = valueOf('reason', 'app_refused_clock_in');
 if (!emp || !inAt || has('--help') || has('-h')) {
   console.log(
     'Mark a day the app refused to mark.\n\n' +
-    '  node scripts/mark-attendance.js --emp=RACE013 --in=09:13            dry run\n' +
-    '  node scripts/mark-attendance.js --emp=RACE013 --in=09:13 --confirm  write it\n\n' +
+    '  node scripts/mark-attendance.js --emp=Nalini --in=09:13             dry run\n' +
+    '  node scripts/mark-attendance.js --emp=Nalini --in=09:13 --confirm   write it\n\n' +
     'Options:\n' +
-    '  --emp=RACE013          employee code (required)\n' +
+    '  --emp=RACE013          employee code, or part of their name (required)\n' +
     '  --in=HH:MM             clock-in, local time (required)\n' +
     '  --out=HH:MM            clock-out, local time (omit to leave the day open)\n' +
     `  --date=YYYY-MM-DD      work date (default: today in ${TZ})\n` +
@@ -138,9 +138,25 @@ async function main() {
   });
 
   try {
-    const [[who]] = await c.query(
-      'SELECT id, emp_id, name FROM employees WHERE emp_id = ? LIMIT 1', [emp]);
-    if (!who) throw new Error(`No employee with emp_id "${emp}".`);
+    // By code OR by name. Requiring the code meant looking it up first, and
+    // the lookup was a mysql command with credentials in it — which is both a
+    // way to paste a password into a shell history and, the first time it was
+    // tried, a way to lose ten minutes to bash reading "<user>" as a file.
+    // This script already has the credentials; it can do its own looking up.
+    const [matches] = await c.query(
+      `SELECT id, emp_id, name FROM employees
+        WHERE emp_id = ? OR name LIKE CONCAT('%', ?, '%')
+        ORDER BY (emp_id = ?) DESC, name ASC
+        LIMIT 10`,
+      [emp, emp, emp]);
+    if (matches.length === 0) throw new Error(`No employee matching "${emp}".`);
+    if (matches.length > 1) {
+      throw new Error(
+        `"${emp}" matches ${matches.length} people:\n` +
+        matches.map((m) => `    ${m.emp_id}  ${m.name}`).join('\n') +
+        '\n\n  Run it again with the code of the one you mean. Nothing written.');
+    }
+    const who = matches[0];
 
     const [[existing]] = await c.query(
       `SELECT id, clock_in_utc, clock_out_utc, total_minutes, status
