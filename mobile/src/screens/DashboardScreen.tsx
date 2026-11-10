@@ -375,7 +375,36 @@ async function getCoords(
   // unsettled for the rest of the day. Same deadline as the dialogs inside
   // startBackgroundTracking, imported from the same constant so the screen's
   // 150s step watchdog cannot drift out of step with it.
-  const perm = await within(Location.requestForegroundPermissionsAsync(), PERMISSION_TIMEOUT_MS);
+  // READ before prompting, and this is the failure Nalini hit twice on
+  // 2026-11-10 — 9:13 am and 2:18 pm, the whole day lost.
+  //
+  // The comment above says a granted permission "returns in milliseconds, so
+  // this costs a working phone nothing". That is what the API promises and it
+  // is not what her phone did: a permission granted weeks earlier sat here for
+  // the full thirty seconds and then reported itself unanswered. It never
+  // reached a dialog, because there was nothing to ask.
+  //
+  // requestForegroundPermissionsAsync goes through the Activity's permission
+  // machinery whatever the answer is going to be, so it can be left hanging by
+  // a dialog queued behind another request, or by an activity that was not
+  // resumed at the moment it was called. getForegroundPermissionsAsync is a
+  // plain read of state the OS already holds — it enters none of that and
+  // cannot hang on it.
+  //
+  // So a phone that has already granted this now asks the OS for nothing. The
+  // dialog is for phones that actually need one.
+  let perm: Location.LocationPermissionResponse | null =
+    await within(Location.getForegroundPermissionsAsync(), 5_000);
+  if (!perm?.granted) {
+    perm = await within(Location.requestForegroundPermissionsAsync(), PERMISSION_TIMEOUT_MS);
+    if (!perm) {
+      // The dialog did not come back. That does not mean it was not ANSWERED:
+      // what went missing may be only the callback. Ask the OS what it now
+      // holds before telling somebody they failed to tap a button they may
+      // well have tapped.
+      perm = await within(Location.getForegroundPermissionsAsync(), 5_000);
+    }
+  }
   if (perm?.status !== 'granted') {
     if (!allowUnknown) {
       // Told apart deliberately: "you declined" and "nothing came back" need

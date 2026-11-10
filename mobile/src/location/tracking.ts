@@ -287,12 +287,21 @@ export async function startBackgroundTracking(): Promise<void> {
   uploadsPausedAt = 0;
   // The staleness clock starts now: the first fix is up to an interval away.
   await setState(LAST_FIX_KEY, String(Date.now()));
-  const fg = await withTimeout(
-    Location.requestForegroundPermissionsAsync(),
-    PERMISSION_TIMEOUT_MS,
-    PERMISSION_TIMEOUT_MSG,
-  );
-  if (fg.status !== 'granted') {
+  // Read before prompting — the same fault getCoords had, for the same
+  // reason. requestForegroundPermissionsAsync enters the Activity's permission
+  // machinery even when the answer is already yes, and can be left hanging
+  // there; the read cannot. A phone that has granted this asks for nothing.
+  let fg: Location.LocationPermissionResponse | null =
+    await withTimeout(Location.getForegroundPermissionsAsync(), 5_000, PERMISSION_TIMEOUT_MSG)
+      .catch(() => null);
+  if (!fg?.granted) {
+    fg = await withTimeout(
+      Location.requestForegroundPermissionsAsync(),
+      PERMISSION_TIMEOUT_MS,
+      PERMISSION_TIMEOUT_MSG,
+    );
+  }
+  if (fg?.status !== 'granted') {
     throw new Error('Location permission is required to track attendance.');
   }
   // Android 12+ lets the user grant only "Approximate" location (~2 km).
@@ -302,12 +311,19 @@ export async function startBackgroundTracking(): Promise<void> {
       'Precise location is off. Open Settings → Apps → Attendance → Permissions → Location and turn on "Use precise location".',
     );
   }
-  const bg = await withTimeout(
-    Location.requestBackgroundPermissionsAsync(),
-    PERMISSION_TIMEOUT_MS,
-    PERMISSION_TIMEOUT_MSG,
-  );
-  if (bg.status !== 'granted') {
+  // Likewise, and this one matters more: the "Allow all the time" dialog is
+  // the slowest of the three and the most often left unanswered.
+  let bg: Location.LocationPermissionResponse | null =
+    await withTimeout(Location.getBackgroundPermissionsAsync(), 5_000, PERMISSION_TIMEOUT_MSG)
+      .catch(() => null);
+  if (!bg?.granted) {
+    bg = await withTimeout(
+      Location.requestBackgroundPermissionsAsync(),
+      PERMISSION_TIMEOUT_MS,
+      PERMISSION_TIMEOUT_MSG,
+    );
+  }
+  if (bg?.status !== 'granted') {
     throw new Error('Please allow location "All the time" so tracking works with the app closed.');
   }
   // Must come before starting the service so its notification can show.
