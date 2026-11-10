@@ -475,7 +475,7 @@ async function getCoords(
     // A lookup the screen already started is joined, not restarted.
     const fresh = warming ?? Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
     // Clock-out only wants the position for the record, so it waits less.
-    pos = await within(fresh, allowUnknown ? 4_000 : 8_000);
+    pos = await within(fresh, allowUnknown ? 4_000 : 6_000);
     if (!pos) {
       // Any older fix will do at this point — its own accuracy travels with it,
       // so the server judges it honestly rather than trusting it blindly.
@@ -495,8 +495,25 @@ async function getCoords(
       // with the day still open. That day then reached the next morning as an
       // unclosed session, which is the other half of the reports.
       //
-      // Twenty more seconds, then answer honestly.
-      pos = await within(fresh, 20_000);
+      // Eight more seconds, not twenty.
+      //
+      // Twenty was chosen when the tap began a cold lookup and this was the
+      // only chance of a position. With a live watch running while the button
+      // is on screen, reaching this line at all means the phone has produced no
+      // fix in roughly fifteen seconds of trying, and twelve more will not
+      // usually change that — it just holds the spinner, which is the thing
+      // being complained about. Fail sooner and let them tap again.
+      pos = await within(fresh, 8_000);
+    }
+    if (!pos && !allowUnknown) {
+      // Absolutely last: ANY position this screen has seen, at any age and any
+      // accuracy. Normally refused — the fence is judged on this fix, so a
+      // stale or vague one is exactly what should not be sent — but the choice
+      // here is no longer "good fix or poor fix". It is "poor fix or no
+      // clock-in at all", and the poor fix carries its own accuracy and age to
+      // the server, which records both. A day marked from a slightly stale
+      // position can be corrected; a day never marked cannot.
+      pos = warmFix?.pos ?? null;
     }
   }
 
@@ -1050,18 +1067,54 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   // still reading the screen. (Mid-shift, the tracking effect already reloads.)
   useEffect(() => {
     if (loading || hasConsent !== true || !canClockIn) return;
+    // A LIVE subscription, not a poll.
+    //
+    // Polling every twenty seconds left a twenty-second hole: tap inside it and
+    // the pre-warmed fix was already too old to use, so the tap paid for a cold
+    // lookup — which is the whole complaint. watchPositionAsync hands over each
+    // fix AS the OS produces one, so by the time a finger reaches the button
+    // there is a position seconds old, not tens of seconds old.
+    //
+    // It is also cheaper than the poll it replaces. One subscription lets the
+    // OS batch this against every other location consumer on the phone, where
+    // repeated getCurrentPositionAsync calls each start their own request.
+    let watch: Location.LocationSubscription | null = null;
+    let cancelled = false;
+    void (async () => {
+      const perm = await within(Location.getForegroundPermissionsAsync(), 5_000);
+      if (!perm?.granted || cancelled) return;
+      const started = await within(
+        Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.Balanced,
+            timeInterval: 10_000,
+            distanceInterval: 25,
+          },
+          pos => { warmFix = { pos, at: Date.now() }; },
+        ),
+        15_000,
+      );
+      if (!started) return;
+      if (cancelled) { started.remove(); return; }
+      watch = started;
+    })();
+    // The poll stays as a belt-and-braces fallback: if watchPositionAsync never
+    // delivers (no provider, a permission revoked under us), this still keeps a
+    // fix within reach. warmBusy makes a redundant call almost free.
     void warmUpLocation();
     const id = setInterval(() => {
       if (AppState.currentState === 'active') void warmUpLocation();
     }, WARM_FIX_REFRESH_MS);
-    const sub = AppState.addEventListener('change', state => {
+    const appSub = AppState.addEventListener('change', state => {
       if (state !== 'active') return;
       void warmUpLocation();
       refresh();
     });
     return () => {
+      cancelled = true;
+      watch?.remove();
       clearInterval(id);
-      sub.remove();
+      appSub.remove();
     };
   }, [loading, hasConsent, canClockIn, refresh]);
 
