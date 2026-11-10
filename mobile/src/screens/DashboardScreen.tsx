@@ -419,12 +419,11 @@ async function getCoords(
   // cannot be made instant — cold, indoors, it takes 5–30 seconds, and it has
   // NO timeout, which is exactly the "clock in takes time" complaint. So:
   //
-  //   1. a cached fix from the last 2 minutes — instant, covers mid-shift;
-  //   2. else a fresh fix RACED against 8 seconds;
-  //   3. on timeout, any fix from the last 10 minutes — its own accuracy is
-  //      sent along, so the server judges it honestly;
-  //   4. only with no cached fix at all do we keep waiting for the lock —
-  //      there is genuinely nothing else to offer.
+  //   1. anything the phone ALREADY holds — best first, no waiting at all;
+  //   2. ONLY if it holds nothing whatsoever, one bounded wait for a lock.
+  //
+  // In that order, and in no other. Putting a wait in front of a fix already
+  // in hand is what made clock-in slow, twice over.
   //
   // A REJECTED fix counts as no fix. It used to escape as an exception: with
   // Location switched off (or the "turn on location" dialog declined) Android
@@ -433,88 +432,55 @@ async function getCoords(
   // day they could not close. The cached-fix reads are bounded as well; they
   // normally answer at once, but nothing on this path may wait unbounded.
   //
-  // 0. Before all of that: the position warmed while the button was on screen.
-  const warm = warmFix
-    && Date.now() - warmFix.at < WARM_FIX_MAX_AGE_MS
-    && (warmFix.pos.coords.accuracy ?? 0) <= 250
-    ? warmFix.pos
-    : null;
-  // The OS's cached position is held to the same short limit for a clock-in,
-  // which the fence judges; two minutes is fine for a clock-out's record.
-  const last = warm ?? await within(
-    Location.getLastKnownPositionAsync({
-      maxAge: allowUnknown ? 120_000 : WARM_FIX_MAX_AGE_MS,
-      requiredAccuracy: 250,
-    }),
-    3_000,
-  );
-  let pos = last;
-  // Before paying for a cold lock: the two-minute cache, which is what 1.4.23
-  // used for EVERY clock-in.
+  // 1. Everything already in hand, in order of quality, and with NO waiting.
   //
-  // Narrowing the step above to thirty seconds is right — the fence is judged
-  // on that fix, and a position taken at the gate should not be what a tap at
-  // the desk sends. But it was narrowed with nothing behind it, so a fix aged
-  // between thirty seconds and two minutes stopped being used at all and the
-  // tap fell straight through to an eight-second lookup. The pre-warm was
-  // supposed to cover that gap, and does when it is running; when it is not —
-  // permission not yet granted, the screen only just opened, the effect's
-  // conditions not met — clock-in became SLOWER than the build everyone was
-  // complaining about.
+  // This is the shape 1.4.23 had, and the shape it lost. 1.4.23 asked the OS
+  // for any fix up to TEN MINUTES old and used it, and only started a lookup
+  // when there was none. That is why clock-in felt instant: at a desk, in an
+  // office, on a phone that has been awake all morning, such a fix always
+  // exists. The rebuild put three waits in FRONT of that same read — a 30s
+  // cache read, a 120s cache read, then a six-second lock — so the identical
+  // position 1.4.23 returned in milliseconds now cost up to eleven seconds to
+  // reach, and the worst case ran to twenty-two. Each step was defensible on
+  // its own. Together they were the loading issue.
   //
-  // A cache read costs milliseconds and cannot make anything slower. The same
-  // 250 m accuracy gate still applies, and accuracy_m still travels with the
-  // fix, so the server judges it exactly as honestly as it judged 1.4.23's.
-  if (!pos && !allowUnknown) {
-    pos = await within(
-      Location.getLastKnownPositionAsync({ maxAge: 120_000, requiredAccuracy: 250 }),
-      2_000,
-    );
-  }
+  // One cache read now, graded here. Reading the cache costs milliseconds and
+  // cannot make anything slower; grading it afterwards is free arithmetic.
+  const cached = await within(Location.getLastKnownPositionAsync({ maxAge: 600_000 }), 3_000);
+  const sharp = (p: Location.LocationObject | null | undefined): boolean =>
+    !!p && Date.now() - p.timestamp < WARM_FIX_MAX_AGE_MS && (p.coords.accuracy ?? 0) <= 250;
+
+  let pos: Location.LocationObject | null =
+    // Best: the live watch's latest — seconds old, accurate enough to judge a
+    // fence on. The normal case, because the watch runs the whole time the
+    // button is on screen.
+    (sharp(warmFix?.pos) ? warmFix!.pos : null)
+    // The same standard, from the OS's own cache.
+    ?? (sharp(cached) ? cached : null)
+    // Stale or vague, but REAL and no older than ten minutes: 1.4.23's rule.
+    // Its accuracy and its age travel with it to the server, which records
+    // both, so this is judged exactly as honestly as 1.4.23's was — and a
+    // fence of a sensible radius still contains it. A day marked from a
+    // two-minute-old position can be corrected; a day never marked cannot.
+    ?? cached
+    // Anything at all this screen has seen, at any age.
+    ?? warmFix?.pos
+    ?? null;
+
   if (!pos) {
-    // A lookup the screen already started is joined, not restarted.
-    const fresh = warming ?? Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-    // Clock-out only wants the position for the record, so it waits less.
-    pos = await within(fresh, allowUnknown ? 4_000 : 6_000);
-    if (!pos) {
-      // Any older fix will do at this point — its own accuracy travels with it,
-      // so the server judges it honestly rather than trusting it blindly.
-      pos = await within(Location.getLastKnownPositionAsync({ maxAge: 600_000 }), 3_000);
-    }
-    // Clock-out skips this last wait. It succeeds without a position, so twenty
-    // more seconds of spinner buys a coordinate the server does not need — on
-    // exactly the phones (tracking off, indoors) where the lock never comes.
-    // Worst case for clock-out is now a few seconds instead of ~34.
-    if (!pos && !allowUnknown) {
-      // Last resort: keep waiting for the lock, but NOT for ever.
-      //
-      // This used to be a bare `await fresh`, with no timeout at all. On a
-      // phone that never gets a lock — indoors, location switched off, GPS
-      // hardware unable to fix — that promise simply never settles, so tapping
-      // Clock Out span the button until the employee gave up and went home
-      // with the day still open. That day then reached the next morning as an
-      // unclosed session, which is the other half of the reports.
-      //
-      // Eight more seconds, not twenty.
-      //
-      // Twenty was chosen when the tap began a cold lookup and this was the
-      // only chance of a position. With a live watch running while the button
-      // is on screen, reaching this line at all means the phone has produced no
-      // fix in roughly fifteen seconds of trying, and twelve more will not
-      // usually change that — it just holds the spinner, which is the thing
-      // being complained about. Fail sooner and let them tap again.
-      pos = await within(fresh, 8_000);
-    }
-    if (!pos && !allowUnknown) {
-      // Absolutely last: ANY position this screen has seen, at any age and any
-      // accuracy. Normally refused — the fence is judged on this fix, so a
-      // stale or vague one is exactly what should not be sent — but the choice
-      // here is no longer "good fix or poor fix". It is "poor fix or no
-      // clock-in at all", and the poor fix carries its own accuracy and age to
-      // the server, which records both. A day marked from a slightly stale
-      // position can be corrected; a day never marked cannot.
-      pos = warmFix?.pos ?? null;
-    }
+    // Only now is there anything worth waiting for: the phone holds no
+    // position whatsoever, not even a stale one. Freshly booted, Location just
+    // switched on, first run after an install.
+    //
+    // ONE wait, not a staircase of them. The path this replaces waited 6s,
+    // re-read the cache, waited 8s more and only then looked at warmFix —
+    // all of it AFTER the phone had already shown it had nothing to give. A
+    // single bounded wait is both faster and possible to reason about: a
+    // clock-in can now take at most 3s + 10s, and only on such a phone.
+    pos = await within(
+      warming ?? Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
+      allowUnknown ? 4_000 : 10_000,
+    );
   }
 
   if (!pos) {
@@ -569,7 +535,7 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
   // battery settings cannot fix.
   const [trackingIssue, setTrackingIssue] = useState<string | null>(null);
   const [trackingEnabled, setTrackingEnabled] = useState(true); // admin per-employee toggle
-  const [multiSession, setMultiSession] = useState(false); // plant: several clock-ins per day
+  const [multiSession, setMultiSession] = useState(false); // plant: several clock-in's per day
   const [fenceLocation, setFenceLocation] = useState<FenceLocation | null>(null);
   const [todaySessions, setTodaySessions] = useState<TodaySession[]>([]);
   // Google Play prominent-disclosure consent. null = not yet loaded.
@@ -1287,36 +1253,54 @@ export default function DashboardScreen({ onLogout }: { onLogout: () => void }) 
       // fall into the catch, which said "failed", skipped refresh() and left
       // the Clock In button up — so the next tap got "Already clocked in" and
       // the employee concluded they could not clock in at all.
-      let trackingProblem: string | null = null;
+      // THE SPINNER ENDS HERE, and this is the other half of "clock-in takes
+      // time". The day is marked, the button has flipped, the server is done.
+      //
+      // What used to run on this same spinner was startBackgroundTracking(),
+      // which can legitimately take two minutes — three permission dialogs at
+      // thirty seconds each, plus thirty for the service itself to start — and
+      // on a first clock-in after an install it usually DOES stop to ask. So
+      // the employee watched a spinner for a minute or more AFTER their
+      // attendance had already been saved, with nothing to distinguish that
+      // from a clock-in that had hung. Several of them gave up and tapped
+      // again, which is where "Already clocked in" came from.
+      //
+      // Nothing below this line changes whether the day is marked. So nothing
+      // below this line belongs in front of the employee.
+      refresh();
+      setBusy(false);
+      setBusyLabel(null);
+      toast('Clocked in successfully ✓');
+
       // Only start location tracking if the admin enabled it for this employee.
       if (trackingEnabled) {
-        try {
-          setBusyLabel('Starting location tracking…');
-          await startBackgroundTracking();
-          setTracking(true);
-          setTrackingIssue(null);
-          // One-time: ask the OS to keep tracking alive in the background.
-          const prompted = await SecureStore.getItemAsync('battery_prompted');
-          if (!prompted) {
-            await SecureStore.setItemAsync('battery_prompted', '1');
-            Alert.alert(
-              'Keep tracking running',
-              'So your location keeps recording while the screen is off, tap "Allow" on the next screen.',
-              [{ text: 'OK', onPress: () => { void requestIgnoreBatteryOptimization(); } }],
-            );
+        // Unawaited ON PURPOSE. Its dialogs and its failures still reach the
+        // screen through state, in their own time, without holding the button.
+        void (async () => {
+          try {
+            await startBackgroundTracking();
+            setTracking(true);
+            setTrackingIssue(null);
+            // One-time: ask the OS to keep tracking alive in the background.
+            const prompted = await SecureStore.getItemAsync('battery_prompted');
+            if (!prompted) {
+              await SecureStore.setItemAsync('battery_prompted', '1');
+              Alert.alert(
+                'Keep tracking running',
+                'So your location keeps recording while the screen is off, tap "Allow" on the next screen.',
+                [{ text: 'OK', onPress: () => { void requestIgnoreBatteryOptimization(); } }],
+              );
+            }
+          } catch (te) {
+            const why = te instanceof Error ? te.message : 'Location tracking could not start.';
+            setTracking(false);
+            setTrackingIssue(why);
+            // Only ever about tracking: the clock-in itself stands, and the
+            // wording must not suggest otherwise.
+            setError(`You are clocked in, but location tracking is not running: ${why}`);
+            toast('Tracking is off');
           }
-        } catch (te) {
-          trackingProblem = te instanceof Error ? te.message : 'Location tracking could not start.';
-          setTracking(false);
-          setTrackingIssue(trackingProblem);
-        }
-      }
-      refresh();
-      if (trackingProblem) {
-        setError(`You are clocked in, but location tracking is not running: ${trackingProblem}`);
-        toast('Clocked in ✓ — tracking is off');
-      } else {
-        toast('Clocked in successfully ✓');
+        })();
       }
     } catch (e) {
       // Away from the work site — refused, with no way through it from here.
@@ -1390,6 +1374,11 @@ If you are working away from the site today, ask your `
       // not be reported as a failed clock-out. Still finished BEFORE refresh():
       // the auto-attendance effect reads the pending re-entry flag the moment
       // the screen learns the day is closed, and must find it cleared.
+      // Labelled, because this step keeps the spinner up for a few seconds
+      // after the day is already closed and a mute spinner at that moment reads
+      // as a hang. It cannot be moved off the spinner the way clock-in's
+      // tracking start was: the ordering above is load-bearing.
+      setBusyLabel('Ending tracking…');
       await Promise.allSettled([stopBackgroundTracking(), stopGeofenceAutoMode(), stopLocationWatch()]);
       setTracking(false);
       refresh();
