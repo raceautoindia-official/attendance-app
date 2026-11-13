@@ -152,6 +152,7 @@ const CORE_COLUMNS = new Set([
   'name',
   'working_days',
   'total_days_present',
+  'days_attended',
   'total_days_absent',
   'total_days_late',
   'total_minutes_worked',
@@ -1116,9 +1117,9 @@ function ReportsPageInner() {
                     <div>
                       <span className="font-semibold text-amber-600 dark:text-amber-400 tabular-nums">
                         {row.total_days_late}
-                        {row.total_days_present > 0 && (
+                        {row.total_days_present + row.total_days_late > 0 && (
                           <span className="text-xs font-normal text-slate-400">
-                            {' '}of {row.total_days_present} attended
+                            {' '}of {row.total_days_present + row.total_days_late} attended
                           </span>
                         )}
                       </span>
@@ -1126,6 +1127,29 @@ function ReportsPageInner() {
                         <p className="text-xs text-slate-400 tabular-nums">
                           {Math.floor(mins / 60)}h {mins % 60}m late
                         </p>
+                      )}
+                    </div>
+                  );
+                },
+              },
+              {
+                // How many days did this person turn up. Neither column
+                // beside it answers that: 'present' and 'late' are mutually
+                // exclusive statuses, so a reader wanting the real figure
+                // had to add two columns in their head - and did, wrongly.
+                key: 'days_attended',
+                header: 'Present + Late',
+                render: r => {
+                  const row = r as SummaryRow;
+                  const attended = row.total_days_present + row.total_days_late;
+                  const wd = row.working_days ?? 0;
+                  return (
+                    <div>
+                      <span className="font-semibold tabular-nums text-slate-900 dark:text-slate-100">
+                        {attended}
+                      </span>
+                      {wd > 0 && (
+                        <span className="text-xs tabular-nums text-slate-400"> of {wd}</span>
                       )}
                     </div>
                   );

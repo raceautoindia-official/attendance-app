@@ -292,6 +292,7 @@ export async function GET(request: NextRequest) {
     s.emp_id,
     String(s.present),
     String(s.late),
+    String(s.present + s.late),
     String(s.absent),
     String(s.leave),
     String(s.holiday),
@@ -305,7 +306,7 @@ export async function GET(request: NextRequest) {
 
   autoTable(doc, {
     head: [[
-      'Employee', 'ID', 'Present', 'Late', 'Absent', 'Leave', 'Holiday', 'Week Off',
+      'Employee', 'ID', 'Present', 'Late', 'Present + Late', 'Absent', 'Leave', 'Holiday', 'Week Off',
       'Worked Hours', 'Permission', 'Credited Hours', 'Work Status', 'Updates',
     ]],
     body: summaryBody,
@@ -313,6 +314,9 @@ export async function GET(request: NextRequest) {
     theme: 'striped',
     headStyles: { fillColor: [41, 128, 185], fontSize: 9, fontStyle: 'bold' },
     styles: { fontSize: 9 },
+    // Day counts centred, hour totals right-aligned. These indices move
+    // whenever a column is inserted above - 'Present + Late' at 4 pushed
+    // every later column along by one.
     columnStyles: {
       2: { halign: 'center' },
       3: { halign: 'center' },
@@ -320,9 +324,10 @@ export async function GET(request: NextRequest) {
       5: { halign: 'center' },
       6: { halign: 'center' },
       7: { halign: 'center' },
-      8: { halign: 'right' },
+      8: { halign: 'center' },
       9: { halign: 'right' },
       10: { halign: 'right' },
+      11: { halign: 'right' },
     },
   });
 

@@ -54,7 +54,7 @@ export async function GET(request: NextRequest) {
   const HEADERS = [
     'Employee', 'Employee ID', 'Work Status', 'Work Updates (days)',
     'Calendar Days', 'Working Days', 'Weekly Offs', 'Holidays',
-    'Present', 'Late (days)', 'Late (h m)', 'Absent',
+    'Present', 'Late (days)', 'Late (h m)', 'Present + Late', 'Absent',
     'Worked Hours', 'Permission', 'Credited Hours', 'Overtime',
     'Expected Hours', 'Avg / Day', 'Attendance %',
   ];
@@ -73,6 +73,11 @@ export async function GET(request: NextRequest) {
       r.total_days_present,
       r.total_days_late,
       r.late_minutes ? hm(r.late_minutes) : '',
+      // The question this sheet is opened to answer: how many days did
+      // this person turn up. 'present' and 'late' are mutually exclusive
+      // statuses, so neither column answers it alone and every reader was
+      // adding the two by hand.
+      Number(r.total_days_present) + Number(r.total_days_late),
       r.total_days_absent,
       hm(r.total_minutes_worked),
       r.total_permission_minutes ? hm(r.total_permission_minutes) : '',
