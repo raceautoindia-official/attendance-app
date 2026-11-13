@@ -54,21 +54,39 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ---------------------------------------------------------------------------
-# Read one key from .env.local without echoing it.
+# Read one key from the env file this deployment actually uses, without
+# echoing it. .env.local first, then .env — the same order the app reads
+# them, so this script can never disagree with the running application
+# about which value is in force.
+#
+# It used to read .env.local and nothing else. Production has no
+# .env.local; its configuration lives in .env. So this script — written
+# to make deploys safe, with a backup and a rollback — died on its first
+# check every time anyone tried to use it, and every deploy to this
+# server has been done by hand with neither.
 # Handles optional surrounding quotes and trailing CR.
 # ---------------------------------------------------------------------------
+ENV_FILES=".env.local .env"
+
 env_get() {
-  local key="$1"
-  sed -n "s/^${key}=//p" .env.local 2>/dev/null \
-    | head -n1 \
-    | sed -e 's/\r$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
+  local key="$1" file v
+  for file in $ENV_FILES; do
+    [ -f "$file" ] || continue
+    v="$(
+      sed -n "s/^${key}=//p" "$file" 2>/dev/null \
+        | head -n1 \
+        | sed -e 's/\r$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
+    )"
+    if [ -n "$v" ]; then printf %s "$v"; return 0; fi
+  done
 }
 
 # ---------------------------------------------------------------------------
 say "1/8  Preflight"
 # ---------------------------------------------------------------------------
 [ -f package.json ] || die "not an app directory — no package.json in $APP_DIR"
-[ -f .env.local ]   || die ".env.local not found. Production secrets must exist on the server."
+[ -f .env.local ] || [ -f .env ] \
+  || die "no .env.local or .env found. Production secrets must exist on the server."
 
 command -v node >/dev/null   || die "node is not installed"
 command -v npm  >/dev/null   || die "npm is not installed"
@@ -87,7 +105,7 @@ for k in DB_HOST DB_USER DB_PASSWORD DB_NAME JWT_ACCESS_SECRET JWT_REFRESH_SECRE
          WEBAUTHN_RP_ID WEBAUTHN_ORIGIN; do
   [ -n "$(env_get "$k")" ] || MISSING="$MISSING $k"
 done
-[ -z "$MISSING" ] || die "missing required variables in .env.local:$MISSING"
+[ -z "$MISSING" ] || die "missing required variables in .env.local/.env:$MISSING"
 ok "all required variables present (values not displayed)"
 
 # Optional: the assistant. The app runs fine without these.
@@ -139,7 +157,7 @@ sed -i '/^port=$/d' "$MYCNF"
 DB_NAME_V="$(env_get DB_NAME)"
 
 mysql --defaults-extra-file="$MYCNF" -D "$DB_NAME_V" -e "SELECT 1" >/dev/null 2>&1 \
-  || die "cannot connect to database '$DB_NAME_V' with the credentials in .env.local"
+  || die "cannot connect to database '$DB_NAME_V' with the credentials in .env.local/.env"
 ok "connected to '$DB_NAME_V'"
 
 if [ -f database/migrations/check-status.sql ]; then

@@ -140,7 +140,7 @@ eq('a rail entry leads to the first page in its section',
 eq('a manager lands on the first page they may open',
   visibleSections(legacyManager).map(s => sectionHref(s)),
   ['/overview', '/inbox', '/employees', '/attendance', '/reports']);
-// Today, Inbox, People, Time, Insight. Settings is super-admin only, and Pay
+// Today, Approvals, Employees, Attendance, Reports. Settings is super-admin only, and Pay
 // no longer exists.
 check('a manager gets five sections, not six',
   visibleSections(legacyManager).length === 5,

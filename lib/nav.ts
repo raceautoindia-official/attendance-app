@@ -88,7 +88,7 @@ export const SECTIONS: readonly NavSection[] = [
   },
   {
     key: 'inbox',
-    label: 'Inbox',
+    label: 'Approvals',
     icon: 'inbox',
     badge: true,
     items: [
@@ -104,7 +104,7 @@ export const SECTIONS: readonly NavSection[] = [
   },
   {
     key: 'people',
-    label: 'People',
+    label: 'Employees',
     icon: 'people',
     items: [
       { href: '/employees', label: 'Employees', perm: 'employee.view', legacyRoles: ADMINS,
@@ -123,7 +123,7 @@ export const SECTIONS: readonly NavSection[] = [
   },
   {
     key: 'time',
-    label: 'Time',
+    label: 'Attendance',
     icon: 'time',
     items: [
       { href: '/attendance', label: 'Attendance', perm: 'attendance.view', legacyRoles: ADMINS,
@@ -140,7 +140,7 @@ export const SECTIONS: readonly NavSection[] = [
   },
   {
     key: 'insight',
-    label: 'Insight',
+    label: 'Reports',
     icon: 'insight',
     items: [
       { href: '/reports', label: 'Reports & hours', perm: 'reports.view', legacyRoles: ADMINS,
