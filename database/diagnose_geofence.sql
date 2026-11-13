@@ -2,7 +2,7 @@
 -- Why is auto clock-out / tracking / location warnings not working?
 --
 -- Run against PRODUCTION:
---   mysql -u <user> -p <database> < database/diagnose_geofence.sql
+--   node scripts/diagnose-geofence.js     (reads .env itself, explains itself)
 --
 -- Every gate below must pass for an employee. One 'NO' explains the silence.
 -- =============================================================================
@@ -56,18 +56,17 @@ LEFT JOIN employee_schedules es
   )
 LEFT JOIN locations l ON l.id = es.location_id
 WHERE e.is_active = TRUE
-  AND e.role = 'employee'
 ORDER BY result DESC, e.emp_id;
 
 
--- Has the watchdog EVER run? It only runs when something POSTs to
--- /api/cron/live-tracking-monitor — it is NOT part of the in-app scheduler.
+-- Has the watchdog EVER run? It runs inside the app itself, on its own
+-- timer every few minutes; a POST to /api/cron/live-tracking-monitor also fires it.
 -- An empty result here means it has never fired, whatever the roster says.
 SELECT 'geofence auto clock-outs ever recorded' AS check_name,
        COUNT(*) AS total,
        MAX(created_at) AS most_recent
 FROM audit_log
-WHERE action IN ('geofence_auto_clock_out', 'session_auto_closed')
+WHERE action IN ('geofence_auto_clockout', 'session_auto_closed')
   AND JSON_EXTRACT(details, '$.reason') IN ('left_the_fence', 'presence_never_confirmed');
 
 
