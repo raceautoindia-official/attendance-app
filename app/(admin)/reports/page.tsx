@@ -111,6 +111,10 @@ interface PeriodTotals {
   minutes_worked: number;
   permission_minutes: number;
   minutes_credited: number;
+  days_present: number;
+  days_late: number;
+  days_absent: number;
+  overtime_minutes: number;
 }
 
 interface LeaveRow {
@@ -946,6 +950,28 @@ function ReportsPageInner() {
                 </p>
               </div>
             </div>
+
+            {/* The day counts, added up. The card above them carried hours and
+                calendar facts only, so the one question it did not answer was
+                the plainest: across everybody, how many days were worked.
+
+                These come from the API, not from summing the rows on screen -
+                the table is paginated, and summing a page would quietly report
+                the first 25 employees as the company. */}
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 mt-5 pt-5 border-t border-slate-200 dark:border-slate-700">
+              {([
+                ['Present', String(totals?.days_present ?? 0), 'Days clocked in on time, everybody added together'],
+                ['Late', String(totals?.days_late ?? 0), 'Days clocked in after the grace period'],
+                ['Present + Late', String((totals?.days_present ?? 0) + (totals?.days_late ?? 0)), 'Days actually attended - the two above added together'],
+                ['Absent', String(totals?.days_absent ?? 0), 'Working days with no attendance and no leave'],
+                ['Overtime', minutesToHours(totals?.overtime_minutes ?? 0), 'Hours past the daily overtime line - nine hours, the same for everybody'],
+              ] as const).map(([label, value, hint]) => (
+                <div key={label} title={hint}>
+                  <p className="text-sm text-slate-600 dark:text-slate-300">{label}</p>
+                  <p className="text-xl font-semibold text-slate-900 dark:text-slate-100">{value}</p>
+                </div>
+              ))}
+            </div>
           </Card>
 
           {/* Collapsed by default. It explains the one genuinely confusable
@@ -963,10 +989,12 @@ function ReportsPageInner() {
               {([
                 ['Present', 'Clocked in on a working day and the day was completed.'],
                 ['Late', 'Clocked in after the shift start plus its grace period. Still a present day — it is counted separately, not on top.'],
+                ['Present + Late', 'The two above added together: how many days the person actually turned up. Late days are worked days, so neither column alone answers that.'],
                 ['Absent', 'A working day with no clock-in and no approved leave. Marked automatically by the nightly job — an unexplained missing day.'],
                 ['Leave', 'A working day the employee was formally excused from: casual, sick or earned leave granted by an admin. Company-wide holidays are not counted here.'],
                 ['Permission', 'Approved short time off inside a working day (e.g. 10:00–12:00). Tops the day’s hours back up to the shift length; it never adds hours beyond it.'],
                 ['Credited Hours', 'Hours actually clocked, plus approved permission, capped per day at the shift length.'],
+                ['Overtime', 'Hours worked past nine in a day. The same line for everybody, whatever shift they are on, and measured on hours actually clocked: approved permission tops a short day back up, it does not earn overtime.'],
               ] as const).map(([term, meaning]) => (
                 <div key={term}>
                   <dt className="font-medium text-slate-800 dark:text-slate-200">{term}</dt>

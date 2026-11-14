@@ -304,6 +304,28 @@ export async function GET(request: NextRequest) {
     s.updateDays.size ? String(s.updateDays.size) : '—',
   ]);
 
+  // Everybody added together, as the last row. Answering "and overall?" by
+  // adding a column of forty numbers off a printed page is not reading it.
+  const summaryValues = Array.from(summaryMap.values());
+  if (summaryValues.length > 1) {
+    const sum = (pick: (s: (typeof summaryValues)[number]) => number) =>
+      summaryValues.reduce((n, s) => n + pick(s), 0);
+    summaryBody.push([
+      'TOTAL', '',
+      String(sum(s => s.present)),
+      String(sum(s => s.late)),
+      String(sum(s => s.present + s.late)),
+      String(sum(s => s.absent)),
+      String(sum(s => s.leave)),
+      String(sum(s => s.holiday)),
+      String(sum(s => s.weekOff)),
+      hm(sum(s => s.minutes)),
+      hm(sum(s => s.permissionMinutes)),
+      hm(sum(s => s.creditedMinutes)),
+      '', '',
+    ]);
+  }
+
   autoTable(doc, {
     head: [[
       'Employee', 'ID', 'Present', 'Late', 'Present + Late', 'Absent', 'Leave', 'Holiday', 'Week Off',

@@ -106,6 +106,17 @@ export interface SummaryReportResult {
     minutes_worked: number;
     permission_minutes: number;
     minutes_credited: number;
+    /**
+     * The day counts, added up over EVERY employee in scope.
+     *
+     * Deliberately not derived from `summary`: that array holds one PAGE when
+     * the caller paginates, and a page-wise sum presented as the company total
+     * is wrong by however many pages follow it.
+     */
+    days_present: number;
+    days_late: number;
+    days_absent: number;
+    overtime_minutes: number;
   };
 }
 
@@ -336,7 +347,14 @@ export async function computeSummaryReport(params: SummaryReportParams): Promise
   });
 
   const [totalsRow, permissionTotalRow, expectedTotalRow] = await Promise.all([
-    queryOne<{ minutes_worked: number | null; minutes_credited: number | null }>(
+    queryOne<{
+      minutes_worked: number | null;
+      minutes_credited: number | null;
+      days_present: number | null;
+      days_late: number | null;
+      days_absent: number | null;
+      overtime_minutes: number | null;
+    }>(
       `SELECT
          COALESCE(SUM(a.total_minutes), 0) AS minutes_worked,
          COALESCE(SUM(
@@ -347,7 +365,13 @@ export async function computeSummaryReport(params: SummaryReportParams): Promise
                     GREATEST(a.total_minutes, ${dayRequiredMinutesSelect('a.employee_id', 'a.work_date')})
                   )
            END
-         ), 0) AS minutes_credited
+         ), 0) AS minutes_credited,
+         COALESCE(SUM(CASE WHEN a.status = 'present' THEN 1 ELSE 0 END), 0) AS days_present,
+         COALESCE(SUM(CASE WHEN a.status = 'late'    THEN 1 ELSE 0 END), 0) AS days_late,
+         COALESCE(SUM(CASE WHEN a.status = 'absent'  THEN 1 ELSE 0 END), 0) AS days_absent,
+         COALESCE(SUM(GREATEST(0,
+           COALESCE(a.total_minutes, 0) - ${OVERTIME_AFTER_MINUTES}
+         )), 0) AS overtime_minutes
        FROM employees e
        LEFT JOIN attendance a
          ON a.employee_id = e.id
@@ -400,6 +424,10 @@ export async function computeSummaryReport(params: SummaryReportParams): Promise
       minutes_worked: Number(totalsRow?.minutes_worked ?? 0),
       permission_minutes: Number(permissionTotalRow?.minutes ?? 0),
       minutes_credited: Number(totalsRow?.minutes_credited ?? 0),
+      days_present: Number(totalsRow?.days_present ?? 0),
+      days_late: Number(totalsRow?.days_late ?? 0),
+      days_absent: Number(totalsRow?.days_absent ?? 0),
+      overtime_minutes: Number(totalsRow?.overtime_minutes ?? 0),
     },
   };
 }

@@ -280,7 +280,11 @@ async function main() {
     // The colleague who never clocks out is now slightly ahead rather than level,
     // which is the unavoidable benefit of the doubt for an unrecorded break.
     const a2 = (await buildHoursLedger({ employeeId: f.onTarget, fromDate: FROM, toDate: TO }))!;
-    eq('full-day colleague now has overtime', a2.totals.overtime_minutes, 22 * 60);
+    // Overtime is measured past a flat nine hours for EVERYONE, not past this
+    // employee's own requirement - which the unpaid-break policy just lowered to
+    // eight. They work 09:00-18:00, exactly the overtime line, so a policy that
+    // changes what is REQUIRED of them cannot conjure overtime they never worked.
+    eq('the break policy does not invent overtime', a2.totals.overtime_minutes, 0);
     check('…and is ahead on the month, not short',
       a2.totals.net_minutes > 0,
       `net ${a2.totals.net_minutes}, daily shortfall ${a2.totals.shortage_minutes}`);

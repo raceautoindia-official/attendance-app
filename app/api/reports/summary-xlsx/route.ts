@@ -100,6 +100,11 @@ export async function GET(request: NextRequest) {
     ['Employees', totals.employees, 'With a shift assigned', totals.employees_with_shift],
     ['Expected Hours', hm(totals.expected_minutes), 'Worked Hours', hm(totals.minutes_worked)],
     ['Permission Hours', hm(totals.permission_minutes), 'Credited Hours', hm(totals.minutes_credited)],
+    // Everybody added together, so the file answers "and overall?" without the
+    // reader selecting a column and squinting at Excel's status bar.
+    ['Present (days)', totals.days_present, 'Late (days)', totals.days_late,
+     'Present + Late', totals.days_present + totals.days_late],
+    ['Absent (days)', totals.days_absent, 'Overtime Hours', hm(totals.overtime_minutes)],
     [],
   ];
 

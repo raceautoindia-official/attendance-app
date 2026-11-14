@@ -4,7 +4,7 @@ import { toYmd } from '@/lib/date';
 import { istToday } from '@/lib/chat/dates';
 import { lockFor, type MonthClosure } from '@/lib/monthClose';
 import { policyTimelineFor, type Policy } from '@/lib/policy';
-import { breakMinutes, lateMinutes } from '@/lib/attendance';
+import { breakMinutes, lateMinutes, overtimeMinutes } from '@/lib/attendance';
 import { hasOnDutyColumn, hasPermissionTable, timeOffOnly } from '@/lib/permissions';
 import { hasFirstClockInColumn } from '@/lib/employeeDetails';
 import { companyHolidays, parseWorkingDays } from '@/lib/workingDays';
@@ -557,9 +557,24 @@ export async function buildHoursLedger(params: LedgerParams): Promise<HoursLedge
     const shortage = required == null || required === 0
       ? 0
       : Math.max(0, required - credited);
-    const overtime = required == null || required === 0
-      ? Math.max(0, worked ?? 0)
-      : Math.max(0, credited - required);
+    // ONE overtime rule for the whole app: minutes past OVERTIME_AFTER_MINUTES,
+    // the same flat line for everybody. lib/constants.ts explains why it is not
+    // each person's own shift length.
+    //
+    // This used to measure against `required`, so the payroll pack, the hours
+    // ledger and the month-end summary answered a DIFFERENT number from the
+    // attendance page, the monthly report and the phone, which all use the flat
+    // line. On an 8-hour shift, 9h 30m worked was 1h 30m of overtime here and
+    // 30m everywhere else - same person, same day, two answers.
+    //
+    // The null branch was worse. An employee with no shift assigned has
+    // `required == null`, and it counted their ENTIRE day as overtime: 9h 30m
+    // worked, 9h 30m of overtime. The reports already show "No shift" against
+    // real people, so that was reaching payroll.
+    //
+    // Measured on `worked`, never on `credited`: credited includes approved
+    // permission, and permission covers an absence - it does not earn overtime.
+    const overtime = overtimeMinutes(worked);
 
     let late: number | null = null;
     if (row?.clock_in_utc && shifts.length) {
