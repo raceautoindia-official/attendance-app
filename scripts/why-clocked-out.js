@@ -82,6 +82,21 @@ function hm(min) {
   return Math.floor(n / 60) + 'h ' + String(n % 60).padStart(2, '0') + 'm';
 }
 
+/**
+ * An ISO instant from audit_log, as the wall clock in Chennai.
+ *
+ * Done by arithmetic on the epoch rather than by toLocaleString, so the
+ * answer does not depend on the server's own timezone - this runs on a box
+ * set to UTC and is read by people in IST.
+ */
+function istOf(iso) {
+  if (!iso) return '?';
+  const ms = new Date(iso).getTime();
+  if (Number.isNaN(ms)) return String(iso);
+  const d = new Date(ms + 5.5 * 3600 * 1000);
+  return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0');
+}
+
 async function one(c, sql, params) {
   const [rows] = await c.query(sql, params || []);
   return rows[0] || null;
@@ -218,7 +233,11 @@ async function main() {
   grid([
     ['  First clock-in', att.first_in || '-'],
     ['  Clock-out', att.out_ist || 'still open'],
-    ['  Credited', hm(att.total_minutes)],
+    ['  Credited so far', att.total_minutes === null
+      ? (Number(att.banked_minutes) > 0
+          ? hm(att.banked_minutes) + ' banked, current session still running'
+          : 'still running')
+      : hm(att.total_minutes)],
     ['  Status', att.status || '-'],
     ['  Sessions that day', att.session_count === null ? 'not recorded' : String(att.session_count)],
     ['  Banked from earlier sessions', att.banked_minutes === null ? 'not recorded' : hm(att.banked_minutes)],
@@ -255,11 +274,35 @@ async function main() {
       const d = detailsOf(ev);
       const who = ev.by_name ? ev.by_name + ' (' + ev.by_emp + ')' : null;
       console.log('  ' + ev.at_ist + '  ' + explain(ev.action, d, who));
+      if (ev.action === 'geofence_auto_clockout') {
+        // The figures the decision was made on. Without them the entry says
+        // what happened and leaves every question about whether it should
+        // have happened unanswered.
+        console.log('            credited up to ' + istOf(d.last_confirmed_inside) +
+          ', after ' + (d.minutes_unconfirmed === undefined ? '?' : d.minutes_unconfirmed) +
+          ' min with no reading inside; fence ' + (d.fence_radius_m === undefined ? '?' : d.fence_radius_m) +
+          'm, grace ' + (d.presence_grace_min === undefined ? '?' : d.presence_grace_min) + ' min');
+      }
     }
   }
 
   // -- 3. where the phone said they were -------------------------------------
-  head('3. Where the phone said they were, around the clock-out');
+  // A day that was auto-closed and then clocked into again has NO clock-out
+  // left to look around - the second session overwrote it, which is exactly
+  // the case this script was written for and exactly the case it first could
+  // not show. The watchdog's own audit entry still carries the instant it
+  // stopped crediting, and that is the moment worth looking at.
+  const geoEvent = events.filter(e => e.action === 'geofence_auto_clockout').pop();
+  const geoDetails = geoEvent ? detailsOf(geoEvent) : {};
+  let anchorSql = att.clock_out_sql;
+  let anchorLabel = 'the clock-out';
+  if (geoDetails.last_confirmed_inside) {
+    const iso = String(geoDetails.last_confirmed_inside);
+    anchorSql = iso.slice(0, 10) + ' ' + iso.slice(11, 19);
+    anchorLabel = 'the moment the watchdog stopped crediting, ' + istOf(iso);
+  }
+
+  head('3. Where the phone said they were, around ' + anchorLabel);
   const site = await one(
     c,
     'SELECT l.name, l.latitude, l.longitude, l.radius_meters, es.geofencing_enabled' +
@@ -285,8 +328,9 @@ async function main() {
     );
     console.log('  Location readings that day: ' + Number(dayCount.n));
 
-    if (!att.clock_out_sql) {
-      console.log('  (Still clocked in, so there is no clock-out to look around.)');
+    if (!anchorSql) {
+      console.log('  (Still clocked in, and nothing has ended this day, so there is');
+      console.log('  no moment to look around.)');
     } else if (Number(dayCount.n) === 0) {
       console.log('');
       console.log('  NOT ONE READING ALL DAY. Nothing could have proved they left the site,');
@@ -308,13 +352,13 @@ async function main() {
           '   AND tracked_at_utc BETWEEN DATE_SUB(?, INTERVAL 30 MINUTE)' +
           '                          AND DATE_ADD(?, INTERVAL 30 MINUTE)' +
           ' ORDER BY tracked_at_utc ASC',
-        [site.latitude, site.latitude, site.longitude, att.clock_out_sql,
-         emp.id, att.clock_out_sql, att.clock_out_sql],
+        [site.latitude, site.latitude, site.longitude, anchorSql,
+         emp.id, anchorSql, anchorSql],
       );
 
       if (!near.length) {
         console.log('');
-        console.log('  No readings at all in the hour around the clock-out, though there were');
+        console.log('  No readings at all in the hour around that moment, though there were');
         console.log('  readings earlier. The phone had stopped reporting by then.');
       } else {
         const fence = Number(site.radius_meters) || 0;
@@ -329,7 +373,7 @@ async function main() {
               const verdict = m > fence + acc ? 'OUTSIDE' : (m <= fence ? 'inside' : 'unclear');
               return [
                 '  ' + r.at_ist, m + ' m', acc + ' m', verdict,
-                Number(r.secs_from_out) < 60 ? '<-- clocked out about here' : '',
+                Number(r.secs_from_out) < 60 ? '<-- here' : '',
               ];
             }),
           ),
